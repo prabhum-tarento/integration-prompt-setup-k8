@@ -1,0 +1,528 @@
+---
+description: 'Azure Cosmos DB data access for this inventory integration service: repository pattern, ETag concurrency, retry, and query rules using the native Microsoft.Azure.Cosmos SDK.'
+applyTo: '**/Infrastructure/**/*.cs'
+---
+
+# Azure Cosmos DB Data Access
+
+Cosmos DB is this service's primary data store, accessed through the native
+`Microsoft.Azure.Cosmos` SDK — not the EF Core Cosmos provider, which lacks
+full Patch API and ETag concurrency support that §9 and §10 below depend on.
+Solution layering (where this code lives) is defined in
+[dotnet-architecture-good-practices.instructions.md](dotnet-architecture-good-practices.instructions.md);
+this file only covers Cosmos-specific rules.
+
+**Contents:** 1 [Config & secrets](#1-configuration--secrets) · 2 [Client
+registration](#2-cosmosclient-registration--retry-policy) · 3 [Entity
+guidelines](#3-domain-entity-guidelines) · 4 [Partition keys](#4-partition-key-design) ·
+5 [Repository pattern](#5-repository-pattern) · 6 [Query options &
+cross-partition guardrail](#6-query-options--cross-partition-guardrail) ·
+7 [Pagination](#7-pagination) · 8 [Filtering, ordering, projection](#8-filtering-ordering-projection) ·
+9 [Concurrency & ETag](#9-concurrency--etag-required-reading) · 10 [Patch
+operations](#10-patch-operations) · 11 [API boundary rules](#11-api-boundary-rules) ·
+12 [DI lifetimes](#12-dependency-injection-lifetimes) · 13 [Testing](#13-testing-requirements) ·
+14 [Security](#14-security) · 15 [Performance & cost](#15-performance--cost)
+
+## AI code generation rules (read first)
+
+When generating Cosmos DB code:
+
+1. Use the native `Microsoft.Azure.Cosmos` SDK, async methods only, with
+   `CancellationToken` forwarded.
+2. Go through the repository abstraction (§5) — never inject `CosmosClient`
+   or `Container` into a controller or Application service.
+3. Every write that mutates an existing item passes its ETag (§9). If you
+   can't produce an ETag for a write path, stop and flag it rather than
+   silently doing a last-write-wins replace.
+4. Every query supplies a partition key unless the caller explicitly opts
+   into a cross-partition scan (§6).
+5. Keep documents well under the 2 MB hard limit (§3); don't embed
+   unbounded child collections.
+6. Generate the matching repository interface method and its test.
+
+## 1. Configuration & Secrets
+
+Cosmos settings are never stored in source code.
+
+```json
+{
+  "CosmosDb": {
+    "AccountEndpoint": "",
+    "DatabaseName": "InventoryDb",
+    "ContainerName": "InventoryEvents",
+    "PartitionKeyPath": "/partitionKey"
+  }
+}
+```
+
+* **Local development**: the Cosmos DB Emulator, authenticated with its
+  well-known fixed key (never a production key), loaded from user-secrets —
+  not `appsettings.json`.
+* **Every other environment**: `DefaultAzureCredential` resolving to AKS
+  Workload Identity (see
+  [kubernetes-deployment-best-practices.instructions.md](kubernetes-deployment-best-practices.instructions.md)).
+  There is no account-key configuration entry outside local development —
+  if you find one, it's a bug, not a style choice.
+* Never commit Cosmos keys, connection strings, or tokens.
+
+## 2. CosmosClient Registration & Retry Policy
+
+Register `CosmosClient` as a singleton, configured for Managed Identity and
+RU-throttling retry:
+
+```csharp
+builder.Services.AddSingleton(sp =>
+{
+    var config = sp.GetRequiredService<IConfiguration>();
+    var env = sp.GetRequiredService<IHostEnvironment>();
+    var options = new CosmosClientOptions
+    {
+        ConsistencyLevel = ConsistencyLevel.Session,
+        MaxRetryAttemptsOnRateLimitedRequests = 9,
+        MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    // Local dev only: the Cosmos DB Emulator's well-known fixed key, read
+    // from user-secrets. Every other environment authenticates with
+    // DefaultAzureCredential (AKS Workload Identity) — there is no key
+    // configuration entry once you leave IsDevelopment().
+    return env.IsDevelopment()
+        ? new CosmosClient(
+            config["CosmosDb:AccountEndpoint"],
+            config["CosmosDb:EmulatorKey"], // user-secrets only, never appsettings.json
+            options)
+        : new CosmosClient(
+            config["CosmosDb:AccountEndpoint"],
+            new DefaultAzureCredential(),
+            options);
+});
+```
+
+* **Consistency level**: Session (default for this service) — reads within
+  a session see their own writes, without paying for Strong consistency's
+  latency/cost. Do not lower to Eventual for any path that reads back a
+  quantity it just wrote (e.g., a reservation confirmation).
+* **`SerializerOptions.PropertyNamingPolicy = CamelCase` is required, not
+  optional.** Every entity in §3 is declared with PascalCase C# properties
+  (`PartitionKey`, `WarehouseId`, …), but §1's config declares
+  `PartitionKeyPath: "/partitionKey"` — lowercase. The Cosmos SDK's default
+  serializer writes the property name exactly as declared unless this
+  option is set; without it, `PartitionKey` would serialize as `"PartitionKey"`
+  in the stored JSON and silently miss the container's actual partition key
+  path. Setting this once here, on the single registered `CosmosClient`,
+  makes every entity's camelCase JSON shape consistent with §1's config
+  without needing a per-property `[JsonProperty]` override — the only
+  property that keeps an explicit override is `ETag`, because Cosmos's
+  system property is `_etag`, a name the naming policy doesn't produce.
+* Create the client once; never per-request or inside a controller.
+* The retry options above absorb transient `429` throttling on the Cosmos
+  call itself. They are deliberately separate from the Polly pipeline in
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §3,
+  which only covers Service Bus, Blob Storage, and outbound HTTP calls —
+  and from the ETag concurrency retry in
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §2,
+  which handles `412 PreconditionFailed`. Three distinct failure classes,
+  three distinct mechanisms; don't collapse them into one retry policy.
+
+Register `Container` as its own singleton, resolved once from the client —
+this is what the repository code in §9/§10 injects, not `CosmosClient`
+directly:
+
+```csharp
+builder.Services.AddSingleton(sp =>
+{
+    var client = sp.GetRequiredService<CosmosClient>();
+    var config = sp.GetRequiredService<IConfiguration>();
+
+    return client.GetContainer(
+        config["CosmosDb:DatabaseName"],
+        config["CosmosDb:ContainerName"]);
+});
+```
+
+**Never call `CreateDatabaseIfNotExistsAsync`/`CreateContainerIfNotExistsAsync`
+at application startup.** §14 requires the service's identity to hold only
+least-privilege *data-plane* RBAC — those calls need *control-plane*
+permissions the service's identity deliberately doesn't have. Database and
+container creation is an infrastructure-provisioning concern (Bicep/Terraform
+in CI/CD), not application startup code; if `GetContainer` is pointed at a
+container that doesn't exist yet, that's a deployment ordering bug to fix
+in the pipeline, not something the app should paper over by provisioning it
+itself.
+
+## 3. Domain Entity Guidelines
+
+Every Cosmos entity:
+
+* Has an `Id` (string) and a partition key property.
+* Is JSON-serializable with no circular references.
+* Stays well under the **2 MB hard document-size limit** — don't embed
+  unbounded child collections; reference large or growing sub-collections
+  as separate items instead.
+* Carries the ETag Cosmos assigns (see §9) — don't strip it in mapping.
+
+```csharp
+public sealed class InventoryEvent
+{
+    public string Id { get; init; } = default!;
+    public string WarehouseId { get; init; } = default!;
+    public string Sku { get; init; } = default!;
+
+    // Composite partition key per §4 — kept as its own property (not
+    // derived at query time) so every write and query uses the identical
+    // value. Populate as $"{WarehouseId}:{Sku}" when constructing the entity.
+    public string PartitionKey { get; init; } = default!;
+
+    public int OnHandQuantity { get; set; }
+    public DateTime CreatedUtc { get; init; }
+    public DateTime ModifiedUtc { get; set; }
+
+    [JsonProperty("_etag")]
+    public string? ETag { get; init; }
+}
+```
+
+`Id` is not a random GUID — see §5's `CreateAsync` for why it must be
+deterministic.
+
+## 4. Partition Key Design
+
+Partition keys must distribute data evenly, support the service's common
+query pattern (lookup by SKU/warehouse), and avoid hot partitions.
+
+* **This service's partition key is the composite `WarehouseId:Sku`**,
+  stored on `InventoryEvent.PartitionKey` (§3) and matching the Service Bus
+  `SessionId` convention in
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §1 —
+  the same key that groups messages for ordering is what partitions the
+  data, so one warehouse/SKU's writes are both ordered and co-located.
+* Avoid a bare `Sku` or bare `WarehouseId` alone for this entity: a single
+  large warehouse would otherwise concentrate all of its SKUs' write
+  traffic on one logical partition.
+* Avoid `Status`, `Country`, or any low-cardinality/boolean field — these
+  create hot partitions under concurrent inventory updates.
+
+## 5. Repository Pattern
+
+Controllers and Application services never reference `CosmosClient` or
+`Container` directly — only the repository interface.
+
+```csharp
+public interface IInventoryEventRepository
+{
+    Task<InventoryEvent?> GetAsync(
+        string id, string partitionKey, CancellationToken cancellationToken = default);
+
+    Task<InventoryEvent> CreateAsync(
+        InventoryEvent entity, CancellationToken cancellationToken = default);
+
+    Task<InventoryEvent> ReplaceAsync(
+        InventoryEvent entity, string expectedETag, CancellationToken cancellationToken = default);
+
+    Task<InventoryEvent> PatchAsync(
+        string id, string partitionKey, string expectedETag,
+        IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default);
+
+    Task DeleteAsync(
+        string id, string partitionKey, CancellationToken cancellationToken = default);
+
+    Task<PagedResult<InventoryEvent>> GetPagedAsync(
+        QueryOptions<InventoryEvent> options, CancellationToken cancellationToken = default);
+
+    Task<PagedResult<TResult>> QueryAsync<TResult>(
+        QueryOptions<InventoryEvent, TResult> options, CancellationToken cancellationToken = default);
+}
+```
+
+Note `expectedETag` is a required parameter on every mutating call, not an
+optional one — see §9 for why.
+
+**`CreateAsync` and duplicate delivery.** This service's Cosmos writes are
+driven by an at-least-once Kafka → Service Bus pipeline (see
+[integration-resiliency.instructions.md](integration-resiliency.instructions.md)),
+so a redelivered message can call `CreateAsync` twice for the same logical
+event. Make `Id` **deterministic** — derived from the source event (e.g.
+the Kafka message key, or a stable `EventId` in the payload), never
+`Guid.NewGuid()` — so a duplicate `CreateAsync` call targets the same item
+ID both times. Cosmos then rejects the second attempt with `409 Conflict`
+(distinct from the `412 PreconditionFailed` concurrency conflict in §9);
+the repository implementation catches that specific case and treats it as
+"already applied" — return the existing item rather than throwing — so a
+redelivered create is a no-op, not a processing failure:
+
+```csharp
+try
+{
+    var response = await container.CreateItemAsync(entity,
+        new PartitionKey(entity.PartitionKey), cancellationToken: cancellationToken);
+    return response.Resource;
+}
+catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
+{
+    return await GetAsync(entity.Id, entity.PartitionKey, cancellationToken)
+        ?? throw new InvalidOperationException(
+            $"Create conflicted on id {entity.Id} but the item could not be re-read.");
+}
+```
+
+## 6. Query Options & Cross-Partition Guardrail
+
+```csharp
+public class QueryOptions<T>
+{
+    public Expression<Func<T, bool>>? Predicate { get; set; }
+    public Expression<Func<T, object>>? OrderBy { get; set; }
+    public bool OrderDescending { get; set; }
+    public int PageSize { get; set; } = 20;
+    public string? ContinuationToken { get; set; }
+    public string? PartitionKey { get; set; }
+    public bool AllowCrossPartitionScan { get; set; } = false;
+}
+```
+
+For a projection query (§8) that selects a DTO instead of the full entity,
+use the two-generic variant — same filtering/paging/guardrail fields, plus
+a required `Selector`:
+
+```csharp
+public class QueryOptions<T, TResult>
+{
+    public Expression<Func<T, bool>>? Predicate { get; set; }
+    public Expression<Func<T, TResult>> Selector { get; set; } = default!;
+    public Expression<Func<T, object>>? OrderBy { get; set; }
+    public bool OrderDescending { get; set; }
+    public int PageSize { get; set; } = 20;
+    public string? ContinuationToken { get; set; }
+    public string? PartitionKey { get; set; }
+    public bool AllowCrossPartitionScan { get; set; } = false;
+}
+```
+
+The same guardrail check in this section applies to both variants — the
+repository's projection query method validates `PartitionKey`/
+`AllowCrossPartitionScan` exactly like the entity query method does.
+
+The repository implementation **must throw** if `PartitionKey` is null and
+`AllowCrossPartitionScan` is `false` — this is what makes §7's "minimize
+cross-partition queries" rule real instead of aspirational:
+
+```csharp
+if (options.PartitionKey is null && !options.AllowCrossPartitionScan)
+{
+    throw new ArgumentException(
+        $"{nameof(options.PartitionKey)} is required unless " +
+        $"{nameof(options.AllowCrossPartitionScan)} is explicitly set to true.",
+        nameof(options));
+}
+```
+
+Put this check at the top of the repository's query method, before
+building the Cosmos query — a caller that genuinely needs a
+cross-partition scan sets the flag explicitly, which makes the RU-cost
+tradeoff a visible decision in the calling code, not an accident.
+
+## 7. Pagination
+
+Large queries always paginate using Cosmos continuation tokens, never
+in-memory `Skip`/`Take` over a full result set.
+
+```csharp
+public class PagedResult<T>
+{
+    public IReadOnlyList<T> Items { get; init; } = [];
+    public string? ContinuationToken { get; init; }
+    public int Count { get; init; }
+}
+```
+
+## 8. Filtering, Ordering, Projection
+
+Build queries from strongly-typed expressions — never string-concatenate
+SQL. When you have the full partition key (`WarehouseId:Sku`), supply it —
+this is the common case, a point-ish lookup within one partition:
+
+```csharp
+var options = new QueryOptions<InventoryEvent>
+{
+    Predicate = x => x.Sku == sku && x.WarehouseId == warehouseId,
+    OrderBy = x => x.CreatedUtc,
+    OrderDescending = true,
+    PartitionKey = $"{warehouseId}:{sku}",
+};
+```
+
+"List every SKU in a warehouse" filters on `WarehouseId` alone, which is
+**not** the full partition key (§4) — this is a genuine cross-partition
+scan, so it must set `AllowCrossPartitionScan` explicitly rather than
+guessing a partial partition key:
+
+```csharp
+var options = new QueryOptions<InventoryEvent>
+{
+    Predicate = x => x.WarehouseId == warehouseId,
+    OrderBy = x => x.CreatedUtc,
+    OrderDescending = true,
+    AllowCrossPartitionScan = true, // querying by WarehouseId alone, not the full WarehouseId:Sku key
+};
+```
+
+Project to a DTO instead of selecting full documents when only a few fields
+are needed — lower RU cost, smaller payload:
+
+```csharp
+var options = new QueryOptions<InventoryEvent, InventoryEventSummary>
+{
+    Selector = x => new InventoryEventSummary { Id = x.Id, Sku = x.Sku },
+    Predicate = x => x.Sku == sku && x.WarehouseId == warehouseId,
+    PartitionKey = $"{warehouseId}:{sku}",
+};
+```
+
+## 9. Concurrency & ETag (required reading)
+
+Every entity that supports quantity mutation **must** use ETag-based
+optimistic concurrency — this is the mechanism that prevents overselling
+under concurrent updates, and every other doc in this repo that mentions
+Cosmos concurrency points here.
+
+```csharp
+public async Task<InventoryEvent> ReplaceAsync(
+    InventoryEvent entity, string expectedETag, CancellationToken cancellationToken = default)
+{
+    try
+    {
+        var response = await container.ReplaceItemAsync(
+            entity, entity.Id,
+            new PartitionKey(entity.PartitionKey),
+            new ItemRequestOptions { IfMatchEtag = expectedETag },
+            cancellationToken);
+
+        return response.Resource;
+    }
+    catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.PreconditionFailed)
+    {
+        throw new ConcurrencyException(entity.Id, expectedETag);
+    }
+}
+```
+
+* `ConcurrencyException` is caught by the global exception handler in
+  [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md) and
+  mapped to `409 Conflict`.
+* For a message-driven write (Kafka/Service Bus consumer, not an HTTP
+  request), a `409`/`PreconditionFailed` means re-read the current item and
+  re-apply the operation against the fresh ETag — the bounded
+  re-read-and-reapply loop that does this lives in
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §2,
+  not here. Do not treat it as a fatal error for that message.
+* Never implement "last write wins" for any field that represents a
+  quantity, reservation, or allocation.
+
+## 10. Patch Operations
+
+Use the Patch API for partial updates instead of a full `ReplaceAsync` —
+lower RU cost and a smaller blast radius for concurrent writes.
+
+```csharp
+await repository.PatchAsync(
+    inventoryEvent.Id,
+    inventoryEvent.PartitionKey,
+    inventoryEvent.ETag!,
+    [
+        PatchOperation.Increment("/onHandQuantity", -1),
+        PatchOperation.Set("/modifiedUtc", DateTime.UtcNow),
+    ],
+    cancellationToken);
+```
+
+* Supported operations: Add, Set, Replace, Remove, Increment.
+* **Hard limit: 10 operations per patch request.** The repository
+  implementation validates this and throws `ArgumentException` before
+  calling Cosmos, rather than letting a `BadRequestException` surface at
+  runtime — if a caller needs more than 10 field changes, that's a signal
+  the entity should be split or the change modeled as a full replace.
+* Always pass `expectedETag` via `PatchItemRequestOptions.IfMatchEtag` —
+  the same rule as §9 applies to patches.
+
+Repository implementation — validate the operation count before calling
+Cosmos, and pass the ETag the same way `ReplaceAsync` does in §9:
+
+```csharp
+public async Task<InventoryEvent> PatchAsync(
+    string id, string partitionKey, string expectedETag,
+    IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default)
+{
+    if (operations.Count > 10)
+    {
+        throw new ArgumentException(
+            "Cosmos DB Patch supports at most 10 operations per request.",
+            nameof(operations));
+    }
+
+    try
+    {
+        var response = await container.PatchItemAsync<InventoryEvent>(
+            id,
+            new PartitionKey(partitionKey),
+            operations,
+            new PatchItemRequestOptions { IfMatchEtag = expectedETag },
+            cancellationToken);
+
+        return response.Resource;
+    }
+    catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.PreconditionFailed)
+    {
+        throw new ConcurrencyException(id, expectedETag);
+    }
+}
+```
+
+## 11. API Boundary Rules
+
+Controllers and Application services:
+
+* Receive DTOs, validate input, call an Application service.
+* Never build Cosmos queries, access `CosmosClient`/`Container`, or contain
+  business rules — those live in Domain/Infrastructure per
+  [dotnet-architecture-good-practices.instructions.md](dotnet-architecture-good-practices.instructions.md).
+
+## 12. Dependency Injection Lifetimes
+
+| Component | Lifetime |
+|---|---|
+| `CosmosClient` | Singleton |
+| `Container` | Singleton (resolved once from `CosmosClient`, §2) |
+| Repository | Scoped |
+| Application service | Scoped |
+
+## 13. Testing Requirements
+
+* **Unit tests**: mock the repository interface; test Application services
+  and Domain rules in isolation.
+* **Integration tests**: run against the Cosmos DB Emulator via
+  Testcontainers, covering concurrency conflicts (§9), patch operation
+  limits (§10), and cross-partition guardrail behavior (§6) — see
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md)
+  for the shared test-project setup.
+
+## 14. Security
+
+* `DefaultAzureCredential` / Managed Identity in every non-local
+  environment (§1); least-privilege data-plane RBAC role, not the account
+  master key, for the service's identity.
+* Never log secrets, full document bodies containing PII, or raw Cosmos
+  exception messages to the client — see the exception handler in
+  [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md).
+
+## 15. Performance & Cost
+
+Optimize partition key design (§4), indexing policy (exclude paths that are
+never queried), projection (§8), and pagination (§7). Monitor RU
+consumption, `429` rate, and P99 latency per operation — a rising `429`
+rate on a specific partition key value is a hot-partition signal, not
+something to solve by increasing `MaxRetryAttemptsOnRateLimitedRequests`
+further.
