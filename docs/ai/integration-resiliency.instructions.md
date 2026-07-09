@@ -18,7 +18,8 @@ all of it lives in `Infrastructure`.
 
 ```
 Kafka topic (inventory events)
-    │  KafkaConsumerHostedService (Confluent.Kafka)
+    │  ConsumerHostedService<TValue> subclasses (Confluent.Kafka) - one per
+    │  wire format: KafkaConsumerHostedService (JSON), InventoryStateChangedConsumerHostedService (Avro)
     ▼
 Azure Service Bus queue (durable relay)
     │  ServiceBusConsumerHostedService (Azure.Messaging.ServiceBus)
@@ -35,12 +36,21 @@ every hop, log line, and outbound call this flow makes.
 
 ## 1. Kafka consumer → Service Bus relay
 
-- `KafkaConsumerHostedService : BackgroundService` owns a single long-lived
-  `IConsumer<string, string>` (Confluent.Kafka) per hosted-service instance.
-  Kafka's consumer-group protocol assigns it a subset of the topic's
-  partitions automatically on join/rebalance — the service does not manage
-  partition assignment itself and never constructs one consumer object per
-  partition.
+- Every Kafka consumer is a concrete subclass of the shared
+  `ConsumerHostedService<TValue> : BackgroundService`, which owns a single
+  long-lived `IConsumer<string, TValue>` (Confluent.Kafka) per hosted-service
+  instance — Kafka's consumer-group protocol assigns it a subset of the
+  topic's partitions automatically on join/rebalance, so the service does
+  not manage partition assignment itself and never constructs one consumer
+  object per partition. `TValue` is already deserialized (a JSON or Avro
+  value deserializer wired in by the subclass's constructor); a subclass
+  only implements how one `TValue` maps to a Service Bus session id,
+  deterministic message id, and body — see `KafkaConsumerHostedService`
+  (JSON contract) and `InventoryStateChangedConsumerHostedService` (Avro,
+  via Confluent Schema Registry) for the two consumers this repo currently
+  runs. Each consumer can be turned off independently via its own
+  `Enabled` configuration key (checked by the base class at startup) without
+  removing its configuration section.
 - On each message: deserialize, resolve or generate the correlation ID (see
   §4), map to the internal event contract, and publish to the Service Bus
   queue — do not write to Cosmos DB directly from the Kafka consumer. The
@@ -61,10 +71,36 @@ every hop, log line, and outbound call this flow makes.
   that partitions the data they write to. This groups every message for
   the same inventory aggregate into one Service Bus session — see §2 for
   why that matters for ordering, not just dedup.
-- Commit the Kafka offset only after the Service Bus publish succeeds
+- **Single poll loop, many concurrent workers.** `Consume`/`Commit` on one
+  `IConsumer` are meant to be driven from a single thread, so the poll loop
+  itself stays single-threaded — but polling is decoupled from the Service
+  Bus publish step by a bounded `System.Threading.Channels.Channel`
+  between them: the poll loop writes each consumed message to the channel,
+  and `ConsumerOptions.WorkerCount` concurrent workers drain it and
+  publish. This is what lets one consumer instance sustain a
+  high-throughput topic (tens of thousands of messages/second) without
+  needing an equally large number of Kafka partitions to get equivalent
+  parallelism — see §6 for when this pattern is worth reaching for over
+  more partitions/pods, and how to size `WorkerCount`/`ChannelCapacity`.
+- **Commit the Kafka offset only after the Service Bus publish succeeds**
   (`EnableAutoCommit = false`, manual `Commit` after a confirmed publish).
   A crash between "consumed" and "published" must replay the message, not
-  silently drop it.
+  silently drop it. With multiple concurrent workers, "after it succeeds"
+  is no longer just "commit this one message's offset": workers can finish
+  out of order, so a later offset can complete before an earlier one on
+  the same partition. `PartitionOffsetCommitTracker` (used by
+  `ConsumerHostedService<TValue>`) tracks each partition's contiguous
+  low-water mark and only commits up to the highest offset that's safe —
+  i.e. every offset below it has actually completed — never a bare
+  `consumer.Commit(result)` per message once more than one worker is in
+  play. **Known limitation**: this does not handle a partition being
+  revoked and reassigned mid-flight (no
+  `SetPartitionsRevokedHandler`/`SetPartitionsAssignedHandler` yet) — a
+  rebalance while messages are in flight can hand a duplicate delivery to
+  whichever consumer picks the partition up next. The existing downstream
+  dedupe (§2) already has to tolerate redelivery for other reasons, so this
+  doesn't break correctness, but it's a known gap, not something this
+  design solves.
 - **Poison messages on the Kafka side**: a message that fails to
   deserialize will never reach the "publish to Service Bus" step, so the
   offset-after-publish rule above would otherwise replay it forever and
@@ -72,10 +108,13 @@ every hop, log line, and outbound call this flow makes.
   failures do not go through the commit-after-publish path — catch them
   explicitly, publish the raw payload plus the error to a
   `inventory-events-dlq` Kafka topic (or, if none exists yet, log at
-  `Critical` with the raw payload attached and alert), **then** commit the
-  offset so the partition keeps moving. This is the Kafka-side equivalent
-  of §2's `DeadLetterMessageAsync` — a message this consumer cannot parse
-  is not a transient failure that redelivery will fix.
+  `Critical` with the raw payload attached and alert), **then** report the
+  offset to the same `PartitionOffsetCommitTracker` as a normal completion
+  — not a direct `consumer.Commit` — so it folds correctly into whatever
+  the partition's low-water mark already is instead of committing ahead of
+  still in-flight messages. This is the Kafka-side equivalent of §2's
+  `DeadLetterMessageAsync` — a message this consumer cannot parse is not a
+  transient failure that redelivery will fix.
 
 ## 2. Service Bus consumer
 
@@ -358,6 +397,74 @@ await Task.WhenAll(tasks);
   If you change `maxReplicaCount` in the Kubernetes doc, re-check this
   formula — the two numbers are coupled and must be updated together.
 
+### `Channel<T>` vs `SemaphoreSlim`/`Parallel.ForEachAsync`
+
+These solve different problems — reach for the right one instead of
+treating them as interchangeable concurrency knobs:
+
+- **`SemaphoreSlim`/`Parallel.ForEachAsync`** bound fan-out *within* one
+  already-dispatched unit of work — e.g. one Service Bus message expands
+  into many Cosmos writes (the example earlier in this section). The
+  caller has a known, small batch in hand and just needs to cap how much
+  of it runs at once.
+- **`System.Threading.Channels.Channel<T>`** decouples the *rate something
+  arrives* from the *rate something is processed*, with backpressure — a
+  bounded channel blocks the producer once full instead of buffering an
+  unbounded backlog in memory. Reach for it when a fast, cheap producer
+  (a Kafka poll loop) is paired with a slower, I/O-bound consumer (a
+  publish/write call), and you want several concurrent workers draining
+  one shared queue rather than processing strictly one item at a time.
+  `ConsumerHostedService<TValue>` (§1) is this repo's worked example:
+  bounded `Channel` between the poll loop and `WorkerCount` workers.
+
+**Default to horizontal scaling first.** More Kafka partitions and more
+KEDA-scaled pods is still the primary throughput lever — it's simpler to
+reason about and doesn't disturb per-partition offset ordering. Reach for
+an in-process `Channel` only when profiling shows the bottleneck is
+per-pod concurrency itself (the poll loop is starved waiting on a slow
+downstream call), not partition/pod count.
+
+```csharp
+var channel = Channel.CreateBounded<TItem>(new BoundedChannelOptions(capacity)
+{
+    FullMode = BoundedChannelFullMode.Wait, // backpressure, not an unbounded buffer
+    SingleWriter = true,                    // one producer (the poll loop)
+    SingleReader = false,                   // many concurrent workers
+});
+
+var workers = Enumerable.Range(0, workerCount)
+    .Select(_ => Task.Run(async () =>
+    {
+        await foreach (var item in channel.Reader.ReadAllAsync(CancellationToken.None))
+        {
+            await ProcessAsync(item); // the slow, I/O-bound step
+        }
+    }))
+    .ToArray();
+
+// producer: await channel.Writer.WriteAsync(item, stoppingToken) per item, then
+// channel.Writer.Complete() and await Task.WhenAll(workers) on shutdown.
+```
+
+**The pitfall this pattern introduces: out-of-order completion.** The
+moment more than one worker drains the same channel, items can finish in a
+different order than they arrived. Any commit/ack/sequence-advance tied to
+arrival order (a Kafka offset, a checkpoint, a "last processed" watermark)
+must NOT be issued by whichever worker happens to finish first — that can
+commit past an earlier item that's still in flight, and on a crash that
+item is never redelivered. Track a low-water mark per ordering key
+(per Kafka partition, per shard, whatever the ordering scope is) and only
+advance/commit it once every earlier item has completed, folding in
+early-arriving completions once the gap closes — see
+`PartitionOffsetCommitTracker` (§1) for the reference implementation.
+Sizing: pick `WorkerCount` from the target throughput and the downstream
+call's own latency (`workers ≈ throughput × avg_latency_seconds`) as a
+starting point, then load-test — the real ceiling is often the downstream
+service's own throughput unit (a Service Bus namespace, a Cosmos RU
+budget), not application-level concurrency, and `ChannelCapacity` should
+be large enough to absorb a burst without either blocking the poll loop
+constantly or growing unbounded.
+
 ## 7. Detailed logging
 
 Every message processed (Kafka consume, Service Bus receive/complete/
@@ -381,10 +488,11 @@ listener) rather than reporting through the Api's `/health/ready`, which
 [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md) owns
 and which cannot observe another Pod's internal state:
 
-- `KafkaConsumerHealthCheck`, on the **Kafka consumer Pod's**
-  `/health/ready`: unhealthy if the consumer's last successful poll exceeds
-  a configured staleness window (it doesn't need a message to process to
-  be healthy — an idle topic isn't a failure).
+- A `ConsumerHealthCheck` instance per Kafka consumer (one per `TValue`
+  subclass, each bound to that consumer's own `ConsumerHealthState`), on the
+  **Kafka consumer Pod's** `/health/ready`: unhealthy if that consumer's
+  last successful poll exceeds a configured staleness window (it doesn't
+  need a message to process to be healthy — an idle topic isn't a failure).
 - `ServiceBusHealthCheck`, on the **Service Bus consumer Pod's**
   `/health/ready`: verifies the management client can reach the namespace.
 

@@ -157,6 +157,24 @@ the project-wide compiler/tooling configuration:
   that ID is generated (or read from an inbound header) at the HTTP or
   message-consumer boundary and flows through Kafka → Service Bus →
   Cosmos DB writes → response.
+* **Log-level coverage is a gap-filling expectation, not a rewrite
+  mandate.** A class in Application/Infrastructure/Api that performs I/O,
+  makes a business decision, or can fail should log at more than one level:
+  `Debug` on entry to a non-trivial method (with its key parameters),
+  `Information` on a meaningful outcome (a write succeeded, a message was
+  processed, a client was registered), and `Warning` on a recoverable or
+  unexpected condition that isn't yet an error (a retry, a rejected
+  cross-partition query, a failed health check). Add the missing level(s)
+  only to a class that currently has none of this — don't touch a class
+  that already logs meaningfully to fit this template exactly (the Kafka/
+  Service Bus hosted services in
+  [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §7
+  and the `GlobalExceptionHandler` in
+  [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md) are
+  the reference examples of "already adequate," not a pattern to
+  mechanically re-apply everywhere). Domain never takes a logging
+  dependency — it has no external package references (§2) — so this
+  applies only to Application, Infrastructure, and Api.
 
 ---
 

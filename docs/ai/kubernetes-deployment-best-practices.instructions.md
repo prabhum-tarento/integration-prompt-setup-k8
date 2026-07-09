@@ -35,9 +35,9 @@ queue/topic depth rather than CPU.
   [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md); the
   two consumers' are defined in
   [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §8
-  (`KafkaConsumerHealthCheck`, `ServiceBusHealthCheck`), each hosted on a
-  small Kestrel listener inside the worker process for exactly this
-  purpose.
+  (a `ConsumerHealthCheck` per Kafka consumer, `ServiceBusHealthCheck` for
+  the Service Bus consumer), each hosted on a small Kestrel listener inside
+  the worker process for exactly this purpose.
 - Never deploy a bare Pod — always through a Deployment.
 
 ## Deployments

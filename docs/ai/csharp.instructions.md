@@ -80,22 +80,30 @@ belongs in one of those files instead — don't duplicate it.
 * Use pattern matching and switch expressions when they read more clearly
   than an `if`/`else if` chain — not as an absolute rule. A single boolean
   check (`if (x is null)`) does not need to become a switch expression.
-* XML doc comments are required specifically on: `Application`'s public
-  use-case interfaces (the ones `Infrastructure` implements and `Api`
-  calls — e.g. `IInventoryEventService`), `Domain`'s public aggregate and
-  value-object methods (the ones another layer calls, not private
-  invariant-checking helpers), and any `Infrastructure` repository
-  interface (e.g. `IInventoryEventRepository`, per
-  [cosmos-db.instructions.md](cosmos-db.instructions.md) §5). This is a
-  deliberately narrower rule than "every public member in a
-  multi-project solution" — in Clean Architecture, most types are public
-  only because C# requires it for cross-project references, not because
-  they're a designed integration surface. A public DTO property or a
-  public class that's an implementation detail of one layer doesn't need
-  XML docs just because its accessibility keyword happens to be `public`.
-  Include `<example>`/`<code>` where the usage isn't obvious from the
-  signature. Everything else: a one-line `//` comment on the non-obvious
-  part is enough.
+* **XML doc comments are required on every class, record, and method in
+  `src/`** (Domain, Application, Infrastructure, Api) — at minimum a
+  `<summary>` stating what the type or member does, plus `<param>`/
+  `<returns>` where the name and type don't already make that obvious.
+  `Application`'s public use-case interfaces (e.g. `IInventoryEventService`),
+  `Domain`'s public aggregate/value-object methods, and `Infrastructure`
+  repository interfaces (e.g. `IInventoryEventRepository`, per
+  [cosmos-db.instructions.md](cosmos-db.instructions.md) §5) get the richest
+  docs — include `<example>`/`<code>` where the usage isn't obvious from the
+  signature — since those are the types another layer or another engineer
+  reads without opening the implementation. A trivial DTO or a one-line
+  property still gets a one-line `<summary>`; it does not need `<example>`,
+  `<remarks>`, or documented parameters it doesn't have.
+  Test projects are the one exception, at the method level only: a
+  `[Fact(DisplayName = "...")]` already states what the test verifies, so
+  don't add a redundant `<summary>` above it. A test *class* still gets one,
+  describing the subject/scenario it covers.
+* Inline `//` comments belong on non-obvious logic — a branch whose
+  reasoning isn't apparent from the code around it, a workaround for a
+  specific bug or SDK quirk, an invariant a future edit could silently
+  break. Don't comment a line whose meaning the code already fully carries
+  (`var count = items.Count;` does not need `// get the count`) — that adds
+  noise, not documentation, and works against this file's readability
+  goals.
 
 ## Nullable reference types
 

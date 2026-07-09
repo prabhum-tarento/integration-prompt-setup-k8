@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="Microsoft.Azure.Cosmos" />
+    <!-- Required by the Cosmos SDK's own build check whenever Microsoft.Azure.Cosmos is
+         referenced, even though this project only uses the SDK for the PatchOperation type in
+         IInventoryEventRepository - see cosmos-db.instructions.md §10. -->
+    <PackageReference Include="Newtonsoft.Json" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Domain\IIS.WMS.Consumer.Domain\IIS.WMS.Consumer.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

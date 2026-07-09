@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Domain\IIS.WMS.Consumer.Domain\IIS.WMS.Consumer.Domain.csproj" />
+    <ProjectReference Include="..\..\..\src\Application\IIS.WMS.Consumer.Application\IIS.WMS.Consumer.Application.csproj" />
+    <ProjectReference Include="..\..\..\src\Infrastructure\IIS.WMS.Consumer.Infrastructure\IIS.WMS.Consumer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\..\src\Api\IIS.WMS.Consumer.Api\IIS.WMS.Consumer.Api.csproj" />
+  </ItemGroup>
+
+</Project>
