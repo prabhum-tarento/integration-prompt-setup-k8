@@ -51,11 +51,37 @@ every hop, log line, and outbound call this flow makes.
   runs. Each consumer can be turned off independently via its own
   `Enabled` configuration key (checked by the base class at startup) without
   removing its configuration section.
-- On each message: deserialize, resolve or generate the correlation ID (see
-  §4), map to the internal event contract, and publish to the Service Bus
-  queue — do not write to Cosmos DB directly from the Kafka consumer. The
-  Service Bus hop is the durability boundary; skipping it defeats the
-  point of the relay.
+- On each message, in order: read the Kafka headers (correlation id, dedup
+  id, event type, app id — see §4 for the exact header names) and log them;
+  write the raw header+body to the cold-tier audit container
+  (`request-audit`, see §5) unconditionally, before anything else touches
+  the message; check the message against the Nexus deduplication service
+  (`IDeduplicationService`, keyed on the `Deduplication-Id` header — a
+  duplicate is logged and its offset committed, without deserializing or
+  publishing it); deserialize; map to the internal event contract; and
+  publish to the Service Bus queue — do not write to Cosmos DB directly
+  from the Kafka consumer. The Service Bus hop is the durability boundary;
+  skipping it defeats the point of the relay. Deserialization happens
+  *after* the cold-tier log and dedup check, not inside `Consume()` itself
+  — the consumer reads raw bytes (Confluent.Kafka's built-in `byte[]`
+  deserializer, which never throws) and the deserializer supplied by each
+  concrete consumer (`IDeserializer<TValue>`, JSON or Avro) is invoked
+  manually once dedup clears the message. This is what makes it possible to
+  audit-log and dedupe a message the consumer can't actually parse.
+- A deserialization failure is a poison message: it never reaches the
+  publish step, so its raw header+body is written to the hot-tier
+  `consumer-dead-letter` container (see §5) for manual recovery, and the
+  offset is committed forward through `PartitionOffsetCommitTracker` (not a
+  direct `consumer.Commit`) — same handling as the pre-existing poison-
+  message path below, just with an added blob write. An unrecoverable
+  Service Bus publish failure (Polly retries in §3 exhausted) is
+  deliberately **not** handled the same way — it still faults the worker
+  and stops this consumer so Kubernetes restarts the pod and Kafka
+  redelivers, exactly as before. The two failure modes look similar but
+  aren't: a bad payload will never become parseable on redelivery (hence
+  dead-letter and move on), while a struggling Service Bus dependency can
+  recover, and a sustained outage should surface as an outage (restarts,
+  alerts) rather than silently draining the topic into blob storage.
 - Use the Kafka message key (or a stable field from the payload, e.g.
   `WarehouseId:Sku:EventId`) as the outbound Service Bus **message ID** —
   this is what makes the Service Bus consumer's dedupe check (§2) work.
@@ -301,8 +327,12 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 
 - **HTTP inbound**: generated/read by `CorrelationIdMiddleware` — see
   [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md).
-- **Kafka inbound**: if the message carries a `correlationId` header, use
-  it; otherwise generate a new GUID at the point of consumption.
+- **Kafka inbound**: if the message carries a `Correlation-Id` header
+  (`KafkaHeaderNames.CorrelationId` — matching the header name the upstream
+  Nexus/WMS producers already use, not this repo's own invention), use it;
+  otherwise generate a new GUID at the point of consumption. The same
+  `KafkaHeaderNames` class also names the `Deduplication-Id`, `App-Id`, and
+  `Type` headers read for the dedup check and structured logging in §1.
 - **Kafka → Service Bus**: set the correlation ID as a Service Bus message
   `ApplicationProperties["CorrelationId"]` when relaying (alongside the
   `SessionId` set in §1) — this is the only hop where it needs to move
@@ -318,7 +348,7 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 
 ## 5. Blob Storage
 
-Two containers, two purposes — don't mix them:
+Four containers now, grouped by tier — don't mix them:
 
 - **Hot tier** (`imports`, `exports` containers): import/export files that
   are actively read/written as part of normal operation (e.g., a bulk
@@ -326,13 +356,34 @@ Two containers, two purposes — don't mix them:
   polls for). Standard hot-tier blob access, `BlobClient`/`BlobContainerClient`,
   behind an interface (`IFileStore`) so callers don't depend on the Azure
   SDK directly.
-- **Cold tier** (`request-audit` container): **optional**, feature-flagged
-  raw request/response logging for debugging and compliance — enabled per
-  environment via configuration, not hardcoded on. When enabled, write with
-  `AccessTier.Cold` and name blobs
-  `{yyyy}/{MM}/{dd}/{correlationId}.json` so they're both cheap to store
-  and directly look-up-able by the correlation ID from a log line.
-- Both tiers go through Polly (§3) for transient fault handling.
+- **Hot tier, consumer dead-letter** (`consumer-dead-letter` container,
+  `BlobStorageOptions.ConsumerDeadLetterContainerName`): a Kafka message's
+  raw header+body, written only when that message fails Avro/JSON
+  deserialization (§1) — kept in its own container rather than folded into
+  `imports`/`exports`, since it's a failure record, not an import/export
+  file.
+- **Cold tier, general request/response audit** (`request-audit`
+  container, feature-flagged via `BlobStorageOptions.RequestAuditEnabled`):
+  **optional**, enabled per environment via configuration, not hardcoded
+  on. When enabled, write with `AccessTier.Cold` and name blobs
+  `{yyyy}/{MM}/{dd}/{correlationId}.json`.
+- **Cold tier, Kafka consumer audit** (also the `request-audit` container,
+  `BlobStorageOptions.RequestAuditContainerName`): every message the Kafka
+  consumer reads gets a raw header+body audit blob (§1) — **unconditional**,
+  not gated by `RequestAuditEnabled` above; that flag covers the general
+  request/response audit use only. Named
+  `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/{timestamp}_{guid}.log`
+  — a different convention from the general audit blobs immediately above,
+  chosen so one correlation id's full audit trail (across however many
+  consumers/schemas touch it) sits under one prefix. Both naming schemes
+  share the same container; don't assume every blob under `request-audit`
+  follows the `{yyyy}/{MM}/{dd}` shape.
+- All four go through Polly (§3) for transient fault handling — the Kafka
+  consumer's own audit writes (`WriteAuditLogAsync`) additionally treat a
+  Blob Storage outage (after Polly's retries are exhausted) as non-fatal:
+  logged and swallowed, so a Blob Storage outage doesn't block the dedup
+  check or the relay itself. The audit trail is a diagnostic aid, not the
+  durability boundary (Service Bus is, per §1).
 - Never store a Cosmos account key, connection string, or PII you haven't
   explicitly cleared for audit retention inside a cold-tier blob — treat it
   with the same secrecy rules as
@@ -499,8 +550,10 @@ and which cannot observe another Pod's internal state:
 ## 9. Testing this layer
 
 - **Unit tests** (xUnit): mock `IConsumer<,>`, `ServiceBusSender`/
-  `ServiceBusProcessor`, and `IFileStore`; test message mapping, dedupe
-  logic, and the retry/dead-letter decision tree in isolation. Follow
+  `ServiceBusProcessor`, `IFileStore`, and `IDeduplicationService`; test
+  message mapping, the dedup composite-key construction and 409→duplicate
+  parsing in `NexusDeduplicationService`, and the retry/dead-letter decision
+  tree in isolation. Follow
   `MethodName_Condition_ExpectedResult()` per
   [dotnet-architecture-good-practices.instructions.md](dotnet-architecture-good-practices.instructions.md) §4.
 - **Integration tests**: `Testcontainers` spinning up the Kafka broker, the

@@ -1,6 +1,7 @@
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Configuration;
@@ -20,6 +21,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddResiliencePipelines();
         services.AddCosmosDb(configuration);
         services.AddBlobStorage(configuration);
+        services.AddNexusDeduplicationService(configuration);
 
         // Each Kafka consumer's health check is registered alongside its hosted service inside
         // AddMessaging (see MessagingServiceCollectionExtensions.AddKafkaConsumer) rather than

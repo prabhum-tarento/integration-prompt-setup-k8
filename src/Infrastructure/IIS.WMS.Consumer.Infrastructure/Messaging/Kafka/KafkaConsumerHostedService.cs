@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Application.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,12 +19,16 @@ public sealed class KafkaConsumerHostedService : ConsumerHostedService<InboundIn
     /// <param name="options">Kafka connection/topic settings.</param>
     /// <param name="serviceBusClient">Client used to create the sender for the relay queue.</param>
     /// <param name="pipelineProvider">Resolves the named Polly pipeline used for the Service Bus publish step.</param>
+    /// <param name="fileStore">Writes the cold-tier and hot-tier audit blobs.</param>
+    /// <param name="deduplicationService">Checks each message against the Nexus deduplication service.</param>
     /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
     /// <param name="logger">Logger for consume/relay/poison-message events.</param>
     public KafkaConsumerHostedService(
         IOptions<KafkaConsumerOptions> options,
         ServiceBusClient serviceBusClient,
         ResiliencePipelineProvider<string> pipelineProvider,
+        IFileStore fileStore,
+        IDeduplicationService deduplicationService,
         [FromKeyedServices(MessagingServiceCollectionExtensions.InventoryEventsConsumerKey)] ConsumerHealthState healthState,
         ILogger<KafkaConsumerHostedService> logger)
         : base(
@@ -32,6 +37,8 @@ public sealed class KafkaConsumerHostedService : ConsumerHostedService<InboundIn
             new JsonDeserializer<InboundInventoryEventMessage>(),
             serviceBusClient,
             pipelineProvider,
+            fileStore,
+            deduplicationService,
             healthState,
             logger)
     {

@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 
@@ -21,7 +22,13 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 /// polling) and can be turned off independently via its own <c>Enabled</c> configuration key,
 /// checked by <see cref="ConsumerHostedService{TValue}"/> at startup - adding a third schema
 /// consumer means adding its options/hosted-service/health-check trio here, not touching the
-/// shared base classes. All three hosted services are registered on the same host as the Api for
+/// shared base classes - the Schema Registry wiring itself is shared via the singleton
+/// <see cref="Kafka.ISpecificRecordDeserializerFactory"/> registered below, so that consumer would
+/// not need to duplicate it either. Each event-level consumer's <c>Enabled</c>,
+/// <c>BootstrapServers</c>, and <c>SchemaRegistryUrl</c> also fall back to the top-level
+/// <c>Kafka</c> section's values when left unset (<see cref="Kafka.ConsumerOptions.ApplyKafkaLevelDefaults"/>),
+/// and <see cref="Kafka.KafkaConsumerOptions.Functions"/> gates which consumers get registered at
+/// all here, independently of their own <c>Enabled</c> flag. All three hosted services are registered on the same host as the Api for
 /// this skeleton; kubernetes-deployment-best-practices.instructions.md's target topology is three
 /// separate Deployments (Api, Kafka consumer, Service Bus consumer) each with their own image -
 /// splitting these <see cref="Microsoft.Extensions.Hosting.BackgroundService"/> registrations into
@@ -43,8 +50,20 @@ public static class MessagingServiceCollectionExtensions
     {
         services.Configure<KafkaConsumerOptions>(configuration.GetSection(KafkaConsumerOptions.SectionName));
 
+        // No parent above Kafka level to fall back to, so this is the one place "unset" resolves to
+        // a hardcoded default rather than a fallback lookup - preserves the always-on-unless-said-
+        // otherwise behavior every event-level consumer's own fallback (below) ultimately bottoms out at.
+        services.PostConfigure<KafkaConsumerOptions>(options => options.Enabled ??= true);
+
         services.Configure<InventoryStateChangedConsumerOptions>(
             configuration.GetSection(InventoryStateChangedConsumerOptions.SectionName));
+
+        // Event level first, Kafka level as fallback (ConsumerOptions.ApplyKafkaLevelDefaults) for
+        // Enabled/BootstrapServers/SchemaRegistryUrl. Resolving IOptions<KafkaConsumerOptions> here
+        // is what runs its PostConfigure above first, so Enabled is never null by this point.
+        services.AddOptions<InventoryStateChangedConsumerOptions>()
+            .PostConfigure<IOptions<KafkaConsumerOptions>>(
+                (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
 
         services.Configure<ServiceBusConsumerOptions>(configuration.GetSection(ServiceBusConsumerOptions.SectionName));
 
@@ -87,14 +106,33 @@ public static class MessagingServiceCollectionExtensions
         services.AddSingleton<ServiceBusHealthState>();
         services.AddHostedService<ServiceBusConsumerHostedService>();
 
-        AddKafkaConsumer<KafkaConsumerHostedService>(
-            services, InventoryEventsConsumerKey, "kafka-consumer", "InventoryEvents Kafka consumer health");
+        services.AddSingleton<ISpecificRecordDeserializerFactory, SpecificRecordDeserializerFactory>();
 
-        AddKafkaConsumer<InventoryStateChangedConsumerHostedService>(
-            services, InventoryStateChangedConsumerKey, "inventory-state-changed-consumer", "InventoryStateChanged Kafka consumer health");
+        // Read once, directly off configuration - Functions is a startup-time registration filter,
+        // not a per-request setting, so it doesn't need the options pattern's change-tracking.
+        var functionsFilter = configuration.GetSection(KafkaConsumerOptions.SectionName).Get<KafkaConsumerOptions>()?.Functions;
+
+        if (IsFunctionEnabled(functionsFilter, InventoryEventsConsumerKey))
+        {
+            AddKafkaConsumer<KafkaConsumerHostedService>(
+                services, InventoryEventsConsumerKey, "kafka-consumer", "InventoryEvents Kafka consumer health");
+        }
+
+        if (IsFunctionEnabled(functionsFilter, InventoryStateChangedConsumerKey))
+        {
+            AddKafkaConsumer<InventoryStateChangedConsumerHostedService>(
+                services, InventoryStateChangedConsumerKey, "inventory-state-changed-consumer", "InventoryStateChanged Kafka consumer health");
+        }
 
         return services;
     }
+
+    /// <summary>Whether <paramref name="consumerKey"/> should start, per <see cref="KafkaConsumerOptions.Functions"/>'s allow-list semantics.</summary>
+    /// <param name="functionsFilter">The configured allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="consumerKey">The candidate consumer's keyed-service key (<see cref="InventoryEventsConsumerKey"/> or <see cref="InventoryStateChangedConsumerKey"/>).</param>
+    public static bool IsFunctionEnabled(IReadOnlyCollection<string>? functionsFilter, string consumerKey) =>
+        functionsFilter is null || functionsFilter.Count == 0
+            || functionsFilter.Contains(consumerKey, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Registers one Kafka consumer's keyed <see cref="ConsumerHealthState"/>, its

@@ -6,28 +6,33 @@ This service is an inventory/WMS integration platform. It consumes Kafka
 inventory events, republishes them onto Azure Service Bus for durable
 processing, persists state in Azure Cosmos DB, and exposes a REST API for
 downstream consumers. It runs on AKS. See
-[docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)
+[docs/ai/integration-resiliency.instructions.md](../docs/ai/integration-resiliency.instructions.md)
 for the end-to-end data flow.
 
 ## Required reading
 
 Read these documents before generating or reviewing code. Each owns a
 distinct concern — do not restate one file's content in another. This
-assumes tool access to read files (Claude Code has it by default); if
-you're ever operating without file-read access, say explicitly that these
-docs couldn't be consulted rather than proceeding as if you'd read them.
+assumes tool access to read files; if you're ever operating without
+file-read access, say explicitly that these docs couldn't be consulted
+rather than proceeding as if you'd read them.
 
 | # | Document | Owns |
 |---|---|---|
-| 1 | [docs/ai/engineering-standards.instructions.md](docs/ai/engineering-standards.instructions.md) | Baseline tech stack, versions, cross-cutting standards (logging, security, coverage). Wins on any version/number conflict. |
-| 2 | [docs/ai/dotnet-architecture-good-practices.instructions.md](docs/ai/dotnet-architecture-good-practices.instructions.md) | Clean Architecture layering, DDD, SOLID (canonical definitions), test naming convention. |
-| 3 | [docs/ai/csharp.instructions.md](docs/ai/csharp.instructions.md) | C# language idioms and formatting only. |
-| 4 | [docs/ai/oop-design-patterns.instructions.md](docs/ai/oop-design-patterns.instructions.md) | GoF pattern selection. Defers to #2 for SOLID text and to #3 for doc-comment style. |
-| 5 | [docs/ai/aspnet-rest-apis.instructions.md](docs/ai/aspnet-rest-apis.instructions.md) | Web API layer: routing, versioning, validation, exception middleware wiring. |
-| 6 | [docs/ai/cosmos-db.instructions.md](docs/ai/cosmos-db.instructions.md) | Cosmos DB data access, concurrency, repository pattern. |
-| 7 | [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md) | Kafka, Service Bus, Blob storage, Polly, correlation IDs, async/parallelism, test infrastructure. |
-| 8 | [docs/ai/kubernetes-deployment-best-practices.instructions.md](docs/ai/kubernetes-deployment-best-practices.instructions.md) | AKS deployment, health probes, autoscaling, secrets. |
-| 9 | [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md) | When and how to create Claude Code Skills (`.claude/skills/`) for this repo's recurring workflows. **Claude Code-only** — not part of the sync mandate below, since Copilot has no Skills equivalent. |
+| 1 | [docs/ai/engineering-standards.instructions.md](../docs/ai/engineering-standards.instructions.md) | Baseline tech stack, versions, cross-cutting standards (logging, security, coverage). Wins on any version/number conflict. |
+| 2 | [docs/ai/dotnet-architecture-good-practices.instructions.md](../docs/ai/dotnet-architecture-good-practices.instructions.md) | Clean Architecture layering, DDD, SOLID (canonical definitions), test naming convention. |
+| 3 | [docs/ai/csharp.instructions.md](../docs/ai/csharp.instructions.md) | C# language idioms and formatting only. |
+| 4 | [docs/ai/oop-design-patterns.instructions.md](../docs/ai/oop-design-patterns.instructions.md) | GoF pattern selection. Defers to #2 for SOLID text and to #3 for doc-comment style. |
+| 5 | [docs/ai/aspnet-rest-apis.instructions.md](../docs/ai/aspnet-rest-apis.instructions.md) | Web API layer: routing, versioning, validation, exception middleware wiring. |
+| 6 | [docs/ai/cosmos-db.instructions.md](../docs/ai/cosmos-db.instructions.md) | Cosmos DB data access, concurrency, repository pattern. |
+| 7 | [docs/ai/integration-resiliency.instructions.md](../docs/ai/integration-resiliency.instructions.md) | Kafka, Service Bus, Blob storage, Polly, correlation IDs, async/parallelism, test infrastructure. |
+| 8 | [docs/ai/kubernetes-deployment-best-practices.instructions.md](../docs/ai/kubernetes-deployment-best-practices.instructions.md) | AKS deployment, health probes, autoscaling, secrets. |
+
+Note: [docs/ai/skills-generation.instructions.md](../docs/ai/skills-generation.instructions.md)
+is Claude Code-specific (it governs `.claude/skills/` generation) and has no
+Copilot equivalent — it is intentionally not referenced here, and its
+absence from this list is not a sync gap with
+[CLAUDE.md](../CLAUDE.md).
 
 ## Precedence when documents disagree
 
@@ -65,11 +70,11 @@ not silently skip it.
   `FluentValidation`, `Serilog`, `xUnit`, and their transitive framework
   dependencies) — plus `MediatR`, used specifically for domain-event
   dispatch per
-  [oop-design-patterns.instructions.md](docs/ai/oop-design-patterns.instructions.md).
+  [oop-design-patterns.instructions.md](../docs/ai/oop-design-patterns.instructions.md).
   Those are already approved by being specified here, so using them isn't
   "introducing" anything new.
 - Prefer xUnit for tests (see
-  [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)
+  [docs/ai/integration-resiliency.instructions.md](../docs/ai/integration-resiliency.instructions.md)
   for unit vs. integration test setup).
 - Never commit secrets, connection strings, or keys. Local development uses
   user-secrets or the emulator; every other environment uses Managed
@@ -94,9 +99,9 @@ not silently skip it.
 
 ## Keeping instructions in sync
 
-This file and [.github/copilot-instructions.md](.github/copilot-instructions.md)
-must stay consistent — they steer different tools against the same codebase.
-If you change a rule in one, mirror it in the other in the same change.
-**Exception:** [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md)
-(#9 above) is Claude Code-specific and intentionally not referenced from
-copilot-instructions.md — its absence there is not a sync gap.
+This file and [CLAUDE.md](../CLAUDE.md) must stay consistent — they steer
+different tools against the same codebase. If you change a rule in one,
+mirror it in the other in the same change. **Exception:**
+[docs/ai/skills-generation.instructions.md](../docs/ai/skills-generation.instructions.md)
+is Claude Code-specific and intentionally not referenced from this file —
+its absence here is not a sync gap.

@@ -11,7 +11,7 @@ namespace IIS.WMS.Consumer.Infrastructure.BlobStorage;
 /// <summary>Blob Storage client/file-store registration per integration-resiliency.instructions.md §5.</summary>
 public static class BlobStorageServiceCollectionExtensions
 {
-    /// <summary>Registers the singleton <see cref="BlobServiceClient"/> and the scoped <see cref="IFileStore"/>.</summary>
+    /// <summary>Registers the singleton <see cref="BlobServiceClient"/> and <see cref="IFileStore"/>.</summary>
     /// <param name="services">The service collection to register against.</param>
     /// <param name="configuration">Application configuration, read for the <c>BlobStorage</c> section.</param>
     /// <returns>The same <paramref name="services"/> instance, for chaining.</returns>
@@ -42,7 +42,13 @@ public static class BlobStorageServiceCollectionExtensions
             return new BlobServiceClient(new Uri(config.AccountUri), new DefaultAzureCredential());
         });
 
-        services.AddScoped<IFileStore, BlobFileStore>();
+        // Singleton, not Scoped - BlobFileStore is stateless (its own dependencies, BlobServiceClient
+        // and ResiliencePipelineProvider<string>, are already singletons), and it needs to be safe to
+        // inject directly into the singleton ConsumerHostedService<TValue> (a BackgroundService) for
+        // the cold/hot-tier audit logging added in integration-resiliency.instructions.md §1 - a
+        // Scoped registration would throw ("cannot consume scoped service from singleton") the moment
+        // a Kafka consumer resolved it without going through a manually created DI scope per message.
+        services.AddSingleton<IFileStore, BlobFileStore>();
 
         return services;
     }

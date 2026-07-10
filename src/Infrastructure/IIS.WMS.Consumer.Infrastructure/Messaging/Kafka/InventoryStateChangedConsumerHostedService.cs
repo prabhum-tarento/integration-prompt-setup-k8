@@ -1,13 +1,9 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
-using Confluent.Kafka;
-using Confluent.Kafka.SyncOverAsync;
-using Confluent.SchemaRegistry;
-using Confluent.SchemaRegistry.Serdes;
+using IIS.WMS.Consumer.Application.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using NexusFacades.Common.Core.SchemaRegistry;
 using Polly.Registry;
 using net.pandora.nexus.@event.inventory;
 
@@ -30,37 +26,39 @@ public sealed class InventoryStateChangedConsumerHostedService : ConsumerHostedS
 
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer.</param>
+    /// <param name="specificRecordDeserializerFactory">Builds the Avro deserializer and its backing Schema Registry client.</param>
     /// <param name="serviceBusClient">Client used to create the sender for the relay queue.</param>
     /// <param name="pipelineProvider">Resolves the named Polly pipeline used for the Service Bus publish step.</param>
+    /// <param name="fileStore">Writes the cold-tier and hot-tier audit blobs.</param>
+    /// <param name="deduplicationService">Checks each message against the Nexus deduplication service.</param>
     /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
     /// <param name="logger">Logger for consume/relay/poison-message events.</param>
     public InventoryStateChangedConsumerHostedService(
         IOptions<InventoryStateChangedConsumerOptions> options,
+        ISpecificRecordDeserializerFactory specificRecordDeserializerFactory,
         ServiceBusClient serviceBusClient,
         ResiliencePipelineProvider<string> pipelineProvider,
+        IFileStore fileStore,
+        IDeduplicationService deduplicationService,
         [FromKeyedServices(MessagingServiceCollectionExtensions.InventoryStateChangedConsumerKey)] ConsumerHealthState healthState,
         ILogger<InventoryStateChangedConsumerHostedService> logger)
         : base(
             options.Value,
             "InventoryStateChanged Kafka consumer",
-            CreateDeserializer(options.Value, out var schemaRegistryClient),
+            specificRecordDeserializerFactory.Create<InventoryStateChanged>(
+                options.Value.SchemaRegistryUrl
+                    ?? throw new InvalidOperationException(
+                        $"Missing SchemaRegistryUrl - configure '{InventoryStateChangedConsumerOptions.SectionName}:SchemaRegistryUrl' " +
+                        $"or the Kafka-level '{KafkaConsumerOptions.SectionName}:SchemaRegistryUrl' fallback."),
+                out var schemaRegistryClient),
             serviceBusClient,
             pipelineProvider,
+            fileStore,
+            deduplicationService,
             healthState,
             logger,
             additionalDisposable: schemaRegistryClient)
     {
-    }
-
-    /// <summary>Builds the Schema Registry client and the Avro deserializer wired to it - <paramref name="schemaRegistryClient"/> is handed back so the base class can dispose it alongside the consumer.</summary>
-    /// <param name="options">Supplies the Schema Registry URL.</param>
-    /// <param name="schemaRegistryClient">The created client, for the caller to keep and dispose.</param>
-    private static IDeserializer<InventoryStateChanged> CreateDeserializer(
-        InventoryStateChangedConsumerOptions options, out ISchemaRegistryClient schemaRegistryClient)
-    {
-        schemaRegistryClient = SchemaRegistryClientFactory.Create(new SchemaRegistryConfig { Url = options.SchemaRegistryUrl });
-
-        return new AvroDeserializer<InventoryStateChanged>(schemaRegistryClient).AsSyncOverAsync();
     }
 
     /// <inheritdoc />
