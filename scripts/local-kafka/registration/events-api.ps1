@@ -9,6 +9,8 @@ for what that looks like without this wrapper).
                                            (open it directly in a browser tab and leave it open)
     GET  /api/mapping                   - the current event-name -> {topic, subject} map,
                                            the same one /api/events resolves "type" against
+    POST /api/stop                      - pause POST /api/events (any method works) - see below
+    POST /api/start                     - resume it again (any method works) - see below
     POST /api/shutdown                  - stop this process (any HTTP method works) - see below
 
 - Query param "type" is an EVENT NAME - the same name as its
@@ -54,6 +56,14 @@ growing with new lines in real time - no auto-refresh or JavaScript needed. It r
 last 500 log lines immediately on connect, then streams new ones as they occur. Closing the
 tab (or Ctrl+C on a `curl -N`) disconnects that one viewer only - it doesn't affect this
 process or any other request being handled.
+
+POST /api/stop / POST /api/start - pause and resume POST /api/events without stopping this
+process at all: while stopped, /api/events returns 503 instead of publishing anything, but
+/logs, /api/mapping, /api/stop, /api/start, and /api/shutdown all keep working throughout,
+so you can flip it back on the moment you're ready without re-launching anything. Starts
+enabled by default. This is a separate, lighter-weight thing from /api/shutdown below -
+there'd be nothing left running to call /api/start against if the whole process had
+exited, which is exactly why this doesn't touch the process lifecycle at all.
 
 POST /api/shutdown - stops this process without needing Ctrl+C in the terminal it was
 launched from (which matters most for setup-podman-kafka.bat's containerized invocation,
@@ -315,6 +325,19 @@ function Invoke-ShutdownRequest($Sync, [System.Net.HttpListenerResponse]$Respons
     try { $Sync.Listener.Stop() } catch { }
 }
 
+# POST /api/stop and /api/start (any HTTP method works, same reasoning as /api/shutdown -
+# so opening the URL in a browser is enough) - flips $Sync.EventsEnabled, which
+# Invoke-ApiRequest's /api/events branch checks on every request. Unlike Invoke-
+# ShutdownRequest, this never touches the listener/process lifecycle at all - /logs,
+# /api/mapping, and this pair itself keep responding normally the whole time, which is the
+# whole point: there'd be nothing left listening for /api/start to reach if a real shutdown
+# had already happened.
+function Invoke-StartStopRequest($Sync, [System.Net.HttpListenerResponse]$Response, [bool]$Enable) {
+    $Sync.EventsEnabled = $Enable
+    $status = if ($Enable) { 'started' } else { 'stopped' }
+    Send-JsonResponse $Sync $Response 200 (@{ status = $status; eventsEnabled = $Enable } | ConvertTo-Json -Compress)
+}
+
 # The router every dispatched request runs through, in its own runspace.
 function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
     $request = $Context.Request
@@ -342,6 +365,16 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
             return
         }
 
+        if ($path -eq '/api/stop') {
+            Invoke-StartStopRequest $Sync $response $false
+            return
+        }
+
+        if ($path -eq '/api/start') {
+            Invoke-StartStopRequest $Sync $response $true
+            return
+        }
+
         if ($path -eq '/api/mapping' -and $request.HttpMethod -eq 'GET') {
             $eventMap = Get-EventMap $Sync
             Send-JsonResponse $Sync $response 200 ($eventMap | ConvertTo-Json -Depth 5)
@@ -355,7 +388,12 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
         )
 
         if ($request.HttpMethod -ne 'POST' -or $path -ne '/api/events') {
-            Send-JsonResponse $Sync $response 404 (@{ error = "Unknown route: $($request.HttpMethod) $path - use POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, or /api/shutdown" } | ConvertTo-Json -Compress)
+            Send-JsonResponse $Sync $response 404 (@{ error = "Unknown route: $($request.HttpMethod) $path - use POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, or /api/shutdown" } | ConvertTo-Json -Compress)
+            return
+        }
+
+        if (-not $Sync.EventsEnabled) {
+            Send-JsonResponse $Sync $response 503 (@{ error = 'Event publishing is currently stopped - POST /api/start to resume.' } | ConvertTo-Json -Compress)
             return
         }
 
@@ -476,6 +514,7 @@ $sync = [hashtable]::Synchronized(@{
     MappingFile              = $MappingFile
     ClusterId                = $null
     ShuttingDown             = $false
+    EventsEnabled            = $true
     LogLock                  = New-Object object
     LogHistory                = New-Object System.Collections.Generic.List[string]
     LogSubscribers           = New-Object System.Collections.Generic.List[object]
@@ -494,7 +533,7 @@ $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefau
 foreach ($functionName in @(
         'Build-EventMapFromEventsFolder', 'Build-EventMapFromMappingFile', 'Get-EventMap',
         'Write-KafkaRestLogs', 'Publish-LogLine', 'Write-RequestLog', 'Send-JsonResponse',
-        'Get-ClusterId', 'Invoke-LogsStreamRequest', 'Invoke-ShutdownRequest', 'Invoke-ApiRequest'
+        'Get-ClusterId', 'Invoke-LogsStreamRequest', 'Invoke-ShutdownRequest', 'Invoke-StartStopRequest', 'Invoke-ApiRequest'
     )) {
     $definition = Get-Item "function:$functionName"
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry($definition.Name, $definition.ScriptBlock)))
@@ -512,7 +551,7 @@ $runspacePool.Open()
 # localhost:$Port whether that's this process's own loopback (plain host run) or a
 # container's published port (setup-podman-kafka.bat's containerized run) - not how this
 # process itself bound its listening socket.
-Write-Host "Listening on http://localhost:$Port - POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/shutdown. Ctrl+C to stop."
+Write-Host "Listening on http://localhost:$Port - POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, /api/shutdown. Ctrl+C to stop."
 
 $activeHandlers = New-Object System.Collections.Generic.List[object]
 
