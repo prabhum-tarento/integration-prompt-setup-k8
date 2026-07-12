@@ -46,8 +46,11 @@ REM Finally, once everything above is registered and reachable, this launches
 REM registration/events-api.ps1 (the interactive Postman/curl testing wrapper - see its own
 REM header comment) inside its own container, in the FOREGROUND as the last step - this
 REM script's console becomes the one it logs each POST /api/events request to (and response
-REM sent back), and Ctrl+C there stops both it and this script. Re-run setup-podman-kafka.bat
-REM any time to get a fresh stack with the wrapper running again. It runs containerized
+REM sent back; GET http://localhost:8087/logs shows the same log live in a browser tab
+REM instead), and Ctrl+C there stops both it and this script - or, without needing this
+REM console at all, POST http://localhost:8087/api/shutdown (or just open that URL) stops
+REM events-api.ps1 the same way. Re-run setup-podman-kafka.bat any time to get a fresh stack
+REM with the wrapper running again. It runs containerized
 REM (rather than via a plain "powershell -File" on the host, like this script used to) so it
 REM doesn't depend on pwsh being installed on the host at all - see EVENTS_API_IMAGE below
 REM for the image choice. It's also given -MappingFile pointing at event-map.json under
