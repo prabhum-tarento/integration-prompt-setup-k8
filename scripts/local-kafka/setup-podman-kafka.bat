@@ -11,8 +11,7 @@ REM into the containers, rather than passed as inline -e JAAS strings - avoids t
 REM quote-escaping that a PlainLoginModule config string (embedded quotes, spaces, semicolons)
 REM would otherwise need inside a single cmd.exe argument.
 REM
-REM Usage: setup-podman-kafka.bat [WarehouseId] [Sku] [Quantity] [EventType] [ConsumerGroup]
-REM   Defaults: WH1 SKU-123 10 Create inventory-events-consumer
+REM Usage: setup-podman-kafka.bat
 REM Edit KAFKA_SASL_USERNAME/PASSWORD and SCHEMA_REGISTRY_USERNAME/PASSWORD below to change
 REM the local credentials themselves.
 REM
@@ -29,16 +28,33 @@ REM Also starts Kafka REST Proxy, so messages can be pushed with plain curl inst
 REM "podman exec ... kafka-console-producer" - see README.md's "Push a message via curl"
 REM section. It reuses the SASL_PLAINTEXT_NET listener the same way Kafka UI does.
 REM
-REM Publishes two test messages, each consumed into its own consumer group so neither
-REM shows up as permanently lagging in Kafka UI: the plain-JSON one above (via
-REM kafka-console-producer, consumed into ConsumerGroup), and a second, Avro-encoded
-REM InventoryStateChanged event with Correlation-Id/Deduplication-Id/Type/App-Id headers,
-REM produced via Kafka REST Proxy's v3 API (see registration/push-inventory-state-changed.ps1)
-REM and consumed into the $InventoryStateChanged group.
+REM register-defaults.bat (called below) discovers every topic/consumer-group/schema under
+REM registration\events\ and, once it confirms Kafka REST Proxy is reachable, also publishes
+REM each event's sample message(s) (Avro-encoded, with headers) and consumes them into that
+REM topic's consumer groups - so none of them show up as permanently lagging in Kafka UI.
+REM This used to be a separate step here, hardcoded to one InventoryStateChanged sample via
+REM registration/push-inventory-state-changed.ps1 - it's now folded into register-defaults.bat
+REM and generalized to every discovered event, so it isn't duplicated here.
 REM
 REM Every container (broker/registry/UI/REST Proxy) is removed and recreated fresh on
-REM every run, not reused - see each container's own section below for why. Only the
-REM Podman network is reused if it already exists.
+REM every run, not reused - see each container's own section below for why. The Podman
+REM network and the broker's data volume (%KAFKA_DATA_VOLUME% - topics/messages/consumer
+REM offsets/registered schemas) are both reused if they already exist, so that data
+REM persists across runs despite the containers themselves always starting fresh.
+REM
+REM Finally, once everything above is registered and reachable, this launches
+REM registration/events-api.ps1 (the interactive Postman/curl testing wrapper - see its own
+REM header comment) inside its own container, in the FOREGROUND as the last step - this
+REM script's console becomes the one it logs each POST /api/events request to (and response
+REM sent back), and Ctrl+C there stops both it and this script. Re-run setup-podman-kafka.bat
+REM any time to get a fresh stack with the wrapper running again. It runs containerized
+REM (rather than via a plain "powershell -File" on the host, like this script used to) so it
+REM doesn't depend on pwsh being installed on the host at all - see EVENTS_API_IMAGE below
+REM for the image choice. It's also given -MappingFile pointing at event-map.json under
+REM %EVENTS_API_OUTPUT_DIR% - register-defaults.bat (called just above) writes that file with
+REM every event's topic/schema-subject mapping on every run, so the events-api.ps1 container
+REM never needs events\ mounted into it or scanned at all; it just reads what
+REM register-defaults.bat already determined, fresh on every request.
 
 setlocal enabledelayedexpansion
 
@@ -55,12 +71,34 @@ REM InventoryStateChanged.changeDate" in `podman logs iis-wms-kafka-rest`) - see
 REM registration/push-inventory-state-changed.ps1. Unverified whether 8.2.2 actually fixes
 REM this - if the same ClassCastException still shows up, it hasn't.
 set KAFKA_REST_IMAGE=confluentinc/cp-kafka-rest:8.2.2
+REM Runs registration/events-api.ps1 (needs pwsh). Microsoft's own current guidance
+REM (learn.microsoft.com "Use PowerShell in Docker", checked 2026) is that the old dedicated
+REM mcr.microsoft.com/powershell:* images are being deprecated in favor of the .NET SDK
+REM images, which bundle pwsh as a preinstalled global tool - "Only the image for the .NET
+REM SDK contains PowerShell" per that doc. The alpine variant is used here to keep this
+REM sidecar's pull size down; confirmed against dotnet/dotnet-docker's own
+REM src/sdk/9.0/alpine3.24/*/Dockerfile that pwsh ships preinstalled at /usr/bin/pwsh in this
+REM variant too, not just the default Debian-based one.
+set EVENTS_API_IMAGE=mcr.microsoft.com/dotnet/sdk:9.0-alpine3.24
 set NETWORK_NAME=iis-wms-kafka-net
 set KAFKA_CONTAINER=iis-wms-kafka
 set SCHEMA_REGISTRY_CONTAINER=iis-wms-schema-registry
 set KAFKA_UI_CONTAINER=iis-wms-kafka-ui
 set KAFKA_REST_CONTAINER=iis-wms-kafka-rest
-set TOPIC=inventory-events
+set EVENTS_API_CONTAINER=iis-wms-events-api
+REM Bind-mounted into both register-defaults.bat (as its own output\ subfolder, where it
+REM writes event-map.json - see that script) and the events-api.ps1 container (read-write,
+REM as -MappingFile's source) - this is how the mapping gets from one to the other without
+REM the events-api.ps1 container ever needing events\ mounted in itself. Generated, not
+REM meant to be committed - see .gitignore.
+set EVENTS_API_OUTPUT_DIR=%~dp0registration\output
+REM Named Podman volume for the broker's own log dir (/var/lib/kafka/data - topics,
+REM messages, consumer offsets, and the KRaft metadata log) - unlike the broker CONTAINER
+REM (always removed and recreated below), a named volume survives "podman rm", so this data
+REM persists across runs instead of starting empty every time. Schema Registry needs no
+REM volume of its own - its state lives entirely in this data (the broker's "_schemas"
+REM topic), not in the Schema Registry container.
+set KAFKA_DATA_VOLUME=iis-wms-kafka-data
 set CONFIG_DIR=%~dp0secrets
 
 REM Local-only credentials - not read from Key Vault/user-secrets, this stack never leaves
@@ -69,17 +107,6 @@ set KAFKA_SASL_USERNAME=kafkaclient
 set KAFKA_SASL_PASSWORD=kafkaclient-secret
 set SCHEMA_REGISTRY_USERNAME=schemaregistry
 set SCHEMA_REGISTRY_PASSWORD=schemaregistry-secret
-
-set WAREHOUSE_ID=%~1
-if "%WAREHOUSE_ID%"=="" set WAREHOUSE_ID=WH1
-set SKU=%~2
-if "%SKU%"=="" set SKU=SKU-123
-set QUANTITY=%~3
-if "%QUANTITY%"=="" set QUANTITY=10
-set EVENT_TYPE=%~4
-if "%EVENT_TYPE%"=="" set EVENT_TYPE=Create
-set CONSUMER_GROUP=%~5
-if "%CONSUMER_GROUP%"=="" set CONSUMER_GROUP=inventory-events-consumer
 
 echo(
 echo === Checking Podman ===
@@ -177,12 +204,25 @@ REM Recreated unconditionally on every run, same reasoning as Schema Registry/Ka
 REM UI/REST Proxy below - guarantees the broker always runs with this script's CURRENT
 REM listener/JAAS configuration (e.g. the SASL_PLAINTEXT_NET listener some earlier-created
 REM containers predate) instead of silently continuing on a stale one - this exact gotcha
-REM has come up repeatedly. Trade-off: unlike REST Proxy, this container has no volume for its
-REM topic/message/consumer-offset data, so this also means a fresh, empty broker every
-REM run - by design for a local dev/test sandbox (register-defaults.bat and the test
-REM messages below recreate everything that matters anyway), not appropriate if you needed
-REM data to persist across runs.
+REM has come up repeatedly. This only removes the CONTAINER, not its data - that lives in
+REM the %KAFKA_DATA_VOLUME% named volume created below, which this doesn't touch, so topics/
+REM messages/consumer offsets/registered schemas persist across runs despite the container
+REM itself always starting fresh. Delete that volume yourself (see README.md's Cleanup
+REM section) if you want a genuinely empty broker again.
 podman rm -f %KAFKA_CONTAINER% >nul 2>&1
+
+echo(
+echo === Kafka data volume ===
+REM Created once and left alone thereafter - the whole point is that it OUTLIVES the
+REM container recreation above. CLUSTER_ID/KAFKA_NODE_ID below are fixed values, so the
+REM broker recognizes this volume's existing KRaft metadata on every subsequent run instead
+REM of reformatting it.
+podman volume inspect %KAFKA_DATA_VOLUME% >nul 2>&1
+if errorlevel 1 (
+    podman volume create %KAFKA_DATA_VOLUME% || exit /b 1
+) else (
+    echo %KAFKA_DATA_VOLUME% already exists - broker data will persist from previous runs.
+)
 
 echo(
 echo === Kafka broker ===
@@ -201,6 +241,7 @@ REM because they share one Pod's network namespace, where "localhost" really is 
 REM same place for everyone; these are separate containers, so it isn't here.
 podman run -d --name %KAFKA_CONTAINER% --network %NETWORK_NAME% -p 9092:9092 ^
     -v "%CONFIG_DIR%:/etc/kafka/secrets:Z" ^
+    -v %KAFKA_DATA_VOLUME%:/var/lib/kafka/data ^
     -e KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf ^
     -e KAFKA_NODE_ID=1 ^
     -e CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk ^
@@ -218,11 +259,11 @@ podman run -d --name %KAFKA_CONTAINER% --network %NETWORK_NAME% -p 9092:9092 ^
 
 echo(
 echo === Schema Registry ===
-REM Always removed and recreated, same as the broker above - not just for config
-REM freshness, but because it MUST be: Schema Registry's own persistent state (every
-REM registered schema) lives in the broker's "_schemas" topic, not in this container. Since
-REM the broker is now wiped fresh every run, reusing an existing Schema Registry container
-REM would leave it pointing at offsets into a "_schemas" topic that no longer exists.
+REM Always removed and recreated, same as the broker above, for config-freshness reasons -
+REM not because it has to be: Schema Registry's own persistent state (every registered
+REM schema) lives entirely in the broker's "_schemas" topic (now persisted via
+REM %KAFKA_DATA_VOLUME%, not this container), so a fresh Schema Registry container picks up
+REM every previously registered schema from that topic the moment it starts.
 podman rm -f %SCHEMA_REGISTRY_CONTAINER% >nul 2>&1
 podman run -d --name %SCHEMA_REGISTRY_CONTAINER% --network %NETWORK_NAME% -p 8085:8081 ^
     -v "%CONFIG_DIR%:/etc/schema-registry/secrets:Z" ^
@@ -273,45 +314,54 @@ call "%~dp0registration\register-defaults.bat" %KAFKA_CONTAINER%
 if errorlevel 1 exit /b 1
 
 echo(
-echo === Publishing InventoryStateChanged test message (Avro + headers, via REST Proxy) ===
-REM Avro-encoded (via Schema Registry) with Correlation-Id/Deduplication-Id/Type/App-Id
-REM headers, so the $InventoryStateChanged consumer group has something realistic to
-REM actually deserialize and relay to Service Bus - unlike the plain-JSON message above,
-REM this one goes through Kafka REST Proxy (localhost:8086), not kafka-console-producer.
-REM See registration/push-inventory-state-changed.ps1 and README.md's "Producing a real
-REM InventoryStateChanged event" section for the equivalent manual curl walkthrough.
-set STATE_CHANGED_EVENT_ID=evt-state-%RANDOM%
-powershell -NoProfile -File "%~dp0registration\push-inventory-state-changed.ps1" ^
-    -EventId "%STATE_CHANGED_EVENT_ID%" ^
-    -CorrelationId "corr-%RANDOM%" ^
-    -DeduplicationId "dedup-%STATE_CHANGED_EVENT_ID%" ^
-    -AppId "setup-podman-kafka.bat"
-if errorlevel 1 (
-    echo Failed to publish the InventoryStateChanged test message - see README.md's "Producing a real InventoryStateChanged event" section for troubleshooting.
-    exit /b 1
-)
-
-echo(
-echo === Consuming it into consumer group "$InventoryStateChanged" ===
-REM Same reasoning as the plain-JSON message's consume step above - actually commits an
-REM offset (register-defaults.bat's earlier --reset-offsets --to-earliest --execute for
-REM this group only creates an empty, uncommitted entry - it does NOT consume anything),
-REM so Kafka UI shows this group caught up instead of permanently lagging by one message.
-REM kafka-console-consumer doesn't understand Avro - it prints the message's raw bytes
-REM (magic byte + schema id + Avro binary) as unreadable noise, not the JSON payload; that
-REM only affects what's printed here, not the commit. Use Kafka UI's Messages tab (which
-REM is Schema-Registry-aware) to see this message decoded properly.
-podman exec %KAFKA_CONTAINER% kafka-console-consumer --bootstrap-server localhost:9092 --consumer.config /etc/kafka/secrets/client.properties ^
-    --topic %TOPIC% --group $InventoryStateChanged --max-messages 1 --timeout-ms 10000 >nul
-
-echo(
-echo Published EventId=%EVENT_ID% WarehouseId=%WAREHOUSE_ID% Sku=%SKU% Quantity=%QUANTITY% EventType=%EVENT_TYPE% to topic "%TOPIC%", consumed into group "%CONSUMER_GROUP%".
-echo Also published InventoryStateChanged EventId=%STATE_CHANGED_EVENT_ID% (Avro + headers) to topic "%TOPIC%", consumed into group "$InventoryStateChanged".
-echo(
 echo Bootstrap servers:  localhost:9092   (Kafka:Username=%KAFKA_SASL_USERNAME%  Kafka:Password=%KAFKA_SASL_PASSWORD%)
 echo Schema Registry:    http://localhost:8085   (Kafka:SchemaRegistryApiKey=%SCHEMA_REGISTRY_USERNAME%  Kafka:SchemaRegistryApiSecret=%SCHEMA_REGISTRY_PASSWORD%)
 echo Kafka:Protocol should be SaslSsl -^> SaslPlaintext locally (no TLS here), Kafka:AuthenticationMode=Plain.
 echo Kafka UI: http://localhost:8090
 echo Kafka REST Proxy (push messages via curl): http://localhost:8086 - see README.md "Push a message via curl"
+
+echo(
+echo === events-api.ps1 output directory ===
+if not exist "%EVENTS_API_OUTPUT_DIR%" mkdir "%EVENTS_API_OUTPUT_DIR%"
+
+echo(
+echo === Starting events-api.ps1 in a container (Ctrl+C to stop) ===
+REM Everything is registered and reachable by this point - hand off to the interactive
+REM testing wrapper as the last step, in the foreground, so this script's console becomes
+REM the one events-api.ps1 logs each POST /api/events request to (see that script's header
+REM comment). Ctrl+C stops it (--rm cleans up the container immediately after) and ends this
+REM script; re-run setup-podman-kafka.bat any time to get a fresh stack with the wrapper
+REM running again.
+REM
+REM Runs on %NETWORK_NAME% like every other container here, so it reaches Schema
+REM Registry/Kafka REST Proxy by CONTAINER name on their IN-NETWORK ports (8081/8082, not
+REM the host-published 8085/8086 - "localhost" from inside this container means its own
+REM loopback, not those sibling containers, same reasoning as the Kafka broker section
+REM above). -ListenHost + (HttpListener's wildcard-all-interfaces syntax) is required here,
+REM unlike the script's own "localhost" default: a service bound only to loopback never sees
+REM traffic arriving through -p 8087:8087's published port - see events-api.ps1's -ListenHost
+REM doc comment. Only two things are mounted in: the script itself (read-only) and
+REM %EVENTS_API_OUTPUT_DIR% (read-write) - events\ itself is NOT mounted here at all;
+REM -MappingFile instead points at event-map.json, which register-defaults.bat (called
+REM above, before this container starts) already wrote into that same output directory. See
+REM events-api.ps1's header comment for why reading that prepared file is preferred over
+REM scanning events\ directly. -KafkaRestContainer is still passed for parity with the
+REM host-run invocation this replaces, but its one use (Write-KafkaRestLogs's "podman logs"
+REM call, on a failed produce) is a no-op in here - this plain dotnet/sdk image has no podman
+REM CLI/socket access - already handled gracefully by that function's own try/catch, so a
+REM failed produce just won't show container logs.
+podman rm -f %EVENTS_API_CONTAINER% >nul 2>&1
+podman run --rm --name %EVENTS_API_CONTAINER% --network %NETWORK_NAME% -p 8087:8087 ^
+    -v "%~dp0registration\events-api.ps1:/app/events-api.ps1:ro,Z" ^
+    -v "%EVENTS_API_OUTPUT_DIR%:/app/output:Z" ^
+    %EVENTS_API_IMAGE% pwsh -NoProfile -File /app/events-api.ps1 ^
+    -Port 8087 ^
+    -ListenHost + ^
+    -RestProxyUrl "http://%KAFKA_REST_CONTAINER%:8082" ^
+    -SchemaRegistryUrl "http://%SCHEMA_REGISTRY_CONTAINER%:8081" ^
+    -SchemaRegistryUsername "%SCHEMA_REGISTRY_USERNAME%" ^
+    -SchemaRegistryPassword "%SCHEMA_REGISTRY_PASSWORD%" ^
+    -KafkaRestContainer "%KAFKA_REST_CONTAINER%" ^
+    -MappingFile /app/output/event-map.json
 
 endlocal

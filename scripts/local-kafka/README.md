@@ -16,6 +16,7 @@ profile:
 | `Kafka:Username` / `Kafka:Password` | `kafkaclient` / `kafkaclient-secret` (defaults - see script) |
 | `Kafka:SchemaRegistryUrl` | `http://localhost:8085` |
 | `Kafka:SchemaRegistryApiKey` / `Kafka:SchemaRegistryApiSecret` | `schemaregistry` / `schemaregistry-secret` (defaults) |
+| Kafka data volume (`.bat` and `kube play` setups - not the custom-image path) | Named Podman volume `iis-wms-kafka-data`, persists across reruns - see [Cleanup](#cleanup) to reset it |
 | Topics | `inventory-events`, `inventory-bulk-import` |
 | Consumer groups | `inventory-events-consumer`, `$InventoryStateChanged`, `inventory-bulk-import-consumer` (appsettings.json's actual `Kafka:ConsumerGroup` values) |
 | Schema subject | `inventory-events-value` (a trimmed local-test version of the real Avro contract - see [registration/inventory-state-changed.avsc](registration/inventory-state-changed.avsc)) |
@@ -57,18 +58,18 @@ likewise **consumed** into the `$InventoryStateChanged` group - see
 [registration/push-inventory-state-changed.ps1](registration/push-inventory-state-changed.ps1)
 and "Producing a real InventoryStateChanged event" below for the manual/curl equivalent
 this automates. The script is idempotent (safe to re-run), but not in the sense of reusing
-everything: only the Podman **network** is reused if it already exists - the broker,
-Schema Registry, Kafka UI, and Kafka REST Proxy containers are all **always removed and
-recreated fresh on every run**, so a re-run always picks up the current
-listener/credential config instead of silently continuing on a stale one (a recurring
-gotcha before this). Schema Registry has to be recreated alongside the broker specifically
-- its registered schemas live in the broker's own `_schemas` topic, not in the Schema
-Registry container, so reusing a Schema Registry container against a freshly wiped broker
-would leave it pointing at offsets that no longer exist. The one real cost: the broker has
-no volume for its topics/messages/consumer offsets, so none of that persists across runs
-either - by design for a local dev/test sandbox (`register-defaults.bat` and the test
-messages below recreate everything that matters anyway), not appropriate if you needed
-data to persist. To change the local credentials themselves, edit
+everything: the Podman **network** and the broker's **data volume**
+(`iis-wms-kafka-data` - topics/messages/consumer offsets/registered schemas) are both
+reused if they already exist - only the broker, Schema Registry, Kafka UI, and Kafka REST
+Proxy **containers** are always removed and recreated fresh on every run, so a re-run
+always picks up the current listener/credential config instead of silently continuing on a
+stale one (a recurring gotcha before this) while the underlying data survives the
+container recreation. Schema Registry is still recreated alongside the broker on every run
+regardless - its registered schemas live in the broker's own `_schemas` topic, not in the
+Schema Registry container itself, so there'd be nothing gained by keeping the Schema
+Registry container around separately. If you want a genuinely empty broker (no persisted
+topics/messages/offsets/schemas), delete the volume yourself first - see
+[Cleanup](#cleanup). To change the local credentials themselves, edit
 `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`/`SCHEMA_REGISTRY_USERNAME`/
 `SCHEMA_REGISTRY_PASSWORD` near the top of [setup-podman-kafka.bat](setup-podman-kafka.bat)
 - the same steps it runs are broken out individually below.
@@ -245,18 +246,18 @@ Both default to the `InventoryStateChanged` sample (`inventory-events` /
 
 Everything below this point (`<cluster_id>` lookup, `schema_id` lookup, base64-encoding
 headers by hand) is exactly what makes calling Kafka REST Proxy's v3 API directly from
-Postman/curl tedious. [events-api.ps1](events-api.ps1) is a small local HTTP wrapper that
-does all of it for you, so Postman/curl only ever has to deal with plain HTTP headers and
-a raw JSON body:
+Postman/curl tedious. [registration/events-api.ps1](registration/events-api.ps1) is a small
+local HTTP wrapper that does all of it for you, so Postman/curl only ever has to deal with
+plain HTTP headers and a raw JSON body:
 
 ```
-POST /api/events?type=<SchemaName>
+POST /api/events?type=<EventName>
 ```
 
 Run it once and leave it running while you test:
 
 ```bat
-powershell -NoProfile -File scripts\local-kafka\events-api.ps1
+powershell -NoProfile -File scripts\local-kafka\registration\events-api.ps1
 ```
 
 It always runs directly on your host, never inside a container/Pod, so this works
@@ -657,7 +658,10 @@ podman pod rm -f iis-wms-local-kafka
 
 `kube down` removes exactly what that file's `kube play` created (Pod + Secret) - no
 separate network/container cleanup needed, unlike the `.bat` script's manual `podman rm`/
-`podman network rm`.
+`podman network rm`. It does **not** remove the `iis-wms-kafka-data` named volume the
+kafka container's `persistentVolumeClaim` maps onto - that's the point, so a later
+`kube play` picks up right where you left off. Delete it explicitly
+(`podman volume rm iis-wms-kafka-data`) for a genuinely empty broker.
 
 ## Setup via custom images (`podman build`)
 
@@ -931,6 +935,15 @@ The first should succeed; the second (no credentials) should get a `401`.
 ```bat
 podman rm -f iis-wms-kafka iis-wms-schema-registry iis-wms-kafka-ui iis-wms-kafka-rest
 podman network rm iis-wms-kafka-net
+```
+
+This removes the containers and network but **not** the `iis-wms-kafka-data` named volume
+(topics/messages/consumer offsets/registered schemas) - that's by design, so the next
+`setup-podman-kafka.bat` run picks up where you left off instead of starting empty. To
+also wipe the broker's data and start with a genuinely clean slate:
+
+```bat
+podman volume rm iis-wms-kafka-data
 ```
 
 The generated `secrets\` folder is safe to delete too (or leave - it only ever holds

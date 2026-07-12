@@ -14,6 +14,17 @@
 # schemaregistry/schemaregistry-secret. Change them here (and re-run `podman kube play`)
 # if you want different local values - these are throwaway local credentials, never the
 # real Confluent Cloud ones from appsettings.json, so committing them is fine.
+#
+# The kafka container's data dir (/var/lib/kafka/data - topics, messages, consumer offsets,
+# registered schemas via the broker's "_schemas" topic, and the KRaft metadata log) is
+# backed by a persistentVolumeClaim named "iis-wms-kafka-data" - `podman kube play` maps
+# that claimName directly onto a Podman named volume of the same name (auto-created if it
+# doesn't exist yet), same naming convention as setup-podman-kafka.bat's KAFKA_DATA_VOLUME.
+# `podman kube down` removes the Pod/Secret but leaves this volume alone, so the data
+# persists across "kube down" + "kube play" cycles - delete it explicitly (`podman volume rm
+# iis-wms-kafka-data`) for a genuinely empty broker. CLUSTER_ID/KAFKA_NODE_ID below are fixed
+# values, so the broker recognizes this volume's existing KRaft metadata on every run instead
+# of reformatting it.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -92,6 +103,8 @@ spec:
         - name: kafka-secrets
           mountPath: /etc/kafka/secrets
           readOnly: true
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
     - name: schema-registry
       image: confluentinc/cp-schema-registry:7.6.0
       ports:
@@ -184,3 +197,6 @@ spec:
     - name: kafka-secrets
       secret:
         secretName: kafka-local-secrets
+    - name: kafka-data
+      persistentVolumeClaim:
+        claimName: iis-wms-kafka-data
