@@ -1,0 +1,94 @@
+# Non-sensitive Kafka settings, mirroring the "Kafka" section of
+# src/Api/IIS.WMS.Consumer.Api/appsettings.json. Keys use the ".NET double-underscore"
+# convention (`Section__Key`) so envFrom: configMapRef injects them as env vars that
+# Microsoft.Extensions.Configuration binds straight back onto the same `Kafka:*` section
+# tree the app already reads via IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/ConsumerOptions.cs
+# and KafkaConsumerOptions - no code change needed to consume this.
+#
+# Credentials (Username/Password/SchemaRegistryApiKey/SchemaRegistryApiSecret) are
+# deliberately NOT here - see the Secret document below. ConfigMaps are not encrypted at
+# rest (kubernetes-deployment-best-practices.instructions.md §Secrets), so they stay a
+# separate `kind: Secret`, not folded into this ConfigMap's `data`, even though both live
+# in this one file for convenience.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-consumer-config
+  labels:
+    app: kafka-consumer
+data:
+  # Kafka-level (top-level "Kafka" section) - event-level sections below fall back to
+  # these when unset, per ConsumerOptions.ApplyKafkaLevelDefaults.
+  #
+  # BootstrapServers/Protocol/SchemaRegistryUrl point at
+  # scripts/local-kafka/setup-podman-kafka.bat's local Podman stack, not appsettings.json's
+  # Confluent Cloud values - SaslPlaintext (SASL, no TLS - there's no cert locally), not
+  # SaslSsl. Swap these three back to the Confluent Cloud host/Protocol: SaslSsl when
+  # pointing this Deployment at a real cluster.
+  #
+  # "localhost" only resolves inside this Pod's own network namespace - it does NOT reach a
+  # broker running as its own container/Pod, or on the Windows host. If this Deployment runs
+  # under Podman, use the broker's container name on a shared Podman network, or
+  # host.containers.internal to reach the Windows host from inside Podman.
+  Kafka__Enabled: "true"
+  Kafka__BootstrapServers: "localhost:9092"
+  Kafka__Protocol: "SaslPlaintext"
+  Kafka__AuthenticationMode: "Plain"
+  Kafka__SchemaRegistryUrl: "http://localhost:8085"
+  Kafka__Topic: "inventory-events"
+  Kafka__ConsumerGroup: "inventory-events-consumer"
+  Kafka__ServiceBusQueueName: "inventory-events"
+  Kafka__WorkerCount: "64"
+  Kafka__ChannelCapacity: "5000"
+  Kafka__DeduplicationCheckEnabled: "false"
+  Kafka__EnableAutoCommit: "false"
+  Kafka__AutoOffsetReset: "Latest"
+
+  # KafkaConsumerOptions.Functions - allow-list of which consumers this pod runs.
+  # Array binding needs the __<index> suffix form; empty/absent means "run all three".
+  Kafka__Functions__0: "InventoryStateChanged"
+
+  # Kafka:InventoryStateChanged - the Avro/Schema-Registry consumer. Inherits
+  # BootstrapServers/SchemaRegistryUrl/Enabled from the Kafka-level keys above.
+  Kafka__InventoryStateChanged__Topic: "inventory-events"
+  Kafka__InventoryStateChanged__ConsumerGroup: "$InventoryStateChanged"
+  Kafka__InventoryStateChanged__ServiceBusQueueName: "inventory-state-changed"
+
+  # Kafka:BulkInventoryImport - disabled by default in appsettings.json; kept here so
+  # toggling it on is a ConfigMap edit, not a code change.
+  Kafka__BulkInventoryImport__Enabled: "false"
+  Kafka__BulkInventoryImport__Topic: "inventory-bulk-import"
+  Kafka__BulkInventoryImport__ConsumerGroup: "inventory-bulk-import-consumer"
+  Kafka__BulkInventoryImport__ServiceBusQueueName: "inventory-bulk-import"
+  Kafka__BulkInventoryImport__WorkerCount: "128"
+  Kafka__BulkInventoryImport__ChannelCapacity: "20000"
+---
+# Plain Kubernetes Secret for the Kafka SASL and Schema Registry credentials - Key Vault /
+# Workload Identity sourcing skipped for now per request. This is still compliant with
+# kubernetes-deployment-best-practices.instructions.md §Secrets ("MUST use Kubernetes
+# Secrets or, preferably, ... Key Vault"), just not the preferred option; revisit if this
+# moves toward production.
+#
+# Maps to appsettings.json's Kafka:Username / Kafka:Password / Kafka:SchemaRegistryApiKey /
+# Kafka:SchemaRegistryApiSecret. Keyed with the same "Section__Key" env var names as the
+# ConfigMap above so the Deployment can pull both via one envFrom list.
+#
+# The values below are scripts/local-kafka/setup-podman-kafka.bat's own local-only
+# throwaway credentials (KAFKA_SASL_USERNAME/PASSWORD, SCHEMA_REGISTRY_USERNAME/PASSWORD) -
+# safe to commit, same reasoning as scripts/local-kafka/kafka-pod.yaml's own Secret.
+# MUST NOT be replaced with real Confluent Cloud values and committed here (base64 is
+# encoding, not encryption - same doc, same section) - swap to a real cluster's credentials
+# via `kubectl create secret generic kafka-consumer-secrets --from-literal=...` or your
+# CI/CD pipeline's secret injection step instead, never by editing stringData in this file.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-consumer-secrets
+  labels:
+    app: kafka-consumer
+type: Opaque
+stringData:
+  Kafka__Username: "kafkaclient"
+  Kafka__Password: "kafkaclient-secret"
+  Kafka__SchemaRegistryApiKey: "schemaregistry"
+  Kafka__SchemaRegistryApiSecret: "schemaregistry-secret"

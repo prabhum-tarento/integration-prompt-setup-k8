@@ -1,6 +1,5 @@
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
@@ -23,21 +22,20 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddBlobStorage(configuration);
         services.AddNexusDeduplicationService(configuration);
 
-        // Each Kafka consumer's health check is registered alongside its hosted service inside
+        // Each Kafka consumer's health check, and both Service Bus queues' ServiceBusHealthCheck
+        // (session-enabled and bulk-import), are registered alongside their hosted services inside
         // AddMessaging (see MessagingServiceCollectionExtensions.AddKafkaConsumer) rather than
-        // here, since each needs its own ConsumerHealthState instance passed in at registration
-        // time. Every check across this method and AddMessaging is still tagged for the Pod it
-        // would run on in the target 3-Deployment topology
-        // (kubernetes-deployment-best-practices.instructions.md) - a Pod's readiness probe can
-        // only observe its own process, so Program.cs maps a separate endpoint per tag rather
-        // than one /health/ready that blends all three (aspnet-rest-apis.instructions.md,
-        // integration-resiliency.instructions.md §8), even though this skeleton currently hosts
-        // all three workloads in one process.
+        // here, since each needs its own state/queue name passed in at registration time. Every
+        // check across this method and AddMessaging is still tagged for the Pod it would run on in
+        // the target 3-Deployment topology (kubernetes-deployment-best-practices.instructions.md) -
+        // a Pod's readiness probe can only observe its own process, so Program.cs maps a separate
+        // endpoint per tag rather than one /health/ready that blends all three
+        // (aspnet-rest-apis.instructions.md, integration-resiliency.instructions.md §8), even
+        // though this skeleton currently hosts all three workloads in one process.
         services.AddMessaging(configuration);
 
         services.AddHealthChecks()
-            .AddCheck<CosmosHealthCheck>("cosmos-db", tags: ["api"])
-            .AddCheck<ServiceBusHealthCheck>("service-bus", tags: ["service-bus-consumer"]);
+            .AddCheck<CosmosHealthCheck>("cosmos-db", tags: ["api"]);
 
         return services;
     }

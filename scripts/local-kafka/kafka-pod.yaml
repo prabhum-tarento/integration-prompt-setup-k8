@@ -1,0 +1,186 @@
+# Declarative alternative to setup-podman-kafka.bat's imperative `podman run` calls - apply
+# with `podman kube play kafka-pod.yaml`, tear down with `podman kube down kafka-pod.yaml`.
+#
+# Kafka, Schema Registry, Kafka UI, and Kafka REST Proxy run as four containers in ONE Pod
+# (not separate Pods on a shared network like the .bat script) - Pod containers share a
+# network namespace, so Schema Registry reaches the broker over "localhost:29092", and
+# Kafka UI / Kafka REST Proxy reach both over "localhost:9092"/"localhost:8081", with no
+# custom Podman network needed.
+#
+# Credentials are self-contained here (via the Secret below) rather than depending on
+# scripts/local-kafka/secrets/ existing on disk first - this file works standalone. Same
+# local-only values as setup-podman-kafka.bat's defaults: Kafka username/password
+# kafkaclient/kafkaclient-secret, Schema Registry username/password
+# schemaregistry/schemaregistry-secret. Change them here (and re-run `podman kube play`)
+# if you want different local values - these are throwaway local credentials, never the
+# real Confluent Cloud ones from appsettings.json, so committing them is fine.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-local-secrets
+  labels:
+    app: iis-wms-local-kafka
+type: Opaque
+stringData:
+  kafka_server_jaas.conf: |
+    KafkaServer {
+       org.apache.kafka.common.security.plain.PlainLoginModule required
+       username="broker"
+       password="broker-secret"
+       user_broker="broker-secret"
+       user_kafkaclient="kafkaclient-secret";
+    };
+  client.properties: |
+    security.protocol=SASL_PLAINTEXT
+    sasl.mechanism=PLAIN
+    sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="kafkaclient" password="kafkaclient-secret";
+  schema-registry.jaas: |
+    SchemaRegistry-Props {
+       org.eclipse.jetty.jaas.spi.PropertyFileLoginModule required
+       file="/etc/schema-registry/secrets/schema_registry.password"
+       debug="false";
+    };
+  schema_registry.password: |
+    schemaregistry: schemaregistry-secret,admin
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iis-wms-local-kafka
+  labels:
+    app: iis-wms-local-kafka
+spec:
+  containers:
+    - name: kafka
+      image: confluentinc/cp-kafka:7.6.0
+      ports:
+        - containerPort: 9092
+          hostPort: 9092
+      env:
+        - name: KAFKA_OPTS
+          value: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf
+        - name: KAFKA_NODE_ID
+          value: "1"
+        # Confluent's own documented example KRaft cluster id - any fixed, valid base64
+        # UUID works for a throwaway local broker.
+        - name: CLUSTER_ID
+          value: MkU3OEVBNTcwNTJENDM2Qk
+        - name: KAFKA_PROCESS_ROLES
+          value: broker,controller
+        - name: KAFKA_LISTENERS
+          value: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,SASL_PLAINTEXT_HOST://0.0.0.0:9092
+        # Both listeners advertise "localhost" - Schema Registry and any CLI tool exec'd
+        # into either container in this Pod resolve it the same way, since they share one
+        # network namespace.
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: PLAINTEXT://localhost:29092,SASL_PLAINTEXT_HOST://localhost:9092
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT_HOST:SASL_PLAINTEXT
+        - name: KAFKA_SASL_ENABLED_MECHANISMS
+          value: PLAIN
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: CONTROLLER
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: 1@localhost:29093
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: PLAINTEXT
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "1"
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: "true"
+      volumeMounts:
+        - name: kafka-secrets
+          mountPath: /etc/kafka/secrets
+          readOnly: true
+    - name: schema-registry
+      image: confluentinc/cp-schema-registry:7.6.0
+      ports:
+        - containerPort: 8081
+          hostPort: 8085   # lines up with Kafka:SchemaRegistryUrl=http://localhost:8085
+      env:
+        - name: SCHEMA_REGISTRY_OPTS
+          value: -Djava.security.auth.login.config=/etc/schema-registry/secrets/schema-registry.jaas
+        - name: SCHEMA_REGISTRY_AUTHENTICATION_METHOD
+          value: BASIC
+        - name: SCHEMA_REGISTRY_AUTHENTICATION_ROLES
+          value: admin
+        - name: SCHEMA_REGISTRY_AUTHENTICATION_REALM
+          value: SchemaRegistry-Props
+        - name: SCHEMA_REGISTRY_HOST_NAME
+          value: localhost
+        - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+          value: PLAINTEXT://localhost:29092
+        - name: SCHEMA_REGISTRY_LISTENERS
+          value: http://0.0.0.0:8081
+      volumeMounts:
+        - name: kafka-secrets
+          mountPath: /etc/schema-registry/secrets
+          readOnly: true
+    - name: kafka-ui
+      # kafbat/kafka-ui is the actively maintained continuation of provectuslabs/kafka-ui,
+      # which stopped receiving updates - see scripts/local-kafka/README.md. Pulled from
+      # Docker Hub, not ghcr.io - confirmed v1.5.0 exists there (ghcr.io's tag listing at
+      # the time of writing only surfaced recent commit-sha builds, not this release tag).
+      image: docker.io/kafbat/kafka-ui:v1.5.0
+      ports:
+        - containerPort: 8080
+          hostPort: 8090   # http://localhost:8090 - 8080 left free for other local tools
+      env:
+        - name: KAFKA_CLUSTERS_0_NAME
+          value: iis-wms-local
+        # Connects over the SASL_PLAINTEXT_HOST listener, same as any other client -
+        # credentials match secrets/client.properties / kafka_server_jaas.conf above.
+        - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+          value: localhost:9092
+        - name: KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL
+          value: SASL_PLAINTEXT
+        - name: KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM
+          value: PLAIN
+        - name: KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG
+          value: org.apache.kafka.common.security.plain.PlainLoginModule required username="kafkaclient" password="kafkaclient-secret";
+        # Registry's in-Pod port (8081), not the host-published 8085 - no need to leave
+        # the Pod's own network namespace.
+        - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY
+          value: http://localhost:8081
+        - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRYAUTH_USERNAME
+          value: schemaregistry
+        - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRYAUTH_PASSWORD
+          value: schemaregistry-secret
+    - name: kafka-rest
+      # Deliberately newer than the broker/Schema Registry above (7.6.0) - that version's
+      # REST Proxy has a confirmed bug producing Avro values with a logicalType field
+      # (e.g. "timestamp-millis"): a ClassCastException trying to write a converted
+      # java.time.Instant back as a raw long. Confluent Platform supports running REST
+      # Proxy at a different/newer version than the rest of the cluster. Unverified
+      # whether 8.2.2 actually fixes this - check `podman logs` for the same
+      # ClassCastException if Avro produce calls still fail.
+      image: confluentinc/cp-kafka-rest:8.2.2
+      ports:
+        - containerPort: 8082
+          hostPort: 8086   # http://localhost:8086 - curl-based produce API, see README.md
+      env:
+        - name: KAFKA_REST_HOST_NAME
+          value: localhost
+        # Connects over the SASL_PLAINTEXT_HOST listener, same as kafka-ui above - no
+        # separate in-network listener needed since this Pod's containers share a network
+        # namespace (unlike the .bat script's SASL_PLAINTEXT_NET workaround).
+        - name: KAFKA_REST_BOOTSTRAP_SERVERS
+          value: localhost:9092
+        - name: KAFKA_REST_CLIENT_SECURITY_PROTOCOL
+          value: SASL_PLAINTEXT
+        - name: KAFKA_REST_CLIENT_SASL_MECHANISM
+          value: PLAIN
+        - name: KAFKA_REST_CLIENT_SASL_JAAS_CONFIG
+          value: org.apache.kafka.common.security.plain.PlainLoginModule required username="kafkaclient" password="kafkaclient-secret";
+        - name: KAFKA_REST_SCHEMA_REGISTRY_URL
+          value: http://localhost:8081
+        - name: KAFKA_REST_SCHEMA_REGISTRY_BASIC_AUTH_CREDENTIALS_SOURCE
+          value: USER_INFO
+        - name: KAFKA_REST_SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO
+          value: schemaregistry:schemaregistry-secret
+        - name: KAFKA_REST_LISTENERS
+          value: http://0.0.0.0:8082
+  volumes:
+    - name: kafka-secrets
+      secret:
+        secretName: kafka-local-secrets

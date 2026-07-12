@@ -7,7 +7,7 @@ public sealed class ServiceBusConsumerOptions
     public const string SectionName = "ServiceBus";
 
     /// <summary>Fully-qualified namespace, e.g. <c>my-namespace.servicebus.windows.net</c> - required for Workload Identity auth (no connection string to derive it from).</summary>
-    public string FullyQualifiedNamespace { get; init; } = default!;
+    public string ConnectionString { get; init; } = default!;
 
     /// <summary>Name of the session-enabled queue the relay publishes to and the consumer processes.</summary>
     public string QueueName { get; init; } = "inventory-events";

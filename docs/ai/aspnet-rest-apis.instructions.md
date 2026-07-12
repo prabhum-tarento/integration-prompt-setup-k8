@@ -106,12 +106,19 @@ extensibility point) rather than custom try/catch middleware:
 ```csharp
 public sealed class GlobalExceptionHandler(
     IProblemDetailsService problemDetailsService,
-    ILogger<GlobalExceptionHandler> logger,
-    ICorrelationContext correlationContext) : IExceptionHandler
+    ILogger<GlobalExceptionHandler> logger) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
         HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
+        // AddExceptionHandler<T>() always registers IExceptionHandler as a singleton, but
+        // ICorrelationContext is (correctly) scoped per request — constructor-injecting it
+        // instead of resolving it here throws "Cannot consume scoped service ... from
+        // singleton" the moment DI validates scopes (Development), and would silently
+        // capture one request's instance forever in an environment that doesn't validate
+        // (Production). Resolve it from the current request's RequestServices instead.
+        var correlationContext = httpContext.RequestServices.GetRequiredService<ICorrelationContext>();
+
         // Note: request-DTO shape/field validation is rejected earlier by
         // ValidationFilter and never reaches here. A ValidationException
         // caught here means an Application-layer invariant failed *after*
@@ -170,6 +177,14 @@ Rules:
 * Pipeline order matters: `CorrelationIdMiddleware` runs *before*
   `UseExceptionHandler()`, so the ID exists before any exception can be
   thrown and the handler above can read it from `ICorrelationContext`.
+* **Never constructor-inject a Scoped service into `GlobalExceptionHandler`
+  (or any other `IExceptionHandler`)** — `AddExceptionHandler<T>()` always
+  registers it as a Singleton, so a Scoped dependency like
+  `ICorrelationContext` must be resolved from `httpContext.RequestServices`
+  inside `TryHandleAsync` instead, exactly as the example above does. This
+  is the same "resolve from the per-call scope you do have access to,
+  don't inject a scoped service into a singleton's constructor" fix that
+  applies to any singleton with a scoped collaborator.
 * Routing `IProblemDetailsService.TryWriteAsync` through the registered
   `AddProblemDetails()` pipeline (instead of hand-writing JSON) is what
   actually produces the `application/problem+json` content type RFC 9457

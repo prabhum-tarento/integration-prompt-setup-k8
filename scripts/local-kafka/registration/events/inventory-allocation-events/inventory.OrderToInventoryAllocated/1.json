@@ -1,0 +1,26 @@
+{
+    "headers": {
+        "Correlation-Id": "5-355103-7038409",
+        "Deduplication-Id": "5-355103-7038409",
+        "Type": "inventory.OrderToInventoryAllocated",
+        "App-Id": "iis-wms"
+    },
+    "body": {
+        "channel": "OTHER_STORES",
+        "allocateDate": "2026-07-12T01:43:40.000Z",
+        "location": {
+            "id": "EDC",
+            "type": "WAREHOUSE"
+        },
+        "entity": null,
+        "orderDomain": "B2B",
+        "orderId": "FIN030175",
+        "referenceId": "5-355103-7038409",
+        "productId": "794982C01",
+        "productUnits": "base_lv",
+        "countryOfOrigin": "TH",
+        "hallmarking": "NON",
+        "allocatedFromB2BBucketQuantity": 5,
+        "allocatedFromB2CBucketQuantity": 0
+    }
+}

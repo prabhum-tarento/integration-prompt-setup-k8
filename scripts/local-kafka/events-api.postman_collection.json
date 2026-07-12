@@ -1,0 +1,74 @@
+{
+  "info": {
+    "name": "iis-wms-integrations - Local Kafka events-api wrapper",
+    "description": "Produces events onto the local Kafka stack (scripts/local-kafka) through events-api.ps1 - see scripts/local-kafka/README.md's \"Simpler still: the events-api.ps1 wrapper\" section. Start the wrapper first: powershell -NoProfile -File scripts\\local-kafka\\events-api.ps1 - it must stay running while these requests are sent, and Kafka REST Proxy/Schema Registry (part of setup-podman-kafka.bat or kafka-pod.yaml) must already be up underneath it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Produce InventoryStateChanged",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// changeDate must be epoch MILLISECONDS (avsc: {\"type\": \"long\", \"logicalType\": \"timestamp-millis\"}) -",
+              "// Postman's built-in {{$timestamp}} is seconds, not millis, so compute it here instead.",
+              "pm.variables.set('changeDateMillis', Date.now());",
+              "",
+              "// Fresh per request, so re-sending this doesn't collide with a prior run's dedup check.",
+              "pm.variables.set('correlationId', pm.variables.replaceIn('{{$guid}}'));",
+              "pm.variables.set('deduplicationId', 'dedup-' + pm.variables.replaceIn('{{$guid}}'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Correlation-Id",
+            "value": "{{correlationId}}",
+            "description": "Forwarded by events-api.ps1 as a base64-encoded Kafka record header - see KafkaHeaderNames.cs."
+          },
+          {
+            "key": "Deduplication-Id",
+            "value": "{{deduplicationId}}"
+          },
+          {
+            "key": "Type",
+            "value": "inventory.InventoryStateChanged"
+          },
+          {
+            "key": "App-Id",
+            "value": "Postman"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"OTHER_STORES\",\n  \"id\": \"294650C0135764824\",\n  \"changeDate\": {{changeDateMillis}},\n  \"location\": { \"id\": \"TDC\", \"type\": \"WAREHOUSE\" },\n  \"entity\": null,\n  \"type\": \"BLC\",\n  \"fromState\": { \"state\": \"AVAILABLE\", \"status\": \"PICKABLE\" },\n  \"toState\": { \"state\": \"AVAILABLE\", \"status\": \"HELD\" },\n  \"itemLines\": [\n    { \"lineNum\": \"1\", \"productId\": \"294650C01\", \"quantity\": 63, \"countryOfOrigin\": \"TH\", \"hallmarking\": \"NON\" }\n  ],\n  \"referenceId\": null\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://localhost:8087/api/events?type=inventory-events-value",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8087",
+          "path": ["api", "events"],
+          "query": [
+            {
+              "key": "type",
+              "value": "inventory-events-value",
+              "description": "Schema Registry subject name - events-api.ps1 derives the Kafka topic from this by stripping a trailing \"-value\"."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

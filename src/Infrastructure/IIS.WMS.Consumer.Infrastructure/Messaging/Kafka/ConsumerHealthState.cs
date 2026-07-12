@@ -1,7 +1,7 @@
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 /// <summary>
-/// Shared state a <see cref="ConsumerHostedService{TValue}"/> updates on every poll and a
+/// Shared state a <see cref="ConsumerHostedService"/> updates on every poll and a
 /// <see cref="ConsumerHealthCheck"/> reads - keeps the health check decoupled from the
 /// Confluent.Kafka consumer instance itself. Each consumer gets its own instance (registered as a
 /// keyed singleton, see <see cref="MessagingServiceCollectionExtensions"/>) - a stall in one

@@ -96,6 +96,28 @@ public abstract class CosmosRepository<TDomain, TDocument>
         }
     }
 
+    /// <summary>
+    /// Unconditionally overwrites the item at <paramref name="entity"/>'s partition key - no ETag
+    /// check, last write wins. Only correct for data that is not concurrently contested (e.g. an
+    /// idempotent bulk-import snapshot reload, per integration-resiliency.instructions.md §1's
+    /// bulk-import consumer) - anything requiring the read-modify-write guarantee
+    /// <see cref="ReplaceAsync"/>/<see cref="PatchAsync"/> provide must use those instead, not this.
+    /// </summary>
+    public async Task<TDomain> UpsertAsync(TDomain entity, CancellationToken cancellationToken = default)
+    {
+        var document = ToDocument(entity);
+        _logger.LogDebug("Upserting item {Id} in partition {PartitionKey} in {Container}.", document.Id, document.PartitionKey, _container.Id);
+
+        var response = await _container.UpsertItemAsync(
+            document, new PartitionKey(document.PartitionKey), cancellationToken: cancellationToken);
+
+        _logger.LogInformation(
+            "Upserted item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
+            document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
+
+        return ToDomain(response.Resource);
+    }
+
     /// <summary>Replaces an existing item, guarded by an ETag match. Throws <see cref="ConcurrencyException"/> on a mismatch.</summary>
     public async Task<TDomain> ReplaceAsync(TDomain entity, string expectedETag, CancellationToken cancellationToken = default)
     {

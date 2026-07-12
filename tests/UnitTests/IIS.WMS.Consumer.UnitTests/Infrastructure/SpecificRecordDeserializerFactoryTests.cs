@@ -17,7 +17,7 @@ public class SpecificRecordDeserializerFactoryTests
     {
         var factory = new SpecificRecordDeserializerFactory(Substitute.For<ILogger<SpecificRecordDeserializerFactory>>());
 
-        var deserializer = factory.Create<InventoryStateChanged>("http://localhost:8081", out var schemaRegistryClient);
+        var deserializer = factory.Create<InventoryStateChanged>("http://localhost:8081", null, null, out var schemaRegistryClient);
 
         Assert.NotNull(deserializer);
         Assert.NotNull(schemaRegistryClient);
@@ -30,12 +30,42 @@ public class SpecificRecordDeserializerFactoryTests
     {
         var factory = new SpecificRecordDeserializerFactory(Substitute.For<ILogger<SpecificRecordDeserializerFactory>>());
 
-        factory.Create<InventoryStateChanged>("http://localhost:8081", out var first);
-        factory.Create<InventoryStateChanged>("http://localhost:8081", out var second);
+        factory.Create<InventoryStateChanged>("http://localhost:8081", null, null, out var first);
+        factory.Create<InventoryStateChanged>("http://localhost:8081", null, null, out var second);
 
         Assert.NotSame(first, second);
 
         first.Dispose();
         second.Dispose();
+    }
+
+    [Fact(DisplayName = "Create with an API key and secret still returns a usable deserializer and client")]
+    public void Create_WithApiKeyAndSecret_ReturnsDeserializerAndDisposableClient()
+    {
+        var factory = new SpecificRecordDeserializerFactory(Substitute.For<ILogger<SpecificRecordDeserializerFactory>>());
+
+        var deserializer = factory.Create<InventoryStateChanged>(
+            "https://psrc-example.westeurope.azure.confluent.cloud", "api-key", "api-secret", out var schemaRegistryClient);
+
+        Assert.NotNull(deserializer);
+        Assert.NotNull(schemaRegistryClient);
+
+        schemaRegistryClient.Dispose();
+    }
+
+    [Theory(DisplayName = "Create with only one half of the API key/secret pair leaves the registry client unauthenticated, same as neither being set")]
+    [InlineData("api-key", null)]
+    [InlineData(null, "api-secret")]
+    [InlineData("", "")]
+    public void Create_WithOnlyOneCredentialHalf_StillReturnsDeserializerAndDisposableClient(string? apiKey, string? apiSecret)
+    {
+        var factory = new SpecificRecordDeserializerFactory(Substitute.For<ILogger<SpecificRecordDeserializerFactory>>());
+
+        var deserializer = factory.Create<InventoryStateChanged>("http://localhost:8081", apiKey, apiSecret, out var schemaRegistryClient);
+
+        Assert.NotNull(deserializer);
+        Assert.NotNull(schemaRegistryClient);
+
+        schemaRegistryClient.Dispose();
     }
 }

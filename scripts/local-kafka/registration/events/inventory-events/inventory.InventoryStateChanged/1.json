@@ -1,0 +1,49 @@
+{
+    "headers": {
+        "Content-Type": "application/json",
+        "Correlation-Id": "f3e7c1d0-4b5a-4e8f-9c2b-1a2b3c4d5e6f",
+        "Deduplication-Id": "abc123def456ghi789",
+        "Type": "inventory.InventoryStateChanged",
+        "App-Id": "inventory-service"
+    },
+    "body": {
+        "channel": "OTHER_STORES",
+        "id": "294650C0135764824",
+        "changeDate": "2026-07-11T08:48:06.000Z",
+        "location": {
+            "id": "TDC",
+            "type": "WAREHOUSE"
+        },
+        "entity": null,
+        "type": "BLC",
+        "fromState": {
+            "state": "AVAILABLE",
+            "status": "PICKABLE"
+        },
+        "toState": {
+            "state": "AVAILABLE",
+            "status": "HELD"
+        },
+        "itemLines": [
+            {
+                "lineNum": "1",
+                "productId": "294650C01",
+                "itemName": null,
+                "quantity": 63,
+                "units": null,
+                "countryOfOrigin": "TH",
+                "hallmarking": "NON",
+                "netWeight": null,
+                "tareWeight": null,
+                "unitPrice": null,
+                "commodityCode": null,
+                "itemCategoryLocalized": null,
+                "itemMaterialNameLocalized": null,
+                "inventoryRegistrationId": null,
+                "customsRegistrationLineNum": null,
+                "isBonded": null
+            }
+        ],
+        "referenceId": null
+    }
+}

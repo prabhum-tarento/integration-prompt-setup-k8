@@ -1,5 +1,6 @@
 using System.Reflection;
 using FluentValidation;
+using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +24,7 @@ public static class ApplicationServiceCollectionExtensions
         services.AddScoped<ICorrelationContext, CorrelationContext>();
         services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
         services.AddScoped<IInventoryEventService, InventoryEventService>();
+        services.AddScoped<IBulkInventoryImportService, BulkInventoryImportService>();
 
         return services;
     }

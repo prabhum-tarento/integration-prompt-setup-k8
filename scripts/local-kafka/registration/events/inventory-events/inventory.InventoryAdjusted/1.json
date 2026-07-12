@@ -1,0 +1,47 @@
+{
+    "headers": {
+        "Content-Type": "application/json",
+        "Correlation-Id": "f3e7c1d0-4b5a-4e8f-9c2b-1a2b3c4d5e7f",
+        "Deduplication-Id": "abc123def456ghi788",
+        "Type": "inventory.InventoryAdjusted",
+        "App-Id": "inventory-service"
+    },
+    "body": {
+        "channel": "OTHER_STORES",
+        "adjustment": {
+            "referenceId": "2519503_163800C01-60",
+            "adjustmentDate": "2026-07-10T16:22:18.000Z",
+            "entity": null,
+            "type": "UNKNOWN",
+            "state": {
+                "state": "AVAILABLE",
+                "status": "PICKABLE"
+            },
+            "location": {
+                "id": "CAECOM",
+                "type": "THIRD_PARTY_LOGISTICS"
+            },
+            "reason": "ADJUSTMENT",
+            "adjustmentLines": [
+                {
+                    "lineNum": "1",
+                    "productId": "163800C01-60",
+                    "itemName": null,
+                    "quantity": -1,
+                    "units": null,
+                    "countryOfOrigin": "UNKNOWN",
+                    "hallmarking": "NON",
+                    "netWeight": null,
+                    "tareWeight": null,
+                    "unitPrice": null,
+                    "commodityCode": null,
+                    "itemCategoryLocalized": null,
+                    "itemMaterialNameLocalized": null,
+                    "inventoryRegistrationId": null,
+                    "customsRegistrationLineNum": null,
+                    "isBonded": null
+                }
+            ]
+        }
+    }
+}

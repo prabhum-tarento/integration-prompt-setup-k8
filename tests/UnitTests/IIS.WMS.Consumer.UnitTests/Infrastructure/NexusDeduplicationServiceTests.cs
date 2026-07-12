@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using Polly;
 using Polly.Registry;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;

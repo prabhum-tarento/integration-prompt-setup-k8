@@ -1,0 +1,53 @@
+# Kafka -> Service Bus relay consumer Deployment. No Service - nothing routes inbound
+# traffic to it (kubernetes-deployment-best-practices.instructions.md §Services and Ingress).
+# Shape (probes, securityContext, resources) matches that doc's consumer Deployment example.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+  labels:
+    app: kafka-consumer
+spec:
+  replicas: 1   # KEDA ScaledObject (not included here) would manage this after initial rollout
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+    spec:
+      serviceAccountName: kafka-consumer-sa   # bound to AKS Workload Identity - see serviceaccount.yaml
+      containers:
+        - name: kafka-consumer
+          image: <registry>/kafka-consumer:<digest>
+          ports:
+            - containerPort: 8081   # health endpoint only - see integration-resiliency.instructions.md §8
+          envFrom:
+            - configMapRef:
+                name: kafka-consumer-config
+            - secretRef:
+                name: kafka-consumer-secrets   # plain k8s Secret - see the Secret document in configmap.yaml
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "512Mi" }
+          livenessProbe:
+            httpGet: { path: /health/live, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000

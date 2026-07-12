@@ -4,6 +4,7 @@ using IIS.WMS.Consumer.Application.Exceptions;
 using IIS.WMS.Consumer.Domain.Exceptions;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace IIS.WMS.Consumer.Api.ExceptionHandling;
 
@@ -17,8 +18,7 @@ namespace IIS.WMS.Consumer.Api.ExceptionHandling;
 /// </summary>
 public sealed class GlobalExceptionHandler(
     IProblemDetailsService problemDetailsService,
-    ILogger<GlobalExceptionHandler> logger,
-    ICorrelationContext correlationContext) : IExceptionHandler
+    ILogger<GlobalExceptionHandler> logger) : IExceptionHandler
 {
     /// <summary>Maps the exception to a status code/title, logs at a severity matching that status, and writes the response as RFC 9457 Problem Details.</summary>
     /// <param name="httpContext">The current request's HTTP context.</param>
@@ -28,6 +28,15 @@ public sealed class GlobalExceptionHandler(
     public async ValueTask<bool> TryHandleAsync(
         HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
+        // AddExceptionHandler<T>() always registers IExceptionHandler as a singleton, but
+        // ICorrelationContext is (correctly) scoped per request - constructor-injecting it here
+        // would either fail DI validation outright (Development) or, worse, silently capture one
+        // scope's instance forever and leak its correlation id into every later request's errors
+        // (Production, where ValidateOnBuild defaults off). Resolving it from the current request's
+        // RequestServices instead is the standard fix for a singleton that needs a scoped
+        // collaborator and has a per-call scope (the HttpContext) available to resolve it from.
+        var correlationContext = httpContext.RequestServices.GetRequiredService<ICorrelationContext>();
+
         var (status, title) = exception switch
         {
             ValidationException => (StatusCodes.Status400BadRequest, "Validation failed"),

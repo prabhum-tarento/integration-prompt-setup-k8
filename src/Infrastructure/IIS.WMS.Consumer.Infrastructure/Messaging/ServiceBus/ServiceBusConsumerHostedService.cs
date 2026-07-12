@@ -4,6 +4,7 @@ using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Exceptions;
+using IIS.WMS.Consumer.Infrastructure.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -32,13 +33,13 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
     /// <param name="client">Service Bus client used to create the session processor.</param>
     /// <param name="options">Queue name and other Service Bus settings.</param>
     /// <param name="scopeFactory">Creates a DI scope per message, since the hosted service itself is a singleton but the Application services it calls are scoped.</param>
-    /// <param name="healthState">Shared state updated on every message received.</param>
+    /// <param name="healthState">This consumer's own keyed <see cref="ServiceBusHealthState"/> instance - keyed since the bulk-import consumer has its own, separate instance too.</param>
     /// <param name="logger">Logger for processing/error events.</param>
     public ServiceBusConsumerHostedService(
         ServiceBusClient client,
         IOptions<ServiceBusConsumerOptions> options,
         IServiceScopeFactory scopeFactory,
-        ServiceBusHealthState healthState,
+        [FromKeyedServices(MessagingServiceCollectionExtensions.InventoryEventsServiceBusKey)] ServiceBusHealthState healthState,
         ILogger<ServiceBusConsumerHostedService> logger)
     {
         this.scopeFactory = scopeFactory;

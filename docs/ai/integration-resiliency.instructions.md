@@ -18,11 +18,13 @@ all of it lives in `Infrastructure`.
 
 ```
 Kafka topic (inventory events)
-    │  ConsumerHostedService<TValue> subclasses (Confluent.Kafka) - one per
-    │  wire format: KafkaConsumerHostedService (JSON), InventoryStateChangedConsumerHostedService (Avro)
+    │  ConsumerHostedService subclasses (Confluent.Kafka) - one per consumer,
+    │  each registering one or more schemas: KafkaConsumerHostedService (JSON),
+    │  InventoryStateChangedConsumerHostedService (Avro), BulkInventoryImportConsumerHostedService (Avro)
     ▼
 Azure Service Bus queue (durable relay)
-    │  ServiceBusConsumerHostedService (Azure.Messaging.ServiceBus)
+    │  ServiceBusConsumerHostedService (session-enabled) or
+    │  BulkImportServiceBusConsumerHostedService (non-session) (Azure.Messaging.ServiceBus)
     ▼
 Application layer (use case) → Cosmos DB repository (ETag-guarded write)
     │
@@ -37,51 +39,157 @@ every hop, log line, and outbound call this flow makes.
 ## 1. Kafka consumer → Service Bus relay
 
 - Every Kafka consumer is a concrete subclass of the shared
-  `ConsumerHostedService<TValue> : BackgroundService`, which owns a single
-  long-lived `IConsumer<string, TValue>` (Confluent.Kafka) per hosted-service
-  instance — Kafka's consumer-group protocol assigns it a subset of the
-  topic's partitions automatically on join/rebalance, so the service does
-  not manage partition assignment itself and never constructs one consumer
-  object per partition. `TValue` is already deserialized (a JSON or Avro
-  value deserializer wired in by the subclass's constructor); a subclass
-  only implements how one `TValue` maps to a Service Bus session id,
-  deterministic message id, and body — see `KafkaConsumerHostedService`
-  (JSON contract) and `InventoryStateChangedConsumerHostedService` (Avro,
-  via Confluent Schema Registry) for the two consumers this repo currently
-  runs. Each consumer can be turned off independently via its own
+  `ConsumerHostedService : BackgroundService` (no longer generic over a
+  single `TValue`), which owns a single long-lived `IConsumer<string, byte[]>`
+  (Confluent.Kafka) per hosted-service instance — Kafka's consumer-group
+  protocol assigns it a subset of the topic's partitions automatically on
+  join/rebalance, so the service does not manage partition assignment
+  itself and never constructs one consumer object per partition. **A
+  single topic/consumer group can carry more than one schema/event type**:
+  a concrete consumer registers one `ISchemaHandler` per schema it
+  understands (built via the base class's `CreateSchemaHandler<TValue>`,
+  which type-erases each schema's own `IDeserializer<TValue>`,
+  JSON-serializer, Service Bus router, and validator behind a common
+  non-generic interface), keyed by the Kafka `Type` header value
+  (`KafkaHeaderNames.Type`) that schema corresponds to. A consumer that
+  handles exactly one schema regardless of that header's value — every
+  consumer this repo runs today — registers its one handler under
+  `ConsumerHostedService.DefaultEventType` instead of an exact value; the
+  header's actual value is looked up first, falling back to that default
+  key, and a value matching neither is dead-lettered (raw bytes, hot-tier)
+  as an unrecognized schema rather than attempting to deserialize it. See
+  `KafkaConsumerHostedService` (JSON contract), `InventoryStateChangedConsumerHostedService`
+  (Avro, via Confluent Schema Registry), and `BulkInventoryImportConsumerHostedService`
+  (Avro, high-volume, non-session relay) for the three consumers this repo
+  currently runs. Each consumer can be turned off independently via its own
   `Enabled` configuration key (checked by the base class at startup) without
   removing its configuration section.
+- **Broker connection security** - `ConsumerOptions.Protocol` (`SecurityProtocol`:
+  `Plaintext`/`Ssl`/`SaslPlaintext`/`SaslSsl`), `AuthenticationMode`
+  (`SaslMechanism`: `Plain`/`ScramSha256`/`ScramSha512`/`OAuthBearer`/`Gssapi`),
+  `Username`, and `Password` map directly onto the equivalently-named
+  `Confluent.Kafka.ConsumerConfig` properties, event-level-first/Kafka-level-
+  fallback like `BootstrapServers`. Left unset, Confluent.Kafka's own default
+  (`Plaintext`, no SASL) applies - correct for the local emulator, never for
+  a real cluster. `Username`/`Password` are secrets: never set in
+  `appsettings.json`, local development reads them from user-secrets, every
+  other environment from Azure Key Vault, per
+  engineering-standards.instructions.md §6 - same rule as every other
+  credential in this repo. An inconsistent combination (a `SaslMechanism`
+  set without a SASL `Protocol`, say) is rejected by Confluent.Kafka itself
+  when the consumer is built; this repo doesn't re-validate that.
+- **`EnableAutoCommit`/`AutoOffsetReset`** are also topic (event-level)
+  configurable, Kafka-level-fallback like everything else above, but unlike
+  `Protocol`/`Username`/etc. the Kafka level always pins an explicit value
+  (`false`/`Earliest`) rather than leaving these two genuinely unset - see
+  `ConsumerOptions.EnableAutoCommit`'s remarks for why: Confluent.Kafka's own
+  defaults if left null are `true`/`Latest`, the opposite of what this
+  service's `PartitionOffsetCommitTracker`-driven manual-commit architecture
+  requires. **`EnableAutoCommit: true` is correctness-sensitive, not a style
+  preference** - it hands offset advancement back to librdkafka's own timer,
+  which can commit an offset before this service has actually finished (or
+  dead-lettered) the corresponding message, so a crash in that window
+  silently skips the message on restart instead of redelivering it. A topic
+  that legitimately wants to override the Kafka-level fallback is more often
+  reaching for `AutoOffsetReset: Latest` (e.g. a fresh consumer group that
+  should skip historical backlog, like `BulkInventoryImport` in
+  `appsettings.Development.json`) than for `EnableAutoCommit`.
 - On each message, in order: read the Kafka headers (correlation id, dedup
   id, event type, app id — see §4 for the exact header names) and log them;
-  write the raw header+body to the cold-tier audit container
-  (`request-audit`, see §5) unconditionally, before anything else touches
-  the message; check the message against the Nexus deduplication service
-  (`IDeduplicationService`, keyed on the `Deduplication-Id` header — a
-  duplicate is logged and its offset committed, without deserializing or
-  publishing it); deserialize; map to the internal event contract; and
-  publish to the Service Bus queue — do not write to Cosmos DB directly
-  from the Kafka consumer. The Service Bus hop is the durability boundary;
-  skipping it defeats the point of the relay. Deserialization happens
-  *after* the cold-tier log and dedup check, not inside `Consume()` itself
-  — the consumer reads raw bytes (Confluent.Kafka's built-in `byte[]`
-  deserializer, which never throws) and the deserializer supplied by each
-  concrete consumer (`IDeserializer<TValue>`, JSON or Avro) is invoked
-  manually once dedup clears the message. This is what makes it possible to
-  audit-log and dedupe a message the consumer can't actually parse.
-- A deserialization failure is a poison message: it never reaches the
-  publish step, so its raw header+body is written to the hot-tier
-  `consumer-dead-letter` container (see §5) for manual recovery, and the
-  offset is committed forward through `PartitionOffsetCommitTracker` (not a
-  direct `consumer.Commit`) — same handling as the pre-existing poison-
-  message path below, just with an added blob write. An unrecoverable
-  Service Bus publish failure (Polly retries in §3 exhausted) is
-  deliberately **not** handled the same way — it still faults the worker
-  and stops this consumer so Kubernetes restarts the pod and Kafka
-  redelivers, exactly as before. The two failure modes look similar but
-  aren't: a bad payload will never become parseable on redelivery (hence
-  dead-letter and move on), while a struggling Service Bus dependency can
-  recover, and a sustained outage should surface as an outage (restarts,
-  alerts) rather than silently draining the topic into blob storage.
+  check the correlation id against the configured ignore-list
+  (`ConsumerOptions.IgnoreCorrelationIdPrefixes`/`IgnoreCorrelationIdSuffixes`,
+  falling back Kafka-level → event-level the same way `Enabled`/`WorkerCount`
+  do — a match on either list, checked case-insensitively against the raw
+  `Correlation-Id` header, skips the message entirely: not deserialized, not
+  audit-logged, not deduplicated, not published, just logged at
+  `Information` and its offset committed forward, the same treatment as
+  `ValidateAsync` returning `false` below. Both lists unset/empty (the
+  default) accepts every message, and a message with no `Correlation-Id`
+  header at all is always accepted regardless of configuration — there's
+  nothing to match a prefix/suffix against); resolve the schema handler for
+  this message's event type (falling back to
+  `DefaultEventType`, dead-lettering raw bytes if neither matches);
+  deserialize; write the deserialized value as JSON to the cold-tier audit
+  container (`request-audit`, see §5) unconditionally; check the message
+  against the Nexus deduplication service (`IDeduplicationService`, keyed
+  on the `Deduplication-Id` header — a duplicate is logged and its offset
+  committed, without validating or publishing it; a per-topic
+  `DeduplicationCheckEnabled` setting, falling back Kafka-level → event-level
+  the same way `Enabled`/`WorkerCount`/`ChannelCapacity` do, can skip this
+  check entirely for a topic where Nexus coverage doesn't apply); run the
+  resolved handler's `ValidateAsync` (always valid by default — a schema
+  registers its own validator, e.g. a FluentValidation `IValidator<TValue>`,
+  via `CreateSchemaHandler`); route (`GetServiceBusRouting`) and publish to
+  the Service Bus queue — do not write to Cosmos DB directly from the Kafka
+  consumer. `ValidateAsync` returns a `bool`, not just throw-to-fail: a
+  **throw** is a hard failure (malformed/invalid data, handled the same as
+  every other failure mode below), while returning **`false`** means the
+  message is valid but this consumer deliberately chooses not to relay it —
+  logged, offset committed forward, but **not** written to hot storage,
+  since nothing failed. Deserialization happens *before* the cold-tier log
+  and dedup check here — the cold-tier record is of the deserialized value,
+  not the raw bytes — via the consumer's own raw `byte[]` read
+  (Confluent.Kafka's built-in `byte[]` deserializer, which never throws)
+  and the resolved handler's deserializer (JSON or Avro), invoked manually
+  on every message. **Known trade-off**: any field a newer producer's schema
+  adds that this consumer's currently-deployed reader schema doesn't
+  recognize is silently absent from the cold-tier audit trail, since it
+  never survives the deserialize step — a raw-bytes record for the same
+  message only exists if deserialization itself fails (see below).
+- **No single message's failure stops the consumer or blocks any other
+  message** — every failure mode below is handled uniformly, and this is a
+  deliberate design choice, not just a poison-message backstop: multiple
+  upstream systems produce onto the same topics on their own release
+  cadence, so a producer running a newer version of a shared Avro schema
+  than this consumer's currently-deployed reader is an expected, recurring
+  event, and Service Bus itself can degrade independently of that. Every
+  failure is logged at `Critical` tagged with which stage failed, and the
+  offset is committed forward through `PartitionOffsetCommitTracker` (not
+  a direct `consumer.Commit`) so the rest of the partition keeps flowing:
+  - **An event type with no registered schema handler** (exact match or
+    `DefaultEventType`): the **raw message bytes** are written to the
+    hot-tier `consumer-dead-letter` container (see §5) — there is no
+    deserializer to even attempt.
+  - **Deserialize** (or the JSON serialize step immediately after it)
+    fails: the **raw message bytes** are written to the hot-tier
+    `consumer-dead-letter` container (see §5) — there is no successfully
+    deserialized value to serialize as JSON at this point.
+  - **Validation** (`ValidateAsync` throws — not the same as it returning
+    `false`, see above) or **Service Bus publish** fails, even after
+    `ResiliencePipelines.ServiceBusPublish`'s retries are exhausted: the
+    deserialized value, as **JSON**, is written to the hot-tier container
+    instead — a valid value already exists by then.
+  A separate, out-of-band watcher process reprocesses whatever lands in
+  the hot-tier container once the underlying issue (schema mismatch, bad
+  data, transient Service Bus problem) is resolved. **Accepted trade-offs**
+  of treating a Service Bus publish failure as non-fatal instead of
+  faulting the worker and restarting the pod (this design's behavior
+  before this section was last revised): a genuine, sustained Service Bus
+  outage now dead-letters every in-flight message for its duration instead
+  of surfacing as an outage that Kafka redelivery would otherwise have
+  recovered from automatically, in order, once Service Bus recovered; and
+  because Service Bus sessions (`{WarehouseId}:{Sku}`, below) provide
+  per-aggregate ordering, a message that fails to publish while a *later*
+  message for the same aggregate succeeds leaves that session's ordering
+  broken until the watcher replays the failed one. Accepted deliberately in
+  exchange for "one bad event never blocks the partition" applying
+  uniformly to every stage, not only deserialize/validate.
+- The deduplication check itself **fails open**: if the call to the Nexus
+  deduplication service throws (e.g. Nexus is unavailable), the message is
+  logged at `Warning` and treated as *not* a duplicate, rather than as
+  fatal or as a confirmed duplicate — either alternative would be worse (a
+  Nexus outage dead-lettering the entire topic, or silently dropping every
+  message while Nexus is down). This relies on the downstream Service Bus
+  consumer's own idempotency check (§2) as the backstop; this consumer's
+  dedup check is a latency/cost optimization on top of that, not the only
+  defense against a redelivered message being applied twice.
+- **Per-message timing, logged individually on success**: `Deserialize`
+  duration, `ValidateAsync` duration, and total `ProcessMessageAsync`
+  duration are each measured with a `Stopwatch` and logged together as
+  `DeserializeDurationMs`/`ValidationDurationMs`/`TotalDurationMs` on the
+  structured "relayed" log line — not just a single combined number —
+  so a regression in one stage (e.g. validation getting slower after a new
+  rule is added) is visible without correlating separate log lines.
 - Use the Kafka message key (or a stable field from the payload, e.g.
   `WarehouseId:Sku:EventId`) as the outbound Service Bus **message ID** —
   this is what makes the Service Bus consumer's dedupe check (§2) work.
@@ -108,14 +216,19 @@ every hop, log line, and outbound call this flow makes.
   needing an equally large number of Kafka partitions to get equivalent
   parallelism — see §6 for when this pattern is worth reaching for over
   more partitions/pods, and how to size `WorkerCount`/`ChannelCapacity`.
-- **Commit the Kafka offset only after the Service Bus publish succeeds**
-  (`EnableAutoCommit = false`, manual `Commit` after a confirmed publish).
-  A crash between "consumed" and "published" must replay the message, not
-  silently drop it. With multiple concurrent workers, "after it succeeds"
-  is no longer just "commit this one message's offset": workers can finish
-  out of order, so a later offset can complete before an earlier one on
-  the same partition. `PartitionOffsetCommitTracker` (used by
-  `ConsumerHostedService<TValue>`) tracks each partition's contiguous
+- **Commit the Kafka offset only once this message's flow has reached a
+  terminal outcome** (`EnableAutoCommit = false`, manual `Commit`) — a
+  successful Service Bus publish, a confirmed duplicate, or one of the
+  non-fatal failure outcomes above (each of which already durably persisted
+  the message to the hot-tier container first). A crash mid-flight, before
+  any of those, must still replay the message on restart, not silently drop
+  it — this is why the offset is committed only once the message's outcome
+  (success or hot-tier dead-letter) is durable, never speculatively before.
+  With multiple concurrent workers, "committing" is no longer just "commit
+  this one message's offset": workers can finish out of order, so a later
+  offset can complete before an earlier one on the same partition.
+  `PartitionOffsetCommitTracker` (used by
+  `ConsumerHostedService`) tracks each partition's contiguous
   low-water mark and only commits up to the highest offset that's safe —
   i.e. every offset below it has actually completed — never a bare
   `consumer.Commit(result)` per message once more than one worker is in
@@ -348,7 +461,18 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 
 ## 5. Blob Storage
 
-Four containers now, grouped by tier — don't mix them:
+Four containers now, grouped by tier — don't mix them. **Hot and cold tiers
+are backed by separate Storage accounts**, each with its own connection
+info (`BlobStorageOptions.Hot`/`BlobStorageOptions.Cold`, each a
+`BlobStorageAccountOptions` with its own `AccountUri` — local dev instead
+reads `BlobStorage:Hot:ConnectionString`/`BlobStorage:Cold:ConnectionString`
+directly off configuration, same pattern as the single-account case used to).
+`BlobStorageServiceCollectionExtensions.AddBlobStorage` registers a keyed
+`BlobServiceClient`/`IFileStore` pair per tier
+(`BlobStorageServiceCollectionExtensions.HotTierKey`/`ColdTierKey`) rather
+than one shared instance; `ConsumerHostedService` resolves both via
+`[FromKeyedServices]` and picks the tier that matches each write below —
+never assume the two containers share an account or a client.
 
 - **Hot tier** (`imports`, `exports` containers): import/export files that
   are actively read/written as part of normal operation (e.g., a bulk
@@ -357,11 +481,16 @@ Four containers now, grouped by tier — don't mix them:
   behind an interface (`IFileStore`) so callers don't depend on the Azure
   SDK directly.
 - **Hot tier, consumer dead-letter** (`consumer-dead-letter` container,
-  `BlobStorageOptions.ConsumerDeadLetterContainerName`): a Kafka message's
-  raw header+body, written only when that message fails Avro/JSON
-  deserialization (§1) — kept in its own container rather than folded into
+  `BlobStorageOptions.ConsumerDeadLetterContainerName`): written whenever a
+  Kafka message's processing fails past the point of no automatic recovery
+  (§1) — kept in its own container rather than folded into
   `imports`/`exports`, since it's a failure record, not an import/export
-  file.
+  file. Content shape depends on which stage failed: **raw bytes**
+  (`.bin`) if deserialization (or the immediate JSON-serialize step after
+  it) failed - there's no successfully deserialized value to serialize;
+  otherwise (validation or Service Bus publish failed) the deserialized
+  value as **JSON** (`.json`), since a valid value exists by then. A
+  separate, out-of-band watcher process reprocesses whatever lands here.
 - **Cold tier, general request/response audit** (`request-audit`
   container, feature-flagged via `BlobStorageOptions.RequestAuditEnabled`):
   **optional**, enabled per environment via configuration, not hardcoded
@@ -369,21 +498,29 @@ Four containers now, grouped by tier — don't mix them:
   `{yyyy}/{MM}/{dd}/{correlationId}.json`.
 - **Cold tier, Kafka consumer audit** (also the `request-audit` container,
   `BlobStorageOptions.RequestAuditContainerName`): every message the Kafka
-  consumer reads gets a raw header+body audit blob (§1) — **unconditional**,
-  not gated by `RequestAuditEnabled` above; that flag covers the general
-  request/response audit use only. Named
-  `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/{timestamp}_{guid}.log`
+  consumer successfully deserializes gets its JSON representation written
+  as an audit blob (§1) — **unconditional**, not gated by
+  `RequestAuditEnabled` above; that flag covers the general request/response
+  audit use only. Named
+  `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/{timestamp}_{guid}.json`
   — a different convention from the general audit blobs immediately above,
   chosen so one correlation id's full audit trail (across however many
   consumers/schemas touch it) sits under one prefix. Both naming schemes
   share the same container; don't assume every blob under `request-audit`
-  follows the `{yyyy}/{MM}/{dd}` shape.
+  follows the `{yyyy}/{MM}/{dd}` shape. **Known trade-off**: because this is
+  the *deserialized* value's JSON, not the raw wire bytes, any field a
+  newer producer's schema added that this consumer's reader schema doesn't
+  recognize is silently absent here - it never survives deserialization to
+  be included. A message that fails to deserialize at all only ever gets a
+  hot-tier raw-bytes record, never a cold-tier one.
 - All four go through Polly (§3) for transient fault handling — the Kafka
-  consumer's own audit writes (`WriteAuditLogAsync`) additionally treat a
-  Blob Storage outage (after Polly's retries are exhausted) as non-fatal:
-  logged and swallowed, so a Blob Storage outage doesn't block the dedup
-  check or the relay itself. The audit trail is a diagnostic aid, not the
-  durability boundary (Service Bus is, per §1).
+  consumer's own audit writes (`ConsumerHostedService.WriteBlobAsync`)
+  additionally treat a Blob Storage outage (after Polly's retries are
+  exhausted) as non-fatal: logged and swallowed, so a Blob Storage outage
+  doesn't block the dedup check or the relay itself. The audit trail is a
+  diagnostic aid, not the durability boundary (Service Bus is, per §1 -
+  though see §1's note on Service Bus publish failures also being handled
+  as non-fatal now).
 - Never store a Cosmos account key, connection string, or PII you haven't
   explicitly cleared for audit retention inside a cold-tier blob — treat it
   with the same secrecy rules as
@@ -465,7 +602,7 @@ treating them as interchangeable concurrency knobs:
   (a Kafka poll loop) is paired with a slower, I/O-bound consumer (a
   publish/write call), and you want several concurrent workers draining
   one shared queue rather than processing strictly one item at a time.
-  `ConsumerHostedService<TValue>` (§1) is this repo's worked example:
+  `ConsumerHostedService` (§1) is this repo's worked example:
   bounded `Channel` between the poll loop and `WorkerCount` workers.
 
 **Default to horizontal scaling first.** More Kafka partitions and more

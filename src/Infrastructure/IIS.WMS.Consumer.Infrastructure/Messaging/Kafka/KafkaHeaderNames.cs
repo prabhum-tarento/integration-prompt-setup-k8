@@ -5,7 +5,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// matching the header names the same upstream Nexus/WMS event producers already use elsewhere (see
 /// <c>ApplicationHeaders</c> in the sibling iis-reflex-wms-facade repo), not this repo's own
 /// invention. <see cref="CorrelationId"/> replaces the previous ad hoc <c>"correlationId"</c> header
-/// name <see cref="ConsumerHostedService{TValue}"/> read before this change - that name didn't match
+/// name <see cref="ConsumerHostedService"/> read before this change - that name didn't match
 /// what the producer actually sends, so the correlation id fallback (a fresh GUID) was silently
 /// firing on every message.
 /// </summary>

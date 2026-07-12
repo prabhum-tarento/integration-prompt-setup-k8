@@ -1,5 +1,5 @@
+using System.Diagnostics;
 using System.Text;
-using System.Text.Json;
 using System.Threading.Channels;
 using Azure.Messaging.ServiceBus;
 using Confluent.Kafka;
@@ -8,35 +8,67 @@ using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Polly.Registry;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 /// <summary>
 /// Generic Kafka → Service Bus relay (integration-resiliency.instructions.md §1) shared by every
-/// consumer regardless of wire format - <c>TValue</c> is the deserialized message shape (JSON or
-/// Avro), but deserialization itself now happens manually, after the dedup check below, not inside
-/// <see cref="IConsumer{TKey,TValue}.Consume(TimeSpan)"/> - see the class-level flow remarks. A
-/// derived class only needs to say how one <c>TValue</c> maps onto a Service Bus session id,
-/// deterministic message id, and body (<see cref="MapToServiceBusMessage"/>) - everything else (poll
-/// loop, bounded-channel worker pool, cold/hot-tier audit logging, deduplication, poison-message
-/// handling, ordered offset commit, resilience, correlation id propagation, the
-/// <see cref="ConsumerOptions.Enabled"/> toggle) lives here once.
+/// consumer regardless of wire format. A single topic/consumer group can carry more than one
+/// schema/event type - a derived class registers one <see cref="ISchemaHandler"/> per schema it
+/// understands (built via <see cref="CreateSchemaHandler{TValue}"/>), keyed by the Kafka
+/// <see cref="KafkaHeaderNames.Type"/> header value that schema corresponds to. A consumer that (like
+/// every consumer today) handles exactly one schema regardless of what's in that header registers its
+/// one handler under <see cref="DefaultEventType"/> instead of an exact value - see
+/// <see cref="ProcessMessageAsync"/> for the exact lookup order. Deserialization itself happens
+/// manually, after the dedup check below, not inside <see cref="IConsumer{TKey,TValue}.Consume(TimeSpan)"/> -
+/// see the class-level flow remarks. Everything past schema selection (poll loop, bounded-channel
+/// worker pool, cold/hot-tier audit logging, deduplication, non-fatal failure handling, ordered
+/// offset commit, resilience, correlation id propagation, the <see cref="ConsumerOptions.Enabled"/>
+/// toggle) lives here once, regardless of how many schemas a consumer registers.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Per-message flow: consume raw bytes → read Kafka headers (correlation id, dedup id, event
-/// type, app id) → log them → write the raw header+body to the cold-tier audit container
-/// (<see cref="BlobStorageOptions.RequestAuditContainerName"/>, unconditionally - not gated by
-/// <see cref="BlobStorageOptions.RequestAuditEnabled"/>, which covers a separate, still-optional
-/// audit use) → check <see cref="IDeduplicationService"/> → deserialize → map and publish to Service
-/// Bus → commit. A deserialization failure is a poison message: its raw header+body goes to the
-/// hot-tier <see cref="BlobStorageOptions.ConsumerDeadLetterContainerName"/> container and the offset
-/// is committed forward (never redelivered). An unrecoverable Service Bus publish failure (Polly
-/// retries in <see cref="ResiliencePipelines.ServiceBusPublish"/> exhausted) is deliberately handled
-/// differently - it is NOT written to hot storage, it faults the worker and stops this consumer so
-/// Kubernetes restarts the pod and Kafka redelivers, exactly as before this change - a sustained
-/// Service Bus outage should surface as an outage, not silently drain the topic into blob storage.
+/// type, app id) → log them → resolve the schema handler for this message's event type (falling back
+/// to <see cref="DefaultEventType"/> if no exact match is registered; hot-tier raw-bytes dead-letter
+/// if neither matches) → deserialize → write the deserialized value as JSON to the cold-tier
+/// audit container (<see cref="BlobStorageOptions.RequestAuditContainerName"/>, unconditionally -
+/// not gated by <see cref="BlobStorageOptions.RequestAuditEnabled"/>, which covers a separate,
+/// still-optional audit use) → check <see cref="IDeduplicationService"/> → the resolved handler's
+/// <c>ValidateAsync</c> → map and publish to Service Bus → commit.
+/// </para>
+/// <para>
+/// <b>No single event's failure stops the consumer or blocks any other message</b> - deliberate,
+/// not just a poison-message backstop: multiple upstream systems produce onto the same topics on
+/// their own release cadence, so a producer running a newer version of a shared Avro schema than
+/// this consumer's currently-deployed reader is an expected, recurring event. Every failure mode
+/// below is handled the same way - log at <c>LogLevel.Critical</c> tagged with which stage
+/// failed, write to the hot-tier <see cref="BlobStorageOptions.ConsumerDeadLetterContainerName"/>
+/// container for a separate, out-of-band watcher process to reprocess, and commit the offset forward
+/// (never redelivered) so the rest of the partition keeps flowing:
+/// <list type="bullet">
+/// <item>An event type with no registered schema handler (exact or <see cref="DefaultEventType"/>)
+/// writes the <b>raw message bytes</b> to hot storage - there is no deserializer to even attempt.</item>
+/// <item>A deserialization failure writes the <b>raw message bytes</b> to hot storage - there is no
+/// successfully deserialized value to serialize as JSON at that point.</item>
+/// <item>A validation failure (the handler's <c>ValidateAsync</c> throws) writes the deserialized
+/// value as <b>JSON</b> to hot storage - unlike deserialization, a valid value already exists. This is
+/// distinct from <c>ValidateAsync</c> returning <see langword="false"/>, which is not a failure at
+/// all - see <see cref="CreateSchemaHandler{TValue}"/>.</item>
+/// <item>A Service Bus publish failure - even after <see cref="ResiliencePipelines.ServiceBusPublish"/>'s
+/// retries are exhausted - also writes the deserialized value as JSON and commits forward, rather
+/// than faulting the worker/stopping the consumer as earlier versions of this class did. Accepted
+/// trade-off: unlike a schema mismatch, a struggling Service Bus dependency is usually recoverable on
+/// its own, and Kafka redelivery after a consumer restart would normally recover it automatically, in
+/// order, for the same <c>{WarehouseId}:{Sku}</c> session (§2). Treating every publish failure as
+/// non-fatal here instead means a sustained Service Bus outage dead-letters every in-flight message
+/// for its duration rather than surfacing as an outage, and a message that fails to publish while a
+/// later message for the *same* session succeeds can leave that Service Bus session's ordering
+/// broken until the watcher replays it - both accepted in exchange for "one bad event never blocks
+/// the partition" applying uniformly across every stage, not just deserialize/validate.</item>
+/// </list>
 /// </para>
 /// <para>
 /// The single-threaded poll loop reads from Kafka and writes each result into a bounded
@@ -52,23 +84,106 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Service Bus consumer dedupe (§2).
 /// </para>
 /// </remarks>
-/// <typeparam name="TValue">The deserialized Kafka message value type this consumer relays.</typeparam>
-public abstract class ConsumerHostedService<TValue> : BackgroundService
+public abstract class ConsumerHostedService : BackgroundService
 {
-    // Every consumer's schema/message type name - the third path segment of the cold/hot-tier blob
-    // path convention below.
-    private static readonly string SchemaName = typeof(TValue).Name;
+    /// <summary>
+    /// The key a schema handler is registered under when a consumer doesn't distinguish by the Kafka
+    /// <see cref="KafkaHeaderNames.Type"/> header - every consumer that (like each one today) handles
+    /// exactly one schema regardless of that header's value registers its one handler under this key.
+    /// A message's own <c>Type</c> header value is looked up first; if nothing is registered under
+    /// that exact value, this key is tried next - see <see cref="ProcessMessageAsync"/>.
+    /// </summary>
+    protected const string DefaultEventType = "";
+
+    /// <summary>
+    /// Type-erased per-schema entry - build one via <see cref="CreateSchemaHandler{TValue}"/>, never
+    /// implement this directly. Lets <see cref="ConsumerHostedService"/> store handlers for
+    /// structurally unrelated schemas (different Avro records, or JSON shapes) in one dictionary
+    /// without itself being generic over any single one of them.
+    /// </summary>
+    protected interface ISchemaHandler
+    {
+        /// <summary>This schema's type name - the path segment used in the cold/hot-tier blob naming convention.</summary>
+        string SchemaName { get; }
+
+        /// <summary>Deserializes raw Kafka bytes into this schema's value, boxed as <see cref="object"/>.</summary>
+        object Deserialize(byte[]? data, SerializationContext context);
+
+        /// <summary>Serializes a previously-deserialized value (of this schema) back to JSON.</summary>
+        string SerializeToJson(object value);
+
+        /// <summary>Routes a previously-deserialized value (of this schema) onto Service Bus.</summary>
+        (string SessionId, string MessageId) GetServiceBusRouting(object value);
+
+        /// <summary>Business-rule validation for a previously-deserialized value (of this schema).</summary>
+        Task<bool> ValidateAsync(object value, CancellationToken cancellationToken);
+    }
+
+    /// <summary>Type-erasing <see cref="ISchemaHandler"/> implementation - see <see cref="CreateSchemaHandler{TValue}"/>, the only place this is constructed.</summary>
+    private sealed class SchemaHandler<TValue>(
+        IDeserializer<TValue> deserializer,
+        Func<TValue, string> serializeToJson,
+        Func<TValue, (string SessionId, string MessageId)> getServiceBusRouting,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync)
+        : ISchemaHandler
+    {
+        private readonly Func<TValue, CancellationToken, Task<bool>> validateAsync = validateAsync ?? ((_, _) => Task.FromResult(true));
+
+        public string SchemaName { get; } = typeof(TValue).Name;
+
+        public object Deserialize(byte[]? data, SerializationContext context) => deserializer.Deserialize(data, data is null, context)!;
+
+        public string SerializeToJson(object value) => serializeToJson((TValue)value);
+
+        public (string SessionId, string MessageId) GetServiceBusRouting(object value) => getServiceBusRouting((TValue)value);
+
+        public Task<bool> ValidateAsync(object value, CancellationToken cancellationToken) => validateAsync((TValue)value, cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds a type-erased schema entry for one event type - the only place the concrete
+    /// <typeparamref name="TValue"/> needs naming when registering a schema. A derived consumer calls
+    /// this once per schema it supports (in its own constructor) and passes the resulting dictionary,
+    /// keyed by <see cref="KafkaHeaderNames.Type"/> header value (or <see cref="DefaultEventType"/> for
+    /// "any/no specific type"), to the base constructor.
+    /// </summary>
+    /// <typeparam name="TValue">The deserialized shape for this one schema/event type.</typeparam>
+    /// <param name="deserializer">Deserializer for this schema (JSON or Avro).</param>
+    /// <param name="serializeToJson">Serializes one deserialized value of this schema to JSON - used for the cold-tier audit log and, on a validation/publish failure, the hot-tier dead-letter blob.</param>
+    /// <param name="getServiceBusRouting">Routes one deserialized value of this schema onto Service Bus - returns the session id (groups this event with others for the same aggregate) and a deterministic message id (drives the downstream dedupe check).</param>
+    /// <param name="validateAsync">
+    /// Business-rule validation for one deserialized value of this schema, run after the dedup check
+    /// and before mapping/publishing to Service Bus. Omit for "always valid." Two distinct ways to
+    /// stop a message short of Service Bus, not to be confused with each other:
+    /// <list type="bullet">
+    /// <item><b>Throw</b> for a hard failure (malformed/invalid data) - logged at <c>LogLevel.Critical</c>,
+    /// written to hot storage as JSON, offset committed forward. An out-of-band watcher can reprocess
+    /// it once the underlying issue is fixed.</item>
+    /// <item><b>Return <see langword="false"/></b> for a message that is valid but should deliberately
+    /// not be relayed (e.g. an event type/version this consumer intentionally doesn't forward) -
+    /// logged at <c>LogLevel.Information</c>, offset committed forward, but <b>not</b> written to hot
+    /// storage, since nothing failed.</item>
+    /// </list>
+    /// </param>
+    protected static ISchemaHandler CreateSchemaHandler<TValue>(
+        IDeserializer<TValue> deserializer,
+        Func<TValue, string> serializeToJson,
+        Func<TValue, (string SessionId, string MessageId)> getServiceBusRouting,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null) =>
+        new SchemaHandler<TValue>(deserializer, serializeToJson, getServiceBusRouting, validateAsync);
 
     private readonly IConsumer<string, byte[]> consumer;
-    private readonly IDeserializer<TValue> valueDeserializer;
+    private readonly IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers;
     private readonly IDisposable? additionalDisposable;
     private readonly ServiceBusSender serviceBusSender;
     private readonly ResiliencePipelineProvider<string> pipelineProvider;
-    private readonly IFileStore fileStore;
+    private readonly IFileStore hotFileStore;
+    private readonly IFileStore coldFileStore;
     private readonly IDeduplicationService deduplicationService;
     private readonly ConsumerHealthState healthState;
     private readonly ILogger logger;
     private readonly PartitionOffsetCommitTracker offsetTracker;
+    private readonly BlobStorageOptions blobStorageOptions;
 
     /// <summary>Settings this consumer was configured with.</summary>
     protected ConsumerOptions Options { get; }
@@ -79,32 +194,39 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
     /// <summary>Builds the Kafka consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, enabled flag, worker/channel sizing, and Service Bus queue settings for this consumer.</param>
     /// <param name="consumerName">Display name for this consumer's log messages and audit blob path.</param>
-    /// <param name="valueDeserializer">Deserializer for the Kafka message value (JSON or Avro), supplied by the derived class - invoked manually, after the dedup check, not wired into the Kafka consumer itself.</param>
-    /// <param name="serviceBusClient">Client used to create the sender for the relay queue.</param>
-    /// <param name="pipelineProvider">Resolves the named Polly pipeline used for the Service Bus publish step.</param>
-    /// <param name="fileStore">Writes the cold-tier (every message) and hot-tier (deserialization failures) audit blobs.</param>
-    /// <param name="deduplicationService">Checks each message against the Nexus deduplication service before it is deserialized.</param>
+    /// <param name="schemaHandlers">
+    /// One <see cref="ISchemaHandler"/> per schema this consumer understands (built via
+    /// <see cref="CreateSchemaHandler{TValue}"/>), keyed by the Kafka <see cref="KafkaHeaderNames.Type"/>
+    /// header value each corresponds to - use <see cref="DefaultEventType"/> as the key for a schema
+    /// that applies regardless of that header's value. See <see cref="ProcessMessageAsync"/> for the
+    /// lookup order and what happens when a message's event type matches neither.
+    /// </param>
+    /// <param name="infrastructure">
+    /// The six dependencies every consumer needs and which never vary between them (Service Bus
+    /// client, Polly pipeline provider, hot/cold file stores, Blob Storage options, dedup service) -
+    /// see <see cref="ConsumerRelayInfrastructure"/>'s own doc comment for why this is a single
+    /// facade parameter instead of six.
+    /// </param>
     /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
-    /// <param name="logger">Logger for consume/relay/poison-message events.</param>
+    /// <param name="logger">Logger for consume/relay/failure events.</param>
     /// <param name="additionalDisposable">An extra resource the derived class owns (e.g. an <c>ISchemaRegistryClient</c>) and wants disposed alongside the consumer - <see langword="null"/> if none.</param>
     protected ConsumerHostedService(
         ConsumerOptions options,
         string consumerName,
-        IDeserializer<TValue> valueDeserializer,
-        ServiceBusClient serviceBusClient,
-        ResiliencePipelineProvider<string> pipelineProvider,
-        IFileStore fileStore,
-        IDeduplicationService deduplicationService,
+        IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers,
+        ConsumerRelayInfrastructure infrastructure,
         ConsumerHealthState healthState,
         ILogger logger,
         IDisposable? additionalDisposable = null)
     {
         Options = options;
         ConsumerName = consumerName;
-        this.valueDeserializer = valueDeserializer;
-        this.pipelineProvider = pipelineProvider;
-        this.fileStore = fileStore;
-        this.deduplicationService = deduplicationService;
+        this.schemaHandlers = schemaHandlers;
+        pipelineProvider = infrastructure.PipelineProvider;
+        hotFileStore = infrastructure.HotFileStore;
+        coldFileStore = infrastructure.ColdFileStore;
+        blobStorageOptions = infrastructure.BlobStorageOptions.Value;
+        deduplicationService = infrastructure.DeduplicationService;
         this.healthState = healthState;
         this.logger = logger;
         this.additionalDisposable = additionalDisposable;
@@ -115,24 +237,33 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
                 ?? throw new InvalidOperationException(
                     $"Missing BootstrapServers for '{consumerName}' - configure it at this consumer's own level or the Kafka-level fallback."),
             GroupId = options.ConsumerGroup,
-            EnableAutoCommit = false,
-            AutoOffsetReset = AutoOffsetReset.Earliest,
+            // Defensive fallback, not just belt-and-braces: false/Earliest is what this service's
+            // manual-commit architecture requires (integration-resiliency.instructions.md §1) -
+            // Confluent.Kafka's own defaults if these were left null are true/Latest, the opposite.
+            // MessagingServiceCollectionExtensions.AddMessaging's PostConfigure already pins the
+            // Kafka-level fallback to these same values, so this only matters for an options POCO
+            // built directly in a unit test, bypassing that PostConfigure pipeline.
+            EnableAutoCommit = options.EnableAutoCommit ?? false,
+            AutoOffsetReset = options.AutoOffsetReset ?? AutoOffsetReset.Earliest,
+            // Left null (Confluent.Kafka's own Plaintext/no-SASL default) when unconfigured - correct
+            // for the local emulator, never for a real cluster. SecurityProtocol/SaslMechanism being
+            // set inconsistently with each other (e.g. a mechanism without a SASL protocol) is
+            // rejected by Confluent.Kafka itself when the consumer below is built, not re-validated here.
+            SecurityProtocol = options.Protocol,
+            SaslMechanism = options.AuthenticationMode,
+            SaslUsername = options.Username,
+            SaslPassword = options.Password,
         };
 
-        // Raw bytes, not TValue - Confluent.Kafka's built-in default byte[] deserializer never
-        // throws, so a bad payload is only ever discovered later, in ProcessMessageAsync, after the
-        // cold-tier audit log and dedup check have already run against the raw bytes. See the
-        // class-level remarks for why this moved out of the consumer builder.
+        // Raw bytes, not any one schema's type - Confluent.Kafka's built-in default byte[]
+        // deserializer never throws, so a bad payload is only ever discovered later, in
+        // ProcessMessageAsync, once the right schema handler has been resolved. See the class-level
+        // remarks for why this moved out of the consumer builder.
         consumer = new ConsumerBuilder<string, byte[]>(config).Build();
 
-        serviceBusSender = serviceBusClient.CreateSender(options.ServiceBusQueueName);
+        serviceBusSender = infrastructure.ServiceBusClient.CreateSender(options.ServiceBusQueueName);
         offsetTracker = new PartitionOffsetCommitTracker(offsets => consumer.Commit(offsets));
     }
-
-    /// <summary>Maps one deserialized message onto the Service Bus wire shape.</summary>
-    /// <param name="value">The deserialized Kafka message value.</param>
-    /// <returns>The Service Bus session id (groups this event with others for the same aggregate), a deterministic message id (drives the downstream dedupe check), and the serialized body to send.</returns>
-    protected abstract (string SessionId, string MessageId, string Body) MapToServiceBusMessage(TValue value);
 
     /// <summary>
     /// Polls the subscribed topic in a loop until cancellation, handing each message to the worker
@@ -149,41 +280,39 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
 
         consumer.Subscribe(Options.Topic);
 
-        var channel = Channel.CreateBounded<ConsumeResult<string, byte[]>>(new BoundedChannelOptions(Options.ChannelCapacity)
+        // Both fall back to a hardcoded default here, not just to the Kafka-level config value -
+        // see ConsumerOptions' class remarks on why call sites don't assert non-null even though the
+        // Kafka-level PostConfigure guarantees it in the normal DI-resolved path.
+        var channel = Channel.CreateBounded<ConsumeResult<string, byte[]>>(new BoundedChannelOptions(Options.ChannelCapacity ?? 1_000)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = false,
             SingleWriter = true,
         });
 
-        // Linked so a worker fault (e.g. Polly retries exhausted on a publish) stops the poll loop
-        // promptly instead of continuing to buffer messages behind a partition that can no longer
-        // make progress - see the class-level remarks.
-        using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-
-        var workers = Enumerable.Range(0, Options.WorkerCount)
-            .Select(_ => RunWorkerAsync(channel.Reader, shutdownCts))
+        var workers = Enumerable.Range(0, Options.WorkerCount ?? 1)
+            .Select(_ => RunWorkerAsync(channel.Reader))
             .ToArray();
 
         try
         {
-            await RunPollLoopAsync(channel.Writer, shutdownCts.Token);
+            await RunPollLoopAsync(channel.Writer, stoppingToken);
         }
         finally
         {
             channel.Writer.TryComplete();
 
-            // Awaited even after a worker fault, so every worker's ReadAllAsync loop above actually
-            // observes the completed channel and exits - if we returned immediately instead, those
-            // tasks would be silently abandoned still holding a channel reader.
+            // Awaited even after the poll loop stops, so every worker's ReadAllAsync loop above
+            // actually observes the completed channel and exits - if we returned immediately instead,
+            // those tasks would be silently abandoned still holding a channel reader.
             await Task.WhenAll(workers);
         }
     }
 
     /// <summary>Single-threaded poll loop - reads raw messages from Kafka and hands each result to the worker pool via the channel, applying backpressure when it's full.</summary>
-    private async Task RunPollLoopAsync(ChannelWriter<ConsumeResult<string, byte[]>> writer, CancellationToken shutdownToken)
+    private async Task RunPollLoopAsync(ChannelWriter<ConsumeResult<string, byte[]>> writer, CancellationToken stoppingToken)
     {
-        while (!shutdownToken.IsCancellationRequested)
+        while (!stoppingToken.IsCancellationRequested)
         {
             ConsumeResult<string, byte[]>? polled;
 
@@ -235,47 +364,41 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
             // what makes it correct.
             offsetTracker.EstablishBaseline(result.TopicPartition, result.Offset.Value);
 
-            await writer.WriteAsync(result, shutdownToken);
-        }
-    }
-
-    /// <summary>One worker draining the channel - runs the full per-message flow and reports the outcome to the offset tracker, until the channel completes.</summary>
-    private async Task RunWorkerAsync(ChannelReader<ConsumeResult<string, byte[]>> reader, CancellationTokenSource shutdownCts)
-    {
-        try
-        {
-            // Intentionally CancellationToken.None, not the shutdown token: once a message has been
-            // dispatched into the channel it should still be relayed and committed on a graceful
-            // shutdown, not abandoned mid-flight only to be redelivered on restart.
-            await foreach (var result in reader.ReadAllAsync(CancellationToken.None))
-            {
-                await ProcessMessageAsync(result, CancellationToken.None);
-            }
-        }
-        catch (Exception ex)
-        {
-            // A publish that exhausted the resilience pipeline's retries is not recoverable by this
-            // process - stop this consumer so Kubernetes restarts it and Kafka redelivers from the
-            // last committed offset, the same fail-fast behavior the original single-threaded loop
-            // had when an unhandled exception escaped it. Deliberately not the same handling as a
-            // deserialization failure (see ProcessMessageAsync) - see the class-level remarks.
-            logger.LogCritical(ex, "{ConsumerName}: worker faulted relaying a message - stopping this consumer.", ConsumerName);
-            shutdownCts.Cancel();
-            throw;
+            await writer.WriteAsync(result, stoppingToken);
         }
     }
 
     /// <summary>
-    /// Runs the full per-message flow: log metadata, write the cold-tier audit log, check
-    /// deduplication, deserialize, map and publish to Service Bus, then report completion to the
-    /// offset tracker. See the class-level remarks for the exact step order and failure handling.
+    /// One worker draining the channel - runs the full per-message flow until the channel completes.
+    /// No longer stops the consumer on a per-message failure (see the class-level remarks); the only
+    /// way this loop now ends is the channel completing on shutdown.
+    /// </summary>
+    private async Task RunWorkerAsync(ChannelReader<ConsumeResult<string, byte[]>> reader)
+    {
+        // Intentionally CancellationToken.None, not the poll loop's stopping token: once a message has
+        // been dispatched into the channel it should still be relayed and committed on a graceful
+        // shutdown, not abandoned mid-flight only to be redelivered on restart.
+        await foreach (var result in reader.ReadAllAsync(CancellationToken.None))
+        {
+            await ProcessMessageAsync(result, CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// Runs the full per-message flow: resolve the schema handler for this message's event type, log
+    /// metadata, deserialize, write the cold-tier audit log, check deduplication, validate, map and
+    /// publish to Service Bus, then report completion to the offset tracker. See the class-level
+    /// remarks for the exact step order and failure handling.
     /// </summary>
     /// <param name="result">The consumed raw Kafka message, with its topic/partition/offset metadata.</param>
     /// <param name="cancellationToken">Token to cancel the publish.</param>
     private async Task ProcessMessageAsync(ConsumeResult<string, byte[]> result, CancellationToken cancellationToken)
     {
+        var totalStopwatch = Stopwatch.StartNew();
+
         var headers = result.Message.Headers;
-        var correlationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId) ?? Guid.NewGuid().ToString();
+        var rawCorrelationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId);
+        var correlationId = rawCorrelationId ?? Guid.NewGuid().ToString();
         var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
         var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
         var appId = TryGetHeader(headers, KafkaHeaderNames.AppId) ?? string.Empty;
@@ -284,10 +407,120 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
             "{ConsumerName}: consumed message from {Topic}:{Partition}:{Offset}. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
             ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
-        await WriteAuditLogAsync(
-            BlobStorageOptions.RequestAuditContainerName, "cold", correlationId, result, exception: null, cancellationToken);
+        // Config-driven ignore-list, checked against the raw header (an empty/missing header always
+        // passes, regardless of configuration - see ConsumerOptions.IsCorrelationIdIgnored). Runs
+        // before schema resolution/deserialize - it's a cross-cutting filter, not a per-schema concern.
+        if (Options.IsCorrelationIdIgnored(rawCorrelationId))
+        {
+            logger.LogInformation(
+                "{ConsumerName}: ignoring message at {Topic}:{Partition}:{Offset} - CorrelationId {CorrelationId} matched a configured ignore prefix/suffix.",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
 
-        if (await deduplicationService.IsDuplicateAsync(ConsumerName, deduplicationId, correlationId, cancellationToken))
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return;
+        }
+
+        // Exact Type header value first, DefaultEventType as the fallback for a consumer that
+        // registers one schema regardless of that header - see the class-level remarks.
+        if (!schemaHandlers.TryGetValue(eventType, out var schemaHandler)
+            && !schemaHandlers.TryGetValue(DefaultEventType, out schemaHandler))
+        {
+            logger.LogCritical(
+                "{ConsumerName}: no registered schema for Type header '{EventType}' at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
+                ConsumerName, eventType, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+
+            await WriteBlobAsync(
+                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName,
+                string.IsNullOrEmpty(eventType) ? "UnknownEventType" : eventType, correlationId, "bin",
+                new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return;
+        }
+
+        object value;
+        TimeSpan deserializeDuration;
+
+        try
+        {
+            var deserializeStopwatch = Stopwatch.StartNew();
+            var rawValue = result.Message.Value;
+            value = schemaHandler.Deserialize(rawValue, new SerializationContext(MessageComponentType.Value, result.Topic, headers));
+            deserializeDuration = deserializeStopwatch.Elapsed;
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex,
+                "{ConsumerName}: Deserialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+
+            await WriteBlobAsync(
+                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
+                new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return;
+        }
+
+        string json;
+
+        try
+        {
+            json = schemaHandler.SerializeToJson(value);
+        }
+        catch (Exception ex)
+        {
+            // No JSON to fall back to here (that's the very thing that just failed) - raw bytes,
+            // same as a deserialize failure, so this message isn't lost outright.
+            logger.LogCritical(ex,
+                "{ConsumerName}: Serialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+
+            await WriteBlobAsync(
+                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
+                new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return;
+        }
+
+        await WriteBlobAsync(
+            coldFileStore, blobStorageOptions.RequestAuditContainerName, schemaHandler.SchemaName, correlationId, "json",
+            new MemoryStream(Encoding.UTF8.GetBytes(json)), cancellationToken);
+
+        bool isDuplicate;
+
+        if (Options.DeduplicationCheckEnabled == false)
+        {
+            // Explicitly turned off for this topic (event level or inherited from Kafka level) -
+            // not the same as the fail-open path below, which still attempts the check. The
+            // downstream Service Bus consumer's own idempotency check (§2) is still the correctness
+            // backstop either way; this flag only trades away the latency/cost optimization.
+            isDuplicate = false;
+        }
+        else
+        {
+            try
+            {
+                isDuplicate = await deduplicationService.IsDuplicateAsync(ConsumerName, deduplicationId, correlationId, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Fail open, not closed: the dedup check is a best-effort layer backed by an external
+                // dependency (Nexus) that can itself be unavailable. Treating that as fatal would mean a
+                // Nexus outage dead-letters the entire topic; treating it as "duplicate" would silently
+                // drop every message while Nexus is down. Proceeding as "not a duplicate" instead relies
+                // on the downstream Service Bus consumer's own idempotency check (§2) as the backstop -
+                // this consumer's dedup check is a latency/cost optimization on top of that, not the only
+                // line of defense against a redelivered message being applied twice.
+                logger.LogWarning(ex,
+                    "{ConsumerName}: deduplication check failed for message at {Topic}:{Partition}:{Offset} - proceeding as not a duplicate. CorrelationId: {CorrelationId}",
+                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                isDuplicate = false;
+            }
+        }
+
+        if (isDuplicate)
         {
             logger.LogInformation(
                 "{ConsumerName}: skipping {Topic}:{Partition}:{Offset} - duplicate. CorrelationId: {CorrelationId}",
@@ -297,107 +530,116 @@ public abstract class ConsumerHostedService<TValue> : BackgroundService
             return;
         }
 
-        TValue value;
+        TimeSpan validationDuration;
+        bool isValid;
 
         try
         {
-            var rawValue = result.Message.Value;
-            value = valueDeserializer.Deserialize(
-                rawValue, rawValue is null, new SerializationContext(MessageComponentType.Value, result.Topic, headers));
+            var validationStopwatch = Stopwatch.StartNew();
+            isValid = await schemaHandler.ValidateAsync(value, cancellationToken);
+            validationDuration = validationStopwatch.Elapsed;
         }
         catch (Exception ex)
         {
-            // Poison message: never reaches the publish step, so the offset-after-publish rule would
-            // otherwise replay it forever and stall every message behind it on this partition. Its
-            // raw header+body goes to the hot-tier container for manual recovery, then the offset is
-            // committed forward - not a direct consumer.Commit, so it folds correctly into whatever
-            // the partition's low-water mark already is (integration-resiliency.instructions.md §1).
-            logger.LogCritical(ex,
-                "{ConsumerName}: failed to deserialize message at {Topic}:{Partition}:{Offset} - writing to hot storage and committing. CorrelationId: {CorrelationId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+            await HandleNonFatalFailureAsync("Validation", ex, json, schemaHandler.SchemaName, correlationId, result, cancellationToken);
+            return;
+        }
 
-            await WriteAuditLogAsync(
-                BlobStorageOptions.ConsumerDeadLetterContainerName, "hot", correlationId, result, ex, cancellationToken);
+        if (!isValid)
+        {
+            // Valid data, deliberately not relayed - not the same as the hard-failure path above.
+            // No hot-tier write: nothing failed, this consumer just chose not to forward it.
+            logger.LogInformation(
+                "{ConsumerName}: ValidateAsync returned false for message at {Topic}:{Partition}:{Offset} - skipping Service Bus publish. CorrelationId: {CorrelationId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
 
             offsetTracker.Complete(result.TopicPartitionOffset);
             return;
         }
 
-        var (sessionId, messageId, body) = MapToServiceBusMessage(value);
-
-        var message = new ServiceBusMessage(body)
-        {
-            // Deterministic id from the event payload - this is what makes the Service Bus
-            // consumer's dedupe check on redelivery actually work.
-            MessageId = messageId,
-            SessionId = sessionId,
-        };
-        message.ApplicationProperties["CorrelationId"] = correlationId;
-
-        var pipeline = pipelineProvider.GetPipeline(ResiliencePipelines.ServiceBusPublish);
-
-        // Deliberately not caught here - an unrecoverable Service Bus publish failure propagates to
-        // RunWorkerAsync and stops this consumer (see the class-level remarks for why this is handled
-        // differently from a deserialization failure above).
-        await pipeline.ExecuteAsync(
-            async ct => await serviceBusSender.SendMessageAsync(message, ct), cancellationToken);
-
-        // Reports completion to the tracker rather than committing this offset directly - with
-        // multiple workers in flight, this message's offset is not necessarily the next one the
-        // partition is waiting on (integration-resiliency.instructions.md §6).
-        offsetTracker.Complete(result.TopicPartitionOffset);
-
-        logger.LogInformation(
-            "{ConsumerName}: relayed {MessageId} for session {SessionId} from {Topic}:{Partition}:{Offset} to Service Bus. CorrelationId: {CorrelationId}",
-            ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
-    }
-
-    /// <summary>
-    /// Writes one message's raw Kafka headers and body to the given blob storage container, at
-    /// <c>{correlationId}/{ConsumerName}/{SchemaName}/{timestamp}_{guid}.log</c>. Best-effort - a
-    /// Blob Storage outage (after the upload pipeline's own retries are exhausted) is logged and
-    /// swallowed rather than blocking the dedup check or the relay itself; the audit trail is a
-    /// diagnostic aid, not the durability boundary (Service Bus is, per integration-resiliency.instructions.md §1).
-    /// </summary>
-    private async Task WriteAuditLogAsync(
-        string containerName,
-        string tier,
-        string correlationId,
-        ConsumeResult<string, byte[]> result,
-        Exception? exception,
-        CancellationToken cancellationToken)
-    {
-        var blobName = $"{correlationId}/{ConsumerName}/{SchemaName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.log";
-
-        var record = new KafkaAuditRecord(
-            Topic: result.Topic,
-            Partition: result.Partition.Value,
-            Offset: result.Offset.Value,
-            CorrelationId: correlationId,
-            Headers: result.Message.Headers?
-                .Select(header => new KafkaAuditHeader(header.Key, Encoding.UTF8.GetString(header.GetValueBytes())))
-                .ToArray() ?? [],
-            BodyBase64: result.Message.Value is { } bytes ? Convert.ToBase64String(bytes) : null,
-            Exception: exception?.ToString());
-
         try
         {
-            using var stream = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(record));
-            await fileStore.UploadAsync(containerName, blobName, stream, cancellationToken);
+            var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value);
+
+            var message = new ServiceBusMessage(json)
+            {
+                // Deterministic id from the event payload - this is what makes the Service Bus
+                // consumer's dedupe check on redelivery actually work.
+                MessageId = messageId,
+                SessionId = sessionId,
+            };
+            message.ApplicationProperties["CorrelationId"] = correlationId;
+
+            var pipeline = pipelineProvider.GetPipeline(ResiliencePipelines.ServiceBusPublish);
+
+            await pipeline.ExecuteAsync(
+                async ct => await serviceBusSender.SendMessageAsync(message, ct), cancellationToken);
+
+            // Reports completion to the tracker rather than committing this offset directly - with
+            // multiple workers in flight, this message's offset is not necessarily the next one the
+            // partition is waiting on (integration-resiliency.instructions.md §6).
+            offsetTracker.Complete(result.TopicPartitionOffset);
+
+            logger.LogInformation(
+                "{ConsumerName}: relayed {MessageId} for session {SessionId} from {Topic}:{Partition}:{Offset} to Service Bus. " +
+                "CorrelationId: {CorrelationId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, TotalDurationMs: {TotalDurationMs}",
+                ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId,
+                deserializeDuration.TotalMilliseconds, validationDuration.TotalMilliseconds, totalStopwatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex,
-                "{ConsumerName}: failed to write {Tier}-tier audit log {ContainerName}/{BlobName} - continuing without it. CorrelationId: {CorrelationId}",
-                ConsumerName, tier, containerName, blobName, correlationId);
+            await HandleNonFatalFailureAsync("ServiceBusPublish", ex, json, schemaHandler.SchemaName, correlationId, result, cancellationToken);
         }
     }
 
-    private sealed record KafkaAuditHeader(string Key, string Value);
+    /// <summary>
+    /// Shared handling for a non-fatal per-message failure past the deserialize step (validation or
+    /// Service Bus publish, where a deserialized value already exists): logs at
+    /// <see cref="LogLevel.Critical"/> tagged with which stage failed, writes the value's JSON to hot
+    /// storage, and commits the offset forward - see the class-level remarks for why this never blocks
+    /// or stops the consumer, even for a Service Bus publish failure.
+    /// </summary>
+    private async Task HandleNonFatalFailureAsync(
+        string stage, Exception ex, string json, string schemaName, string correlationId, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken)
+    {
+        logger.LogCritical(ex,
+            "{ConsumerName}: {Stage} failed for message at {Topic}:{Partition}:{Offset} - writing to hot storage and committing. CorrelationId: {CorrelationId}",
+            ConsumerName, stage, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
 
-    private sealed record KafkaAuditRecord(
-        string Topic, int Partition, long Offset, string CorrelationId,
-        KafkaAuditHeader[] Headers, string? BodyBase64, string? Exception);
+        await WriteBlobAsync(
+            hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaName, correlationId, "json",
+            new MemoryStream(Encoding.UTF8.GetBytes(json)), cancellationToken);
+
+        offsetTracker.Complete(result.TopicPartitionOffset);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="content"/> to blob storage at
+    /// <c>{correlationId}/{ConsumerName}/{schemaName}/{timestamp}_{guid}.{extension}</c> - disposes
+    /// <paramref name="content"/> once written. Best-effort: a Blob Storage outage (after the upload
+    /// pipeline's own retries are exhausted) is logged and swallowed rather than blocking the dedup
+    /// check or the relay itself; the audit trail is a diagnostic aid, not the durability boundary
+    /// (Service Bus is, per integration-resiliency.instructions.md §1).
+    /// </summary>
+    private async Task WriteBlobAsync(
+        IFileStore fileStore, string containerName, string schemaName, string correlationId, string extension, Stream content, CancellationToken cancellationToken)
+    {
+        var blobName = $"{correlationId}/{ConsumerName}/{schemaName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.{extension}";
+
+        await using (content)
+        {
+            try
+            {
+                await fileStore.UploadAsync(containerName, blobName, content, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex,
+                    "{ConsumerName}: failed to write audit blob {ContainerName}/{BlobName} - continuing without it. CorrelationId: {CorrelationId}",
+                    ConsumerName, containerName, blobName, correlationId);
+            }
+        }
+    }
 
     /// <summary>Reads a Kafka header's value as a UTF-8 string, if present.</summary>
     /// <param name="headers">Headers on the consumed Kafka message, or <see langword="null"/> if none were sent.</param>

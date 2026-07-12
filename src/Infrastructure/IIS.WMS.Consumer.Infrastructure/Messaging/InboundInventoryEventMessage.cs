@@ -7,7 +7,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 /// it becomes both the outbound Service Bus message id and, for a Reserve event, the aggregate's
 /// reservation id, which is what makes redelivery a no-op instead of a double-decrement. Carries
 /// no correlation id of its own - per integration-resiliency.instructions.md §4, that travels via
-/// the Kafka message header (read by <see cref="Kafka.ConsumerHostedService{TValue}"/>) and the
+/// the Kafka message header (read by <see cref="Kafka.ConsumerHostedService"/>) and the
 /// Service Bus <c>ApplicationProperties["CorrelationId"]</c> it's relayed onto, not the body.
 /// </summary>
 /// <param name="EventId">Deterministic id for this event - see the type-level remarks.</param>
