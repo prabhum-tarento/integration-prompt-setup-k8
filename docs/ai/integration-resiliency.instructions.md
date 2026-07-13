@@ -52,18 +52,22 @@ every hop, log line, and outbound call this flow makes.
   JSON-serializer, Service Bus router, and validator behind a common
   non-generic interface), keyed by the Kafka `Type` header value
   (`KafkaHeaderNames.Type`) that schema corresponds to. A consumer that
-  handles exactly one schema regardless of that header's value — every
-  consumer this repo runs today — registers its one handler under
-  `ConsumerHostedService.DefaultEventType` instead of an exact value; the
-  header's actual value is looked up first, falling back to that default
-  key, and a value matching neither is dead-lettered (raw bytes, hot-tier)
-  as an unrecognized schema rather than attempting to deserialize it. See
-  `KafkaConsumerHostedService` (JSON contract), `InventoryStateChangedConsumerHostedService`
-  (Avro, via Confluent Schema Registry), and `BulkInventoryImportConsumerHostedService`
-  (Avro, high-volume, non-session relay) for the three consumers this repo
-  currently runs. Each consumer can be turned off independently via its own
-  `Enabled` configuration key (checked by the base class at startup) without
-  removing its configuration section.
+  handles exactly one schema regardless of that header's value registers
+  its one handler under `ConsumerHostedService.DefaultEventType` instead of
+  an exact value; the header's actual value is looked up first, falling
+  back to that default key, and a value matching neither is dead-lettered
+  (raw bytes, hot-tier) as an unrecognized schema rather than attempting to
+  deserialize it. See `KafkaConsumerHostedService` (JSON contract,
+  `DefaultEventType`) and `BulkInventoryImportConsumerHostedService` (Avro,
+  high-volume, non-session relay, `DefaultEventType`) for that single-schema
+  case. `InventoryStateChangedConsumerHostedService` is the one exception:
+  it relays two structurally unrelated Avro event types sharing the
+  `inventory-events` topic (`InventoryStateChanged` and `InventoryAdjusted`),
+  so it registers one handler per exact `Type` header value instead of
+  `DefaultEventType`, sharing a single Schema Registry client between them.
+  Each consumer can be turned off independently via its own `Enabled`
+  configuration key (checked by the base class at startup) without removing
+  its configuration section.
 - **Broker connection security** - `ConsumerOptions.Protocol` (`SecurityProtocol`:
   `Plaintext`/`Ssl`/`SaslPlaintext`/`SaslSsl`), `AuthenticationMode`
   (`SaslMechanism`: `Plain`/`ScramSha256`/`ScramSha512`/`OAuthBearer`/`Gssapi`),
@@ -676,11 +680,18 @@ listener) rather than reporting through the Api's `/health/ready`, which
 [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md) owns
 and which cannot observe another Pod's internal state:
 
-- A `ConsumerHealthCheck` instance per Kafka consumer (one per `TValue`
-  subclass, each bound to that consumer's own `ConsumerHealthState`), on the
-  **Kafka consumer Pod's** `/health/ready`: unhealthy if that consumer's
-  last successful poll exceeds a configured staleness window (it doesn't
-  need a message to process to be healthy — an idle topic isn't a failure).
+- A `ConsumerHealthCheck` instance per event type a Kafka consumer registers
+  via `RegisterSchemaHandlers` (e.g. `InventoryStateChangedConsumerHostedService`
+  gets two, one for `InventoryStateChanged` and one for `InventoryAdjusted`,
+  since it relays both off one topic/consumer group), each bound to that
+  event type's own `ConsumerHealthState` — built internally by the consumer,
+  not injected through its constructor, since the set of event types isn't
+  known until `RegisterSchemaHandlers` runs. On the **Kafka consumer Pod's**
+  `/health/ready`: unhealthy if that event type's last successful poll
+  exceeds a configured staleness window (it doesn't need a message to
+  process to be healthy — an idle topic isn't a failure, so every event
+  type's state advances on every poll cycle, not just whichever type a
+  given poll happened to return).
 - `ServiceBusHealthCheck`, on the **Service Bus consumer Pod's**
   `/health/ready`: verifies the management client can reach the namespace.
 

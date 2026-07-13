@@ -68,4 +68,18 @@ public class SpecificRecordDeserializerFactoryTests
 
         schemaRegistryClient.Dispose();
     }
+
+    [Fact(DisplayName = "Create with an already-built Schema Registry client returns a usable deserializer without opening a second client")]
+    public void Create_WithExistingSchemaRegistryClient_ReturnsDeserializerForThatClient()
+    {
+        var factory = new SpecificRecordDeserializerFactory(Substitute.For<ILogger<SpecificRecordDeserializerFactory>>());
+
+        var first = factory.Create<InventoryStateChanged>("http://localhost:8081", null, null, out var schemaRegistryClient);
+        var second = factory.Create<InventoryAdjusted>(schemaRegistryClient);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+
+        schemaRegistryClient.Dispose();
+    }
 }

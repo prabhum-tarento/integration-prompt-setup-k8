@@ -3,9 +3,11 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// <summary>
 /// Shared state a <see cref="ConsumerHostedService"/> updates on every poll and a
 /// <see cref="ConsumerHealthCheck"/> reads - keeps the health check decoupled from the
-/// Confluent.Kafka consumer instance itself. Each consumer gets its own instance (registered as a
-/// keyed singleton, see <see cref="MessagingServiceCollectionExtensions"/>) - a stall in one
-/// consumer must not be masked by another consumer still polling successfully.
+/// Confluent.Kafka consumer instance itself. Each event type a consumer registers via
+/// <see cref="ConsumerHostedService.RegisterSchemaHandlers"/> gets its own instance (built internally
+/// by the consumer, not injected or DI-registered - see <see cref="ConsumerHostedService.GetHealthState"/>
+/// and <c>MessagingServiceCollectionExtensions.AddKafkaConsumer</c>) - a stall on one event type must
+/// not be masked by another event type (or another consumer) still polling successfully.
 /// </summary>
 public sealed class ConsumerHealthState
 {

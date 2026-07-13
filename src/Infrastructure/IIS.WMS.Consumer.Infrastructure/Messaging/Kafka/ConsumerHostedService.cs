@@ -1,8 +1,11 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Channels;
 using Azure.Messaging.ServiceBus;
 using Confluent.Kafka;
+using Confluent.SchemaRegistry;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
@@ -10,6 +13,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly.Registry;
+using Serilog.Context;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
@@ -18,15 +22,19 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// consumer regardless of wire format. A single topic/consumer group can carry more than one
 /// schema/event type - a derived class registers one <see cref="ISchemaHandler"/> per schema it
 /// understands (built via <see cref="CreateSchemaHandler{TValue}"/>), keyed by the Kafka
-/// <see cref="KafkaHeaderNames.Type"/> header value that schema corresponds to. A consumer that (like
-/// every consumer today) handles exactly one schema regardless of what's in that header registers its
-/// one handler under <see cref="DefaultEventType"/> instead of an exact value - see
-/// <see cref="ProcessMessageAsync"/> for the exact lookup order. Deserialization itself happens
-/// manually, after the dedup check below, not inside <see cref="IConsumer{TKey,TValue}.Consume(TimeSpan)"/> -
-/// see the class-level flow remarks. Everything past schema selection (poll loop, bounded-channel
-/// worker pool, cold/hot-tier audit logging, deduplication, non-fatal failure handling, ordered
-/// offset commit, resilience, correlation id propagation, the <see cref="ConsumerOptions.Enabled"/>
-/// toggle) lives here once, regardless of how many schemas a consumer registers.
+/// <see cref="KafkaHeaderNames.Type"/> header value that schema corresponds to. A consumer that
+/// handles exactly one schema regardless of what's in that header registers its one handler under
+/// <see cref="DefaultEventType"/> instead of an exact value - see <see cref="ProcessMessageAsync"/>
+/// for the exact lookup order. Each schema publishes to its own <see cref="ISchemaHandler.ServiceBusQueueName"/>
+/// (falling back to <see cref="ConsumerOptions.ServiceBusQueueName"/> if unset), so multiple schemas on
+/// one consumer can land on different queues - <see cref="GetServiceBusSender"/> opens one
+/// <see cref="ServiceBusSender"/> per distinct queue actually used, not one per schema or one per
+/// consumer. Deserialization itself happens manually, after the dedup check below, not inside
+/// <see cref="IConsumer{TKey,TValue}.Consume(TimeSpan)"/> - see the class-level flow remarks.
+/// Everything past schema selection (poll loop, bounded-channel worker pool, cold/hot-tier audit
+/// logging, deduplication, non-fatal failure handling, ordered offset commit, resilience, correlation
+/// id propagation, the <see cref="ConsumerOptions.Enabled"/> toggle) lives here once, regardless of
+/// how many schemas a consumer registers.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -91,9 +99,20 @@ public abstract class ConsumerHostedService : BackgroundService
     /// <see cref="KafkaHeaderNames.Type"/> header - every consumer that (like each one today) handles
     /// exactly one schema regardless of that header's value registers its one handler under this key.
     /// A message's own <c>Type</c> header value is looked up first; if nothing is registered under
-    /// that exact value, this key is tried next - see <see cref="ProcessMessageAsync"/>.
+    /// that exact value, this key is tried next - see <see cref="ProcessMessageAsync"/>. <c>internal</c>
+    /// (not just <c>protected</c>) so <c>MessagingServiceCollectionExtensions</c> can register this
+    /// same key's <see cref="ConsumerHealthCheck"/> without duplicating it as a separate literal.
     /// </summary>
-    protected const string DefaultEventType = "";
+    protected internal const string DefaultEventType = "";
+
+    /// <summary>
+    /// Shared <c>JsonSerializer.Serialize</c> options for a schema's <c>serializeToJson</c> delegate
+    /// (<see cref="CreateSchemaHandler{TValue}"/>) - every Avro-contract consumer needs the same
+    /// setting, so it lives here once rather than as an identical private field on each one.
+    /// <c>IgnoreReadOnlyProperties</c> skips the Avro-generated SpecificRecord's get-only
+    /// <c>Schema</c> property, which System.Text.Json would otherwise try (and fail) to serialize.
+    /// </summary>
+    protected static readonly JsonSerializerOptions RelayJsonOptions = new() { IgnoreReadOnlyProperties = true };
 
     /// <summary>
     /// Type-erased per-schema entry - build one via <see cref="CreateSchemaHandler{TValue}"/>, never
@@ -106,14 +125,29 @@ public abstract class ConsumerHostedService : BackgroundService
         /// <summary>This schema's type name - the path segment used in the cold/hot-tier blob naming convention.</summary>
         string SchemaName { get; }
 
+        /// <summary>
+        /// Service Bus queue this schema's events relay onto, or <see langword="null"/> to fall back
+        /// to <see cref="ConsumerOptions.ServiceBusQueueName"/> - the consumer-wide default every
+        /// schema used before this override existed, and still what most schemas want (one consumer,
+        /// one queue). Set this per schema only when different event types sharing one Kafka
+        /// topic/consumer group need to land on different Service Bus queues.
+        /// </summary>
+        string? ServiceBusQueueName { get; }
+
         /// <summary>Deserializes raw Kafka bytes into this schema's value, boxed as <see cref="object"/>.</summary>
         object Deserialize(byte[]? data, SerializationContext context);
 
         /// <summary>Serializes a previously-deserialized value (of this schema) back to JSON.</summary>
         string SerializeToJson(object value);
 
-        /// <summary>Routes a previously-deserialized value (of this schema) onto Service Bus.</summary>
-        (string SessionId, string MessageId) GetServiceBusRouting(object value);
+        /// <summary>
+        /// Routes a previously-deserialized value (of this schema) onto Service Bus.
+        /// <paramref name="key"/> is the Kafka record key (<c>ConsumeResult.Message.Key</c>) this
+        /// value was read under - the routing delegate decides whether/how to use it (e.g. as both
+        /// the SessionId and MessageId, the way <see cref="InventoryStateChangedConsumerHostedService"/>
+        /// does) instead of deriving them from fields inside <paramref name="value"/> itself.
+        /// </summary>
+        (string SessionId, string MessageId) GetServiceBusRouting(object value, string? key);
 
         /// <summary>Business-rule validation for a previously-deserialized value (of this schema).</summary>
         Task<bool> ValidateAsync(object value, CancellationToken cancellationToken);
@@ -123,19 +157,55 @@ public abstract class ConsumerHostedService : BackgroundService
     private sealed class SchemaHandler<TValue>(
         IDeserializer<TValue> deserializer,
         Func<TValue, string> serializeToJson,
-        Func<TValue, (string SessionId, string MessageId)> getServiceBusRouting,
-        Func<TValue, CancellationToken, Task<bool>>? validateAsync)
+        Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync,
+        string? serviceBusQueueName)
         : ISchemaHandler
     {
         private readonly Func<TValue, CancellationToken, Task<bool>> validateAsync = validateAsync ?? ((_, _) => Task.FromResult(true));
 
         public string SchemaName { get; } = typeof(TValue).Name;
 
+        public string? ServiceBusQueueName { get; } = serviceBusQueueName;
+
         public object Deserialize(byte[]? data, SerializationContext context) => deserializer.Deserialize(data, data is null, context)!;
 
         public string SerializeToJson(object value) => serializeToJson((TValue)value);
 
-        public (string SessionId, string MessageId) GetServiceBusRouting(object value) => getServiceBusRouting((TValue)value);
+        public (string SessionId, string MessageId) GetServiceBusRouting(object value, string? key) => getServiceBusRouting((TValue)value, key);
+
+        public Task<bool> ValidateAsync(object value, CancellationToken cancellationToken) => validateAsync((TValue)value, cancellationToken);
+    }
+
+    /// <summary>
+    /// Type-erasing <see cref="ISchemaHandler"/> implementation for a schema that also maps into an
+    /// internal <typeparamref name="TValue"/> DTO - see <see cref="CreateSchemaHandler{TAvro,TValue}"/>,
+    /// the only place this is constructed. Everything past <see cref="Deserialize"/> operates on the
+    /// mapped <typeparamref name="TValue"/>, never the raw <typeparamref name="TAvro"/>.
+    /// </summary>
+    private sealed class MappedSchemaHandler<TAvro, TValue>(
+        IDeserializer<TAvro> deserializer,
+        Func<TAvro, TValue> map,
+        Func<TValue, string> serializeToJson,
+        Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync,
+        string? serviceBusQueueName)
+        : ISchemaHandler
+    {
+        private readonly Func<TValue, CancellationToken, Task<bool>> validateAsync = validateAsync ?? ((_, _) => Task.FromResult(true));
+
+        // TAvro, not TValue - SchemaName is this schema's identity on the wire (and the cold/hot-tier
+        // blob path segment), independent of which internal DTO it happens to be mapped into.
+        public string SchemaName { get; } = typeof(TAvro).Name;
+
+        public string? ServiceBusQueueName { get; } = serviceBusQueueName;
+
+        public object Deserialize(byte[]? data, SerializationContext context) =>
+            map(deserializer.Deserialize(data, data is null, context))!;
+
+        public string SerializeToJson(object value) => serializeToJson((TValue)value);
+
+        public (string SessionId, string MessageId) GetServiceBusRouting(object value, string? key) => getServiceBusRouting((TValue)value, key);
 
         public Task<bool> ValidateAsync(object value, CancellationToken cancellationToken) => validateAsync((TValue)value, cancellationToken);
     }
@@ -165,22 +235,127 @@ public abstract class ConsumerHostedService : BackgroundService
     /// storage, since nothing failed.</item>
     /// </list>
     /// </param>
+    /// <param name="serviceBusQueueName">
+    /// Overrides <see cref="ConsumerOptions.ServiceBusQueueName"/> for this schema only - omit (or pass
+    /// <see langword="null"/>) for the common case of every schema on this consumer relaying onto the
+    /// same queue. Set this when a consumer registers more than one schema and they need to land on
+    /// different Service Bus queues; the base class opens one <see cref="Azure.Messaging.ServiceBus.ServiceBusSender"/>
+    /// per distinct queue name actually used, not one per schema.
+    /// </param>
     protected static ISchemaHandler CreateSchemaHandler<TValue>(
         IDeserializer<TValue> deserializer,
         Func<TValue, string> serializeToJson,
-        Func<TValue, (string SessionId, string MessageId)> getServiceBusRouting,
-        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null) =>
-        new SchemaHandler<TValue>(deserializer, serializeToJson, getServiceBusRouting, validateAsync);
+        Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null,
+        string? serviceBusQueueName = null) =>
+        new SchemaHandler<TValue>(deserializer, serializeToJson, getServiceBusRouting, validateAsync, serviceBusQueueName);
+
+    /// <summary>
+    /// Builds a type-erased schema entry for one Avro event type that gets mapped into an internal
+    /// <typeparamref name="TValue"/> DTO before anything downstream (JSON audit, Service Bus routing,
+    /// validation) touches it - decouples this consumer's own wire contract from the Avro-generated
+    /// <typeparamref name="TAvro"/> SpecificRecord (see e.g. <c>InventoryStateChangedEvent</c>'s own
+    /// remarks for why). An <b>instance</b> method, unlike <see cref="CreateSchemaHandler{TValue}"/> -
+    /// it needs this consumer's own <see cref="Options"/> and <see cref="ISpecificRecordDeserializerFactory"/>,
+    /// neither of which exists yet inside a <c>base(...)</c> argument list, so call it from the derived
+    /// class's constructor <i>body</i> (after the <c>base(...)</c> call), then hand the resulting
+    /// dictionary to <see cref="RegisterSchemaHandlers"/> - not from the dictionary literal passed to
+    /// <c>base(...)</c> itself. The Schema Registry client behind it is built once per consumer instance,
+    /// on the first call, and reused for every subsequent schema on the same consumer (and disposed
+    /// automatically by this base class - see <see cref="Dispose"/>), so a consumer with two Avro
+    /// schemas does not need to manage sharing it itself.
+    /// </summary>
+    /// <typeparam name="TAvro">The Avro-generated <c>ISpecificRecord</c> type this schema deserializes to.</typeparam>
+    /// <typeparam name="TValue">The internal DTO <typeparamref name="TAvro"/> is mapped into.</typeparam>
+    /// <param name="map">Maps one deserialized <typeparamref name="TAvro"/> value into this consumer's own <typeparamref name="TValue"/> - everything past this point (JSON audit, routing, validation) sees only <typeparamref name="TValue"/>.</param>
+    /// <param name="getServiceBusRouting">
+    /// Routes one mapped <typeparamref name="TValue"/> onto Service Bus - see
+    /// <see cref="ISchemaHandler.GetServiceBusRouting"/>. Omit for the common case of routing by the
+    /// Kafka record key alone (<see cref="RouteByEventKey{TValue}"/>); pass an explicit delegate when a
+    /// schema needs to derive its session/message id from fields inside the value instead (e.g.
+    /// <c>BulkInventoryImportConsumerHostedService</c>'s own <c>EventId</c>-based routing).
+    /// </param>
+    /// <param name="serviceBusQueueName">Per-schema Service Bus queue override - see <see cref="CreateSchemaHandler{TValue}"/>'s remarks.</param>
+    /// <param name="validateAsync">Business-rule validation for one mapped <typeparamref name="TValue"/> - see <see cref="CreateSchemaHandler{TValue}"/>'s remarks for the throw-vs-return-false distinction.</param>
+    protected ISchemaHandler CreateSchemaHandler<TAvro, TValue>(
+        Func<TAvro, TValue> map,
+        Func<TValue, string?, (string SessionId, string MessageId)>? getServiceBusRouting = null,
+        string? serviceBusQueueName = null,
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null)
+        where TAvro : Avro.Specific.ISpecificRecord
+    {
+        var factory = specificRecordDeserializerFactory
+            ?? throw new InvalidOperationException(
+                $"{ConsumerName} has no {nameof(ISpecificRecordDeserializerFactory)} configured - required for Avro schema '{typeof(TAvro).Name}'.");
+
+        var deserializer = schemaRegistryClient is null
+            ? BuildFirstAvroDeserializer<TAvro>(factory)
+            : factory.Create<TAvro>(schemaRegistryClient);
+
+        return new MappedSchemaHandler<TAvro, TValue>(
+            deserializer,
+            map,
+            value => JsonSerializer.Serialize(value, RelayJsonOptions),
+            getServiceBusRouting ?? RouteByEventKey,
+            validateAsync,
+            serviceBusQueueName);
+    }
+
+    /// <summary>First Avro schema registered on this consumer instance - builds (and caches, via <see cref="schemaRegistryClient"/>) the Schema Registry client every later schema on the same consumer reuses.</summary>
+    private IDeserializer<TAvro> BuildFirstAvroDeserializer<TAvro>(ISpecificRecordDeserializerFactory factory)
+        where TAvro : Avro.Specific.ISpecificRecord
+    {
+        var deserializer = factory.Create<TAvro>(
+            Options.SchemaRegistryUrl
+                ?? throw new InvalidOperationException(
+                    $"Missing SchemaRegistryUrl for '{ConsumerName}' - configure it at this consumer's own level or the Kafka-level fallback."),
+            Options.SchemaRegistryApiKey,
+            Options.SchemaRegistryApiSecret,
+            out var client);
+
+        schemaRegistryClient = client;
+        return deserializer;
+    }
+
+    /// <summary>
+    /// Default Service Bus routing for <see cref="CreateSchemaHandler{TAvro,TValue}"/>: the Kafka
+    /// record key (<c>ConsumeResult.Message.Key</c>) alone, used as both the SessionId and MessageId -
+    /// the common case for an Avro schema with no compound aggregate key of its own (e.g.
+    /// <c>InventoryStateChanged</c>/<c>InventoryAdjusted</c>, which carry one <c>location</c> but an
+    /// array of line items, so routing is keyed on the producer's own Kafka key rather than a field
+    /// inside the value).
+    /// </summary>
+    private static (string SessionId, string MessageId) RouteByEventKey<TValue>(TValue _, string? key)
+    {
+        var eventKey = key
+            ?? throw new InvalidOperationException("Missing Kafka record key for this event - required to route onto Service Bus.");
+
+        return (eventKey, eventKey);
+    }
 
     private readonly IConsumer<string, byte[]> consumer;
-    private readonly IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers;
-    private readonly IDisposable? additionalDisposable;
-    private readonly ServiceBusSender serviceBusSender;
+    private readonly ISpecificRecordDeserializerFactory? specificRecordDeserializerFactory;
+    private ISchemaRegistryClient? schemaRegistryClient;
+    private IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers = new Dictionary<string, ISchemaHandler>();
+    private readonly ServiceBusClient serviceBusClient;
+
+    // Keyed by queue name, not by schema/event type - two schemas that share a queue (the common
+    // case, ISchemaHandler.ServiceBusQueueName left null) reuse the same sender rather than each
+    // opening their own. Built lazily via GetServiceBusSender, not eagerly for every schema up front.
+    private readonly ConcurrentDictionary<string, ServiceBusSender> serviceBusSenders = new();
     private readonly ResiliencePipelineProvider<string> pipelineProvider;
     private readonly IFileStore hotFileStore;
     private readonly IFileStore coldFileStore;
     private readonly IDeduplicationService deduplicationService;
-    private readonly ConsumerHealthState healthState;
+    private readonly IServiceScopeFactory scopeFactory;
+
+    // Keyed by the same event-type strings as schemaHandlers (built by RegisterSchemaHandlers, from
+    // that same dictionary's keys) - one ConsumerHealthState per registered schema/event type, not one
+    // per consumer, so ConsumerHealthCheck can report per event type (see GetHealthState). Never
+    // supplied through the constructor: unlike every other dependency here, a schema's set of event
+    // types isn't known until the derived class's constructor body calls RegisterSchemaHandlers, so
+    // there is nothing for a caller to inject yet at that point.
+    private IReadOnlyDictionary<string, ConsumerHealthState> healthStates = new Dictionary<string, ConsumerHealthState>();
     private readonly ILogger logger;
     private readonly PartitionOffsetCommitTracker offsetTracker;
     private readonly BlobStorageOptions blobStorageOptions;
@@ -193,49 +368,50 @@ public abstract class ConsumerHostedService : BackgroundService
 
     /// <summary>Builds the Kafka consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, enabled flag, worker/channel sizing, and Service Bus queue settings for this consumer.</param>
-    /// <param name="consumerName">Display name for this consumer's log messages and audit blob path.</param>
-    /// <param name="schemaHandlers">
-    /// One <see cref="ISchemaHandler"/> per schema this consumer understands (built via
-    /// <see cref="CreateSchemaHandler{TValue}"/>), keyed by the Kafka <see cref="KafkaHeaderNames.Type"/>
-    /// header value each corresponds to - use <see cref="DefaultEventType"/> as the key for a schema
-    /// that applies regardless of that header's value. See <see cref="ProcessMessageAsync"/> for the
-    /// lookup order and what happens when a message's event type matches neither.
-    /// </param>
     /// <param name="infrastructure">
     /// The six dependencies every consumer needs and which never vary between them (Service Bus
     /// client, Polly pipeline provider, hot/cold file stores, Blob Storage options, dedup service) -
     /// see <see cref="ConsumerRelayInfrastructure"/>'s own doc comment for why this is a single
     /// facade parameter instead of six.
     /// </param>
-    /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
     /// <param name="logger">Logger for consume/relay/failure events.</param>
-    /// <param name="additionalDisposable">An extra resource the derived class owns (e.g. an <c>ISchemaRegistryClient</c>) and wants disposed alongside the consumer - <see langword="null"/> if none.</param>
+    /// <param name="specificRecordDeserializerFactory">
+    /// Builds the Avro deserializers <see cref="CreateSchemaHandler{TAvro,TValue}"/> needs - only an
+    /// Avro-contract consumer passes this; a JSON-contract consumer (e.g. <c>KafkaConsumerHostedService</c>)
+    /// leaves it <see langword="null"/> and never calls that method.
+    /// </param>
+    /// <remarks>
+    /// Does not itself register any schema - <see cref="ConsumerName"/> derives from the concrete
+    /// derived type's name (<see cref="DeriveConsumerName"/>), but the derived class must still call
+    /// <see cref="RegisterSchemaHandlers"/> from its own constructor <i>body</i> (after this base
+    /// constructor returns) before the host starts calling <see cref="ExecuteAsync"/> - schema handlers
+    /// built via <see cref="CreateSchemaHandler{TAvro,TValue}"/> need this instance's own <see cref="Options"/>
+    /// and <paramref name="specificRecordDeserializerFactory"/>, neither of which is available yet inside
+    /// this constructor's own argument list. This is also why <see cref="ConsumerHealthState"/> is not a
+    /// constructor parameter here - see <see cref="RegisterSchemaHandlers"/> and <see cref="GetHealthState"/>.
+    /// </remarks>
     protected ConsumerHostedService(
         ConsumerOptions options,
-        string consumerName,
-        IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers,
         ConsumerRelayInfrastructure infrastructure,
-        ConsumerHealthState healthState,
         ILogger logger,
-        IDisposable? additionalDisposable = null)
+        ISpecificRecordDeserializerFactory? specificRecordDeserializerFactory = null)
     {
         Options = options;
-        ConsumerName = consumerName;
-        this.schemaHandlers = schemaHandlers;
+        ConsumerName = DeriveConsumerName(GetType());
         pipelineProvider = infrastructure.PipelineProvider;
         hotFileStore = infrastructure.HotFileStore;
         coldFileStore = infrastructure.ColdFileStore;
         blobStorageOptions = infrastructure.BlobStorageOptions.Value;
         deduplicationService = infrastructure.DeduplicationService;
-        this.healthState = healthState;
+        scopeFactory = infrastructure.ScopeFactory;
         this.logger = logger;
-        this.additionalDisposable = additionalDisposable;
+        this.specificRecordDeserializerFactory = specificRecordDeserializerFactory;
 
         var config = new ConsumerConfig
         {
             BootstrapServers = options.BootstrapServers
                 ?? throw new InvalidOperationException(
-                    $"Missing BootstrapServers for '{consumerName}' - configure it at this consumer's own level or the Kafka-level fallback."),
+                    $"Missing BootstrapServers for '{ConsumerName}' - configure it at this consumer's own level or the Kafka-level fallback."),
             GroupId = options.ConsumerGroup,
             // Defensive fallback, not just belt-and-braces: false/Earliest is what this service's
             // manual-commit architecture requires (integration-resiliency.instructions.md §1) -
@@ -261,9 +437,57 @@ public abstract class ConsumerHostedService : BackgroundService
         // remarks for why this moved out of the consumer builder.
         consumer = new ConsumerBuilder<string, byte[]>(config).Build();
 
-        serviceBusSender = infrastructure.ServiceBusClient.CreateSender(options.ServiceBusQueueName);
+        serviceBusClient = infrastructure.ServiceBusClient;
         offsetTracker = new PartitionOffsetCommitTracker(offsets => consumer.Commit(offsets));
     }
+
+    /// <summary>
+    /// Registers this consumer's schema handlers, built via <see cref="CreateSchemaHandler{TValue}"/>/
+    /// <see cref="CreateSchemaHandler{TAvro,TValue}"/> and keyed by the Kafka
+    /// <see cref="KafkaHeaderNames.Type"/> header value each corresponds to (or
+    /// <see cref="DefaultEventType"/> for a schema that applies regardless of that header's value) -
+    /// see <see cref="ProcessMessageAsync"/> for the lookup order. Call this once, from the derived
+    /// class's own constructor body immediately after the <c>base(...)</c> call - it cannot be supplied
+    /// as a <c>base(...)</c> argument itself because <see cref="CreateSchemaHandler{TAvro,TValue}"/>
+    /// needs this instance's own <see cref="Options"/>/deserializer factory, which don't exist yet at
+    /// that point in construction. Also builds one <see cref="ConsumerHealthState"/> per key in
+    /// <paramref name="handlers"/> - see <see cref="GetHealthState"/> and <see cref="RunPollLoopAsync"/>.
+    /// </summary>
+    protected void RegisterSchemaHandlers(IReadOnlyDictionary<string, ISchemaHandler> handlers)
+    {
+        schemaHandlers = handlers;
+        healthStates = handlers.Keys.ToDictionary(eventType => eventType, _ => new ConsumerHealthState());
+    }
+
+    /// <summary>
+    /// The <see cref="ConsumerHealthState"/> for one event type this consumer registered via
+    /// <see cref="RegisterSchemaHandlers"/> - resolved by <c>MessagingServiceCollectionExtensions</c>
+    /// when it builds this consumer's <see cref="ConsumerHealthCheck"/> instances, one per event type,
+    /// rather than this state being handed to the consumer through its own constructor (nothing could
+    /// supply it there - see <see cref="RegisterSchemaHandlers"/>'s remarks).
+    /// </summary>
+    /// <param name="eventType">One of the keys this consumer passed to <see cref="RegisterSchemaHandlers"/>.</param>
+    internal ConsumerHealthState GetHealthState(string eventType) =>
+        healthStates.TryGetValue(eventType, out var state)
+            ? state
+            : throw new InvalidOperationException(
+                $"{ConsumerName} has no schema handler registered for event type '{eventType}' - check RegisterSchemaHandlers matches the health checks configured for this consumer.");
+
+    /// <summary>Derives <see cref="ConsumerName"/> from the concrete derived type's name, e.g. <c>InventoryStateChangedConsumerHostedService</c> becomes <c>InventoryStateChanged</c>.</summary>
+    private static string DeriveConsumerName(Type type)
+    {
+        return type.Name;
+        //const string Suffix = "ConsumerHostedService";
+        //return type.Name.EndsWith(Suffix, StringComparison.Ordinal) ? type.Name[..^Suffix.Length] : type.Name;
+    }
+
+    /// <summary>
+    /// Resolves (creating and caching on first use) the <see cref="ServiceBusSender"/> for
+    /// <paramref name="queueName"/> - one sender per distinct queue name actually used across every
+    /// registered schema, not one per schema, so two schemas sharing a queue share a sender too.
+    /// </summary>
+    private ServiceBusSender GetServiceBusSender(string queueName) =>
+        serviceBusSenders.GetOrAdd(queueName, serviceBusClient.CreateSender);
 
     /// <summary>
     /// Polls the subscribed topic in a loop until cancellation, handing each message to the worker
@@ -351,8 +575,16 @@ public abstract class ConsumerHostedService : BackgroundService
             }
 
             // No message within the poll timeout is not a failure - an idle topic keeps the
-            // consumer healthy (integration-resiliency.instructions.md §8).
-            healthState.LastSuccessfulPollUtc = DateTimeOffset.UtcNow;
+            // consumer healthy (integration-resiliency.instructions.md §8). Every registered event
+            // type's state is touched here, not just whichever type (if any) this poll happened to
+            // return - the poll loop has no way to know which type would have arrived, and an idle
+            // topic must not make any of this consumer's event types look stale.
+            var pollUtc = DateTimeOffset.UtcNow;
+
+            foreach (var state in healthStates.Values)
+            {
+                state.LastSuccessfulPollUtc = pollUtc;
+            }
 
             if (polled is not { Message: not null } result)
             {
@@ -398,10 +630,27 @@ public abstract class ConsumerHostedService : BackgroundService
 
         var headers = result.Message.Headers;
         var rawCorrelationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId);
-        var correlationId = rawCorrelationId ?? Guid.NewGuid().ToString();
+        var correlationId = rawCorrelationId ?? $"-{Guid.NewGuid().ToString()}";
         var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
         var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
         var appId = TryGetHeader(headers, KafkaHeaderNames.AppId) ?? string.Empty;
+        var eventKey = TryGetHeader(headers, KafkaHeaderNames.EventKey) ?? string.Empty;
+
+        // Scoped for the lifetime of this one message, since the hosted service itself is a
+        // singleton but ICorrelationContext is scoped - disposed automatically at every return
+        // point below via the `using` declaration, same pattern as ServiceBusConsumerHostedService.
+        using var scope = scopeFactory.CreateScope();
+        var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
+        correlationContext.Set(correlationId, appId, [eventType, ConsumerName]);
+
+        // Pushed into Serilog's ambient LogContext (integration-resiliency.instructions.md §7),
+        // same as CorrelationIdMiddleware does at the HTTP boundary - every log line for the rest of
+        // this message's processing carries these without needing to be passed as its own template
+        // argument. Disposed (popped) at method return via the `using` declarations, same as `scope`.
+        using var correlationIdLogContext = LogContext.PushProperty("CorrelationId", correlationId);
+        using var appIdLogContext = LogContext.PushProperty("AppId", appId);
+        using var eventTypeLogContext = LogContext.PushProperty("EventType", eventType);
+        using var eventTypesLogContext = LogContext.PushProperty("Types", string.Join(", ", correlationContext.Types));
 
         logger.LogInformation(
             "{ConsumerName}: consumed message from {Topic}:{Partition}:{Offset}. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
@@ -413,8 +662,8 @@ public abstract class ConsumerHostedService : BackgroundService
         if (Options.IsCorrelationIdIgnored(rawCorrelationId))
         {
             logger.LogInformation(
-                "{ConsumerName}: ignoring message at {Topic}:{Partition}:{Offset} - CorrelationId {CorrelationId} matched a configured ignore prefix/suffix.",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: ignoring message at {Topic}:{Partition}:{Offset} - CorrelationId {CorrelationId} matched a configured ignore prefix/suffix. EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
             offsetTracker.Complete(result.TopicPartitionOffset);
             return;
@@ -426,8 +675,8 @@ public abstract class ConsumerHostedService : BackgroundService
             && !schemaHandlers.TryGetValue(DefaultEventType, out schemaHandler))
         {
             logger.LogCritical(
-                "{ConsumerName}: no registered schema for Type header '{EventType}' at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
-                ConsumerName, eventType, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: no registered schema for Type header '{EventType}' at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, AppId: {AppId}",
+                ConsumerName, eventType, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, appId);
 
             await WriteBlobAsync(
                 hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName,
@@ -451,8 +700,8 @@ public abstract class ConsumerHostedService : BackgroundService
         catch (Exception ex)
         {
             logger.LogCritical(ex,
-                "{ConsumerName}: Deserialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: Deserialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
             await WriteBlobAsync(
                 hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
@@ -473,8 +722,8 @@ public abstract class ConsumerHostedService : BackgroundService
             // No JSON to fall back to here (that's the very thing that just failed) - raw bytes,
             // same as a deserialize failure, so this message isn't lost outright.
             logger.LogCritical(ex,
-                "{ConsumerName}: Serialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: Serialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
             await WriteBlobAsync(
                 hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
@@ -514,8 +763,8 @@ public abstract class ConsumerHostedService : BackgroundService
                 // this consumer's dedup check is a latency/cost optimization on top of that, not the only
                 // line of defense against a redelivered message being applied twice.
                 logger.LogWarning(ex,
-                    "{ConsumerName}: deduplication check failed for message at {Topic}:{Partition}:{Offset} - proceeding as not a duplicate. CorrelationId: {CorrelationId}",
-                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                    "{ConsumerName}: deduplication check failed for message at {Topic}:{Partition}:{Offset} - proceeding as not a duplicate. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
                 isDuplicate = false;
             }
         }
@@ -523,8 +772,8 @@ public abstract class ConsumerHostedService : BackgroundService
         if (isDuplicate)
         {
             logger.LogInformation(
-                "{ConsumerName}: skipping {Topic}:{Partition}:{Offset} - duplicate. CorrelationId: {CorrelationId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: skipping {Topic}:{Partition}:{Offset} - duplicate. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
             offsetTracker.Complete(result.TopicPartitionOffset);
             return;
@@ -541,7 +790,7 @@ public abstract class ConsumerHostedService : BackgroundService
         }
         catch (Exception ex)
         {
-            await HandleNonFatalFailureAsync("Validation", ex, json, schemaHandler.SchemaName, correlationId, result, cancellationToken);
+            await HandleNonFatalFailureAsync("Validation", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
             return;
         }
 
@@ -550,8 +799,8 @@ public abstract class ConsumerHostedService : BackgroundService
             // Valid data, deliberately not relayed - not the same as the hard-failure path above.
             // No hot-tier write: nothing failed, this consumer just chose not to forward it.
             logger.LogInformation(
-                "{ConsumerName}: ValidateAsync returned false for message at {Topic}:{Partition}:{Offset} - skipping Service Bus publish. CorrelationId: {CorrelationId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+                "{ConsumerName}: ValidateAsync returned false for message at {Topic}:{Partition}:{Offset} - skipping Service Bus publish. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
             offsetTracker.Complete(result.TopicPartitionOffset);
             return;
@@ -559,7 +808,7 @@ public abstract class ConsumerHostedService : BackgroundService
 
         try
         {
-            var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value);
+            var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value, result.Message.Key);
 
             var message = new ServiceBusMessage(json)
             {
@@ -570,6 +819,7 @@ public abstract class ConsumerHostedService : BackgroundService
             };
             message.ApplicationProperties["CorrelationId"] = correlationId;
 
+            var serviceBusSender = GetServiceBusSender(schemaHandler.ServiceBusQueueName ?? Options.ServiceBusQueueName);
             var pipeline = pipelineProvider.GetPipeline(ResiliencePipelines.ServiceBusPublish);
 
             await pipeline.ExecuteAsync(
@@ -582,13 +832,13 @@ public abstract class ConsumerHostedService : BackgroundService
 
             logger.LogInformation(
                 "{ConsumerName}: relayed {MessageId} for session {SessionId} from {Topic}:{Partition}:{Offset} to Service Bus. " +
-                "CorrelationId: {CorrelationId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, TotalDurationMs: {TotalDurationMs}",
-                ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId,
+                "CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, TotalDurationMs: {TotalDurationMs}",
+                ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId,
                 deserializeDuration.TotalMilliseconds, validationDuration.TotalMilliseconds, totalStopwatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
-            await HandleNonFatalFailureAsync("ServiceBusPublish", ex, json, schemaHandler.SchemaName, correlationId, result, cancellationToken);
+            await HandleNonFatalFailureAsync("ServiceBusPublish", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
         }
     }
 
@@ -600,11 +850,11 @@ public abstract class ConsumerHostedService : BackgroundService
     /// or stops the consumer, even for a Service Bus publish failure.
     /// </summary>
     private async Task HandleNonFatalFailureAsync(
-        string stage, Exception ex, string json, string schemaName, string correlationId, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken)
+        string stage, Exception ex, string json, string schemaName, string correlationId, string eventType, string appId, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken)
     {
         logger.LogCritical(ex,
-            "{ConsumerName}: {Stage} failed for message at {Topic}:{Partition}:{Offset} - writing to hot storage and committing. CorrelationId: {CorrelationId}",
-            ConsumerName, stage, result.Topic, result.Partition.Value, result.Offset.Value, correlationId);
+            "{ConsumerName}: {Stage} failed for message at {Topic}:{Partition}:{Offset} - writing to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+            ConsumerName, stage, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
 
         await WriteBlobAsync(
             hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaName, correlationId, "json",
@@ -652,12 +902,12 @@ public abstract class ConsumerHostedService : BackgroundService
             : null;
     }
 
-    /// <summary>Closes and disposes the underlying Kafka consumer, plus any derived-class resource passed as <c>additionalDisposable</c> - Confluent.Kafka has no async-dispose equivalent.</summary>
+    /// <summary>Closes and disposes the underlying Kafka consumer, plus the Schema Registry client <see cref="CreateSchemaHandler{TAvro,TValue}"/> built (if any) - Confluent.Kafka has no async-dispose equivalent.</summary>
     public override void Dispose()
     {
         consumer.Close();
         consumer.Dispose();
-        additionalDisposable?.Dispose();
+        schemaRegistryClient?.Dispose();
         base.Dispose();
     }
 }

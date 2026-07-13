@@ -44,15 +44,20 @@ data:
   Kafka__EnableAutoCommit: "false"
   Kafka__AutoOffsetReset: "Latest"
 
-  # KafkaConsumerOptions.Functions - allow-list of which consumers this pod runs.
+  # KafkaConsumerOptions.KafkaEventFunctions - allow-list of which consumers this pod runs.
   # Array binding needs the __<index> suffix form; empty/absent means "run all three".
-  Kafka__Functions__0: "InventoryStateChanged"
+  Kafka__KafkaEventFunctions__0: "inventory.InventoryStateChanged"
 
   # Kafka:InventoryStateChanged - the Avro/Schema-Registry consumer. Inherits
-  # BootstrapServers/SchemaRegistryUrl/Enabled from the Kafka-level keys above.
+  # BootstrapServers/SchemaRegistryUrl/Enabled from the Kafka-level keys above. Relays both
+  # InventoryStateChanged and InventoryAdjusted events off this one topic/consumer group;
+  # InventoryAdjusted shares the ServiceBusQueueName below unless
+  # Kafka__InventoryStateChanged__InventoryAdjustedServiceBusQueueName is also set to point it
+  # at a different queue.
   Kafka__InventoryStateChanged__Topic: "inventory-events"
   Kafka__InventoryStateChanged__ConsumerGroup: "$InventoryStateChanged"
   Kafka__InventoryStateChanged__ServiceBusQueueName: "inventory-state-changed"
+  # Kafka__InventoryStateChanged__InventoryAdjustedServiceBusQueueName: "inventory-adjusted"
 
   # Kafka:BulkInventoryImport - disabled by default in appsettings.json; kept here so
   # toggling it on is a ConfigMap edit, not a code change.

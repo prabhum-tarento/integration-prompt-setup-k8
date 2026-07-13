@@ -1,68 +1,64 @@
-using System.Text.Json;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using net.pandora.nexus.@event.inventory;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 /// <summary>
-/// Relays <c>net.pandora.nexus.event.inventory.InventoryStateChanged</c> Avro events from Kafka
-/// onto the durable Azure Service Bus queue (integration-resiliency.instructions.md §1), built on
-/// the shared <see cref="ConsumerHostedService"/> - the Avro counterpart to the JSON
-/// <see cref="KafkaConsumerHostedService"/>. Handles exactly one schema regardless of the Kafka
-/// <c>Type</c> header's value (registered under <see cref="DefaultEventType"/>), same as before this
-/// class supported registering more than one. Unlike that JSON contract, this event carries one
-/// <c>location</c> but an array of <c>itemLines</c> (potentially several products) - the
-/// <c>{WarehouseId}:{Sku}</c> SessionId convention that doc describes does not apply 1:1, so this
-/// relay uses <c>location.id</c> alone and forwards the event (including all its item lines) as a
-/// single Service Bus message, per team decision - a future per-item-line fan-out would need a
-/// different SessionId derivation.
+/// Relays the two Avro event types produced onto the shared <c>inventory-events</c> topic -
+/// <c>net.pandora.nexus.event.inventory.InventoryStateChanged</c> and
+/// <c>net.pandora.nexus.event.inventory.InventoryAdjusted</c> - from Kafka onto the durable Azure
+/// Service Bus queue (integration-resiliency.instructions.md §1), built on the shared
+/// <see cref="ConsumerHostedService"/> - the Avro counterpart to the JSON
+/// <see cref="KafkaConsumerHostedService"/>. Registers one <see cref="ConsumerHostedService.ISchemaHandler"/>
+/// per event type, keyed by its exact Kafka <c>Type</c> header value (<see cref="InventoryStateChangedEventType"/>/
+/// <see cref="InventoryAdjustedEventType"/>) rather than <see cref="ConsumerHostedService.DefaultEventType"/> -
+/// unlike every other consumer in this repo, this one cannot treat "any Type header value" as one schema, since the
+/// two events it forwards are structurally unrelated Avro records. A message whose <c>Type</c> header
+/// matches neither is dead-lettered as an unrecognized schema, same as any consumer (see the base
+/// class's remarks). Both deserializers share one Schema Registry client - the base class's
+/// <see cref="ConsumerHostedService.CreateSchemaHandler{TAvro,TValue}"/> builds it once, on the first
+/// call, and reuses it for the second, rather than opening a second connection to the same registry.
 /// </summary>
+/// <remarks>
+/// Both <c>InventoryStateChanged</c> and <c>InventoryAdjusted</c> are mapped into their own decoupled
+/// wire contracts (<see cref="InventoryStateChangedEvent"/>/<see cref="InventoryAdjustedEvent"/>)
+/// before anything downstream touches them - see <see cref="InventoryStateChangedEventMapper"/>/
+/// <see cref="InventoryAdjustedEventMapper"/>. Both schemas route onto Service Bus using the Kafka
+/// record key alone (the base class's default <c>RouteByEventKey</c>) - unlike a JSON contract keyed
+/// on a compound <c>{WarehouseId}:{Sku}</c> SessionId derived from the payload, both these events carry
+/// one <c>location</c> but an array of line items (<c>itemLines</c>/<c>adjustmentLines</c>, potentially
+/// several products), so this relay forwards each event (including all its line items) as a single
+/// Service Bus message keyed by the producer's own Kafka key, per team decision - a future per-line
+/// fan-out would need a different SessionId derivation.
+/// </remarks>
 public sealed class InventoryStateChangedConsumerHostedService : ConsumerHostedService
 {
-    /// <summary>
-    /// <c>IgnoreReadOnlyProperties</c> skips the Avro-generated SpecificRecord's get-only
-    /// <c>Schema</c> property, which System.Text.Json would otherwise try (and fail) to serialize.
-    /// </summary>
-    private static readonly JsonSerializerOptions RelayJsonOptions = new() { IgnoreReadOnlyProperties = true };
-
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
-    /// <param name="options">Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer.</param>
-    /// <param name="specificRecordDeserializerFactory">Builds the Avro deserializer and its backing Schema Registry client.</param>
+    /// <param name="options">
+    /// Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer -
+    /// including <see cref="InventoryStateChangedConsumerOptions.InventoryAdjustedServiceBusQueueName"/>,
+    /// which lets <c>InventoryAdjusted</c> relay onto a different queue than
+    /// <c>InventoryStateChanged</c>'s <see cref="ConsumerOptions.ServiceBusQueueName"/> if configured.
+    /// </param>
+    /// <param name="specificRecordDeserializerFactory">Builds the Avro deserializers and their shared backing Schema Registry client.</param>
     /// <param name="infrastructure">The Service Bus client, Polly pipeline provider, hot/cold file stores, Blob Storage options, and dedup service every consumer shares - see <see cref="ConsumerRelayInfrastructure"/>.</param>
-    /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
     /// <param name="logger">Logger for consume/relay/poison-message events.</param>
     public InventoryStateChangedConsumerHostedService(
         IOptions<InventoryStateChangedConsumerOptions> options,
         ISpecificRecordDeserializerFactory specificRecordDeserializerFactory,
         ConsumerRelayInfrastructure infrastructure,
-        [FromKeyedServices(MessagingServiceCollectionExtensions.InventoryStateChangedConsumerKey)] ConsumerHealthState healthState,
         ILogger<InventoryStateChangedConsumerHostedService> logger)
-        : base(
-            options.Value,
-            "InventoryStateChanged Kafka consumer",
-            new Dictionary<string, ISchemaHandler>
-            {
-                [DefaultEventType] = CreateSchemaHandler(
-                    specificRecordDeserializerFactory.Create<InventoryStateChanged>(
-                        options.Value.SchemaRegistryUrl
-                            ?? throw new InvalidOperationException(
-                                $"Missing SchemaRegistryUrl - configure '{InventoryStateChangedConsumerOptions.SectionName}:SchemaRegistryUrl' " +
-                                $"or the Kafka-level '{KafkaConsumerOptions.SectionName}:SchemaRegistryUrl' fallback."),
-                        options.Value.SchemaRegistryApiKey,
-                        options.Value.SchemaRegistryApiSecret,
-                        out var schemaRegistryClient),
-                    value => JsonSerializer.Serialize(value, RelayJsonOptions),
-                    // location.id, not {WarehouseId}:{Sku} - see the class-level remarks on why this
-                    // event's shape (one location, an array of itemLines) doesn't fit that convention.
-                    // id is the schema's own declared dedup key (see the .avsc's metadata.key).
-                    value => (value.location.id, value.id)),
-            },
-            infrastructure,
-            healthState,
-            logger,
-            additionalDisposable: schemaRegistryClient)
+        : base(options.Value, infrastructure, logger, specificRecordDeserializerFactory)
     {
+        RegisterSchemaHandlers(new Dictionary<string, ISchemaHandler>
+        {
+            [KafkaEvents.InventoryStateChangedEventType] = CreateSchemaHandler<InventoryStateChanged, InventoryStateChangedEvent>(
+                InventoryStateChangedEventMapper.ToInventoryStateChangedEvent),
+            [KafkaEvents.InventoryAdjustedEventType] = CreateSchemaHandler<InventoryAdjusted, InventoryAdjustedEvent>(
+                InventoryAdjustedEventMapper.ToInventoryAdjustedEvent,
+                // Null (the default) unless InventoryAdjustedServiceBusQueueName is configured -
+                // falls back to the consumer-wide ServiceBusQueueName, so InventoryAdjusted lands
+                // on the same queue as InventoryStateChanged until ops points it elsewhere.
+                serviceBusQueueName: options.Value.InventoryAdjustedServiceBusQueueName),
+        });
     }
 }

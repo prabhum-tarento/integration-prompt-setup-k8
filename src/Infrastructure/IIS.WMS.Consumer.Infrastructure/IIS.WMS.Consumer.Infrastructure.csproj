@@ -10,6 +10,7 @@
     <PackageReference Include="Microsoft.Azure.Cosmos" />
     <PackageReference Include="NexusFacades.Common.AvroSchemas" />
     <PackageReference Include="NexusFacades.Common.Core" />
+    <PackageReference Include="Serilog" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
@@ -24,6 +25,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\Application\IIS.WMS.Consumer.Application\IIS.WMS.Consumer.Application.csproj" />
     <ProjectReference Include="..\..\Domain\IIS.WMS.Consumer.Domain\IIS.WMS.Consumer.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lets IIS.WMS.Consumer.UnitTests exercise internal types directly (e.g. InventoryStateChangedEventMapper) without widening this project's public API just for testability. -->
+    <InternalsVisibleTo Include="IIS.WMS.Consumer.UnitTests" />
   </ItemGroup>
 
 </Project>

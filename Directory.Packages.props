@@ -44,6 +44,9 @@
     <PackageVersion Include="Azure.Core" Version="1.60.0" />
     <PackageVersion Include="Polly.Core" Version="8.7.0" />
     <PackageVersion Include="Polly.Extensions" Version="8.7.0" />
+    <!-- Serilog.Context (LogContext) for the Kafka consumer's per-message correlation scope -
+         same version Serilog.AspNetCore 10.0.0 already resolves transitively for the Api project. -->
+    <PackageVersion Include="Serilog" Version="4.3.0" />
   </ItemGroup>
 
   <!-- Infrastructure layer: Avro/Schema Registry consumer for the inventory.InventoryStateChanged

@@ -14,4 +14,13 @@ public sealed class InventoryStateChangedConsumerOptions : ConsumerOptions
 {
     /// <summary>Configuration section name this options type binds from.</summary>
     public const string SectionName = "Kafka:InventoryStateChanged";
+
+    /// <summary>
+    /// Service Bus queue for <c>InventoryAdjusted</c> events specifically - unset (the default) means
+    /// both event types this consumer relays share <see cref="ConsumerOptions.ServiceBusQueueName"/>,
+    /// same as before this setting existed. Set this only if <c>InventoryAdjusted</c> needs to land on
+    /// a different queue than <c>InventoryStateChanged</c> - see
+    /// <see cref="InventoryStateChangedConsumerHostedService"/>.
+    /// </summary>
+    public string? InventoryAdjustedServiceBusQueueName { get; set; }
 }

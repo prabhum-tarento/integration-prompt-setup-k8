@@ -42,8 +42,14 @@ for what that looks like without this wrapper).
 - Every request HEADER you send (other than the usual HTTP/framework ones - Content-Type,
   Content-Length, Host, Connection, Accept*, User-Agent, Cache-Control) is forwarded as a
   Kafka record header, base64-encoded automatically. Set Correlation-Id/Deduplication-Id/
-  Type/App-Id (see KafkaHeaderNames.cs) as plain HTTP headers in Postman/curl - no manual
-  base64 encoding needed, unlike calling Kafka REST Proxy's v3 API directly.
+  Id/App-Id/Type (see KafkaHeaderNames.cs) as plain HTTP headers in Postman/curl - no manual
+  base64 encoding needed, unlike calling Kafka REST Proxy's v3 API directly. Four of those
+  are defaulted when you don't set them yourself, so you don't have to invent one for every
+  test call: Correlation-Id and Deduplication-Id each default to a fresh GUID, Id defaults
+  to a random string, and App-Id defaults to "local-WMS-kafka". Type is different - it's
+  ALWAYS overwritten with the schema/subject name the "type" query param resolved to above,
+  even if you send your own Type header, since a mismatched Type would disagree with the
+  schema Kafka REST Proxy is told to validate the record against.
 - Every request (method/path/headers/body) and every response (status/body) is logged,
   timestamped, to two places: this process's own console output, and GET /logs's live
   stream (see below) - including requests that fail early validation (wrong route,
@@ -418,10 +424,36 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
             return
         }
 
-        $kafkaHeaders = @()
+        # KafkaHeaderNames.cs's contract: Correlation-Id/Deduplication-Id/Id/App-Id are
+        # defaulted here ONLY when the caller didn't already send one (so a caller testing a
+        # specific correlation/dedup/app scenario can still set their own), but Type always
+        # gets overwritten with the schema name this "type" query param actually resolved to
+        # above - never the caller-supplied value - so the record header can't disagree with
+        # the schema/subject Kafka REST Proxy is told to validate against below. Header names
+        # are canonicalized to KafkaHeaderNames.cs's exact casing regardless of how the caller
+        # sent them - HTTP headers are case-insensitive, but Confluent.Kafka's Headers lookup
+        # on the consumer side (ConsumerHostedService.TryGetHeader) is an exact byte-string
+        # match, so a caller-sent "correlation-id" would otherwise silently fail to match
+        # "Correlation-Id" downstream.
+        $canonicalHeaderNames = @('Correlation-Id', 'Deduplication-Id', 'Id', 'App-Id', 'Type')
+        $effectiveHeaders = [ordered]@{}
         foreach ($headerName in $request.Headers.AllKeys) {
             if ($excludedHeaders -contains $headerName) { continue }
-            $kafkaHeaders += @{ name = $headerName; value = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request.Headers[$headerName])) }
+            # PowerShell's -eq on strings is case-insensitive by default - deliberately used
+            # here to find the canonical casing for a caller header sent in any case.
+            $canonicalName = $canonicalHeaderNames | Where-Object { $_ -eq $headerName } | Select-Object -First 1
+            $key = if ($canonicalName) { $canonicalName } else { $headerName }
+            $effectiveHeaders[$key] = $request.Headers[$headerName]
+        }
+        if (-not $effectiveHeaders.Contains('Correlation-Id')) { $effectiveHeaders['Correlation-Id'] = [guid]::NewGuid().ToString() }
+        if (-not $effectiveHeaders.Contains('Deduplication-Id')) { $effectiveHeaders['Deduplication-Id'] = [guid]::NewGuid().ToString() }
+        if (-not $effectiveHeaders.Contains('Id')) { $effectiveHeaders['Id'] = [guid]::NewGuid().ToString('N') }
+        if (-not $effectiveHeaders.Contains('App-Id')) { $effectiveHeaders['App-Id'] = 'local-WMS-kafka' }
+        $effectiveHeaders['Type'] = $eventName
+
+        $kafkaHeaders = @()
+        foreach ($headerName in $effectiveHeaders.Keys) {
+            $kafkaHeaders += @{ name = $headerName; value = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($effectiveHeaders[$headerName])) }
         }
         # ConvertTo-Json on a single-element array unwraps it to a bare object, not a
         # one-item JSON array - force it back into array shape either way.

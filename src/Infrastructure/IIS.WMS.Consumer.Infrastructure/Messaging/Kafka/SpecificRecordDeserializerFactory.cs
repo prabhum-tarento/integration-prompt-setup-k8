@@ -36,6 +36,22 @@ public interface ISpecificRecordDeserializerFactory
     IDeserializer<TAvro> Create<TAvro>(
         string schemaRegistryUrl, string? schemaRegistryApiKey, string? schemaRegistryApiSecret, out ISchemaRegistryClient schemaRegistryClient)
         where TAvro : Avro.Specific.ISpecificRecord;
+
+    /// <summary>
+    /// Builds an Avro deserializer for <typeparamref name="TAvro"/> against an already-built Schema
+    /// Registry client - for a second (or later) schema on a consumer whose schemas all resolve
+    /// against the same registry (e.g. two event types on one topic), so it doesn't open a redundant
+    /// registry client/connection per extra schema the way calling the other overload again would.
+    /// </summary>
+    /// <typeparam name="TAvro">The Avro-generated <c>ISpecificRecord</c> type to deserialize into.</typeparam>
+    /// <param name="schemaRegistryClient">
+    /// An already-built Schema Registry client (e.g. from the other overload's <c>out</c> parameter) -
+    /// the caller still owns disposing it exactly once, regardless of how many deserializers were built
+    /// from it.
+    /// </param>
+    /// <returns>A deserializer ready to pass to <see cref="ConsumerBuilder{TKey,TValue}.SetValueDeserializer"/>.</returns>
+    IDeserializer<TAvro> Create<TAvro>(ISchemaRegistryClient schemaRegistryClient)
+        where TAvro : Avro.Specific.ISpecificRecord;
 }
 
 /// <inheritdoc cref="ISpecificRecordDeserializerFactory" />
@@ -62,6 +78,15 @@ public sealed class SpecificRecordDeserializerFactory(ILogger<SpecificRecordDese
         }
 
         schemaRegistryClient = new CachedSchemaRegistryClient(config);
+
+        return Create<TAvro>(schemaRegistryClient);
+    }
+
+    /// <inheritdoc />
+    public IDeserializer<TAvro> Create<TAvro>(ISchemaRegistryClient schemaRegistryClient)
+        where TAvro : Avro.Specific.ISpecificRecord
+    {
+        logger.LogDebug("Building Avro Schema Registry deserializer for {AvroType}.", typeof(TAvro).Name);
 
         // AvroDeserializer<T> only exposes an async API; ConsumerBuilder<TKey,TValue> needs a
         // synchronous IDeserializer<T> (Confluent.Kafka's Consume() call itself is synchronous),

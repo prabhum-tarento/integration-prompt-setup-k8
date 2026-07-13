@@ -1,7 +1,5 @@
-using System.Text.Json;
 using FluentValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -23,56 +21,41 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// </summary>
 public sealed class BulkInventoryImportConsumerHostedService : ConsumerHostedService
 {
-    private static readonly JsonSerializerOptions RelayJsonOptions = new() { IgnoreReadOnlyProperties = true };
-
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer.</param>
     /// <param name="specificRecordDeserializerFactory">Builds the Avro deserializer and its backing Schema Registry client.</param>
     /// <param name="infrastructure">The Service Bus client, Polly pipeline provider, hot/cold file stores, Blob Storage options, and dedup service every consumer shares - see <see cref="ConsumerRelayInfrastructure"/>.</param>
     /// <param name="validator">Field-level validation for one deserialized event - the single validation point for bulk-import data.</param>
-    /// <param name="healthState">Shared state updated on every poll, read by this consumer's <see cref="ConsumerHealthCheck"/>.</param>
     /// <param name="logger">Logger for consume/relay/poison-message events.</param>
     public BulkInventoryImportConsumerHostedService(
         IOptions<BulkInventoryImportConsumerOptions> options,
         ISpecificRecordDeserializerFactory specificRecordDeserializerFactory,
         ConsumerRelayInfrastructure infrastructure,
         IValidator<BulkInventoryImportEvent> validator,
-        [FromKeyedServices(MessagingServiceCollectionExtensions.BulkInventoryImportConsumerKey)] ConsumerHealthState healthState,
         ILogger<BulkInventoryImportConsumerHostedService> logger)
-        : base(
-            options.Value,
-            "BulkInventoryImport Kafka consumer",
-            new Dictionary<string, ISchemaHandler>
-            {
-                [DefaultEventType] = CreateSchemaHandler(
-                    specificRecordDeserializerFactory.Create<BulkInventoryImportEvent>(
-                        options.Value.SchemaRegistryUrl
-                            ?? throw new InvalidOperationException(
-                                $"Missing SchemaRegistryUrl - configure '{BulkInventoryImportConsumerOptions.SectionName}:SchemaRegistryUrl' " +
-                                $"or the Kafka-level '{KafkaConsumerOptions.SectionName}:SchemaRegistryUrl' fallback."),
-                        options.Value.SchemaRegistryApiKey,
-                        options.Value.SchemaRegistryApiSecret,
-                        out var schemaRegistryClient),
-                    value => JsonSerializer.Serialize(value, RelayJsonOptions),
-                    // SessionId is unused downstream (non-session queue) - see the class-level
-                    // remarks. MessageId is EventId, the upstream system's own deterministic key,
-                    // which is what makes the Service Bus consumer's dedupe check on redelivery work.
-                    value => (value.EventId, value.EventId),
-                    async (value, ct) =>
-                    {
-                        // The single validation point for bulk-import data. Field-level rule
-                        // violations throw (via ValidateAndThrowAsync) and are handled like any other
-                        // non-fatal failure by the base class - this consumer has no "valid but
-                        // intentionally unforwarded" case today, so it never returns false.
-                        await validator.ValidateAndThrowAsync(value, ct);
-
-                        return true;
-                    }),
-            },
-            infrastructure,
-            healthState,
-            logger,
-            additionalDisposable: schemaRegistryClient)
+        : base(options.Value, infrastructure, logger, specificRecordDeserializerFactory)
     {
+        RegisterSchemaHandlers(new Dictionary<string, ISchemaHandler>
+        {
+            [DefaultEventType] = CreateSchemaHandler<BulkInventoryImportEvent, BulkInventoryImportEvent>(
+                // No mapping needed - this schema is relayed as its raw Avro-generated type, unlike
+                // the InventoryStateChanged/InventoryAdjusted consumer's own decoupled DTOs.
+                value => value,
+                // SessionId is unused downstream (non-session queue) - see the class-level remarks.
+                // MessageId is EventId, the upstream system's own deterministic key, which is what
+                // makes the Service Bus consumer's dedupe check on redelivery work. Overrides the base
+                // class's Kafka-record-key default routing - this schema derives its own key instead.
+                (value, _) => (value.EventId, value.EventId),
+                validateAsync: async (value, ct) =>
+                {
+                    // The single validation point for bulk-import data. Field-level rule
+                    // violations throw (via ValidateAndThrowAsync) and are handled like any other
+                    // non-fatal failure by the base class - this consumer has no "valid but
+                    // intentionally unforwarded" case today, so it never returns false.
+                    await validator.ValidateAndThrowAsync(value, ct);
+
+                    return true;
+                }),
+        });
     }
 }

@@ -19,6 +19,8 @@ public static class KafkaHeaderNames
 
     /// <summary>Identifies the upstream application/facade that produced the message.</summary>
     public const string AppId = "App-Id";
+    
+    public const string EventKey = "Id";
 
     /// <summary>Discriminates the event's type/schema.</summary>
     public const string Type = "Type";
