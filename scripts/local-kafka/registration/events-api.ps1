@@ -12,6 +12,10 @@ for what that looks like without this wrapper).
     POST /api/stop                      - pause POST /api/events (any method works) - see below
     POST /api/start                     - resume it again (any method works) - see below
     POST /api/shutdown                  - stop this process (any HTTP method works) - see below
+    POST /oauth/token                   - local stand-in for Nexus's OAuth2 token endpoint
+                                           (see "Nexus deduplication mock" below)
+    POST /nexus/deduper/api/dedupe      - local stand-in for Nexus's deduplication API
+                                           (see "Nexus deduplication mock" below)
 
 - Query param "type" is an EVENT NAME - the same name as its
   events\<topic>\<event-name>\ folder (e.g. "inventory.InventoryStateChanged",
@@ -78,6 +82,28 @@ otherwise have to Ctrl+C - now `curl -X POST http://localhost:8087/api/shutdown`
 opening that URL in a browser, does the same thing from anywhere). Responds once the
 shutdown is confirmed, then stops accepting new connections and exits; requests already
 in flight when it's called are allowed to finish first.
+
+Nexus deduplication mock - stands in for the real Nexus deduplication API this consumer calls
+(NexusDeduplicationService.cs / NexusAuthenticationHandler.cs / NexusServiceCollectionExtensions.cs),
+matching appsettings.Development.json's Nexus:Deduplication config exactly (BaseUrl and
+OAuthEndpoint both point at this same process on port 8087):
+
+POST /oauth/token - accepts the client-credentials form POST NexusAuthenticationHandler sends
+(grant_type/client_id/client_secret/scope, form-urlencoded) without validating the credentials -
+this is a local testing double, not a security boundary. Mints a fresh bearer token on every call,
+remembers it (with its expiry) in $Sync.IssuedTokens, and responds 200 with
+{ "access_token": "...", "expires_in": 3600 } - the exact shape NexusAuthenticationHandler's
+TokenResponse record deserializes.
+
+POST /nexus/deduper/api/dedupe - requires the Authorization: Bearer <access_token> header
+NexusAuthenticationHandler attaches to every call (401 if it's missing, malformed, or references a
+token this process never issued or has since expired). Body is { "dedupeId": "<value>" } (matches
+NexusDeduplicationService's DeduplicationRequest record). The first request for a given dedupeId is
+recorded in $Sync.DedupeCache and answered 201 Created; a repeat of the same dedupeId is answered
+409 Conflict without re-storing it - the exact two outcomes NexusDeduplicationService distinguishes
+(only 409 is treated as "duplicate"; every other non-success status is treated as a Nexus outage and
+thrown, not swallowed). Both caches live only in this process's memory - restarting it forgets every
+issued token and every dedupeId seen so far.
 
 Concurrency: this can hold a GET /logs connection open indefinitely while still handling
 POST /api/events (or another GET /logs, or /api/shutdown) at the same time - a plain
@@ -344,6 +370,85 @@ function Invoke-StartStopRequest($Sync, [System.Net.HttpListenerResponse]$Respon
     Send-JsonResponse $Sync $Response 200 (@{ status = $status; eventsEnabled = $Enable } | ConvertTo-Json -Compress)
 }
 
+# POST /oauth/token - see the header comment's "Nexus deduplication mock" section. Doesn't
+# validate grant_type/client_id/client_secret/scope at all (a local testing double, not a
+# security boundary) - just mints a fresh bearer token every call and records it (with its
+# expiry) in $Sync.IssuedTokens so Invoke-DedupeRequest can check a caller's Authorization
+# header against a token this endpoint actually issued, not just "any string starting with
+# Bearer ". Response shape matches NexusAuthenticationHandler's TokenResponse record exactly -
+# access_token/expires_in, snake_case, nothing else required.
+function Invoke-OAuthTokenRequest($Sync, [System.Net.HttpListenerResponse]$Response) {
+    $accessToken = 'nexus-local-' + [guid]::NewGuid().ToString('N')
+    $expiresInSeconds = 3600
+
+    [System.Threading.Monitor]::Enter($Sync.TokenLock)
+    try {
+        $Sync.IssuedTokens[$accessToken] = (Get-Date).AddSeconds($expiresInSeconds)
+        # Prune tokens that have since expired, so this dictionary doesn't grow unbounded
+        # across a long-running local session.
+        $expiredTokens = @($Sync.IssuedTokens.Keys | Where-Object { $Sync.IssuedTokens[$_] -lt (Get-Date) })
+        foreach ($expiredToken in $expiredTokens) { $Sync.IssuedTokens.Remove($expiredToken) }
+    } finally {
+        [System.Threading.Monitor]::Exit($Sync.TokenLock)
+    }
+
+    Send-JsonResponse $Sync $Response 200 (@{ access_token = $accessToken; expires_in = $expiresInSeconds } | ConvertTo-Json -Compress)
+}
+
+# POST /nexus/deduper/api/dedupe - see the header comment's "Nexus deduplication mock" section.
+# Requires the bearer token Invoke-OAuthTokenRequest issued, via the standard
+# Authorization: Bearer <token> header (exactly what NexusAuthenticationHandler attaches) -
+# responds 401 if it's missing, malformed, or unknown/expired, same as a real OAuth-protected
+# API would. The body is { "dedupeId": "<value>" } (matches NexusDeduplicationService's
+# DeduplicationRequest record's JsonPropertyName); first sighting of a given dedupeId is stored
+# in $Sync.DedupeCache and answered 201 Created, a repeat is answered 409 Conflict without
+# re-storing it - the exact two outcomes NexusDeduplicationService distinguishes (only 409 means
+# "duplicate"; anything else is treated as a Nexus outage).
+function Invoke-DedupeRequest($Sync, [System.Net.HttpListenerRequest]$Request, [System.Net.HttpListenerResponse]$Response, [string]$RawBody) {
+    $authHeader = $Request.Headers['Authorization']
+    if (-not $authHeader -or $authHeader -notmatch '^Bearer\s+(.+)$') {
+        Send-JsonResponse $Sync $Response 401 (@{ error = 'Missing or malformed Authorization header - expected "Bearer <access_token>".' } | ConvertTo-Json -Compress)
+        return
+    }
+    $token = $Matches[1]
+
+    [System.Threading.Monitor]::Enter($Sync.TokenLock)
+    try {
+        $expiry = $Sync.IssuedTokens[$token]
+    } finally {
+        [System.Threading.Monitor]::Exit($Sync.TokenLock)
+    }
+    if (-not $expiry -or $expiry -lt (Get-Date)) {
+        Send-JsonResponse $Sync $Response 401 (@{ error = 'Access token is missing, unknown, or expired - POST /oauth/token first.' } | ConvertTo-Json -Compress)
+        return
+    }
+
+    try {
+        $parsedBody = $RawBody | ConvertFrom-Json
+    } catch {
+        Send-JsonResponse $Sync $Response 400 (@{ error = "Request body is not valid JSON: $($_.Exception.Message)" } | ConvertTo-Json -Compress)
+        return
+    }
+    $dedupeId = $parsedBody.dedupeId
+    if (-not $dedupeId) {
+        Send-JsonResponse $Sync $Response 400 (@{ error = "Request body must include a non-empty 'dedupeId'." } | ConvertTo-Json -Compress)
+        return
+    }
+
+    [System.Threading.Monitor]::Enter($Sync.DedupeLock)
+    try {
+        if ($Sync.DedupeCache.Contains($dedupeId)) {
+            Send-JsonResponse $Sync $Response 409 (@{ error = "dedupeId '$dedupeId' already exists." } | ConvertTo-Json -Compress)
+            return
+        }
+        [void]$Sync.DedupeCache.Add($dedupeId)
+    } finally {
+        [System.Threading.Monitor]::Exit($Sync.DedupeLock)
+    }
+
+    Send-JsonResponse $Sync $Response 201 (@{ dedupeId = $dedupeId; status = 'created' } | ConvertTo-Json -Compress)
+}
+
 # The router every dispatched request runs through, in its own runspace.
 function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
     $request = $Context.Request
@@ -387,6 +492,16 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
             return
         }
 
+        if ($path -eq '/oauth/token' -and $request.HttpMethod -eq 'POST') {
+            Invoke-OAuthTokenRequest $Sync $response
+            return
+        }
+
+        if ($path -eq '/nexus/deduper/api/dedupe' -and $request.HttpMethod -eq 'POST') {
+            Invoke-DedupeRequest $Sync $request $response $rawBody
+            return
+        }
+
         # HTTP/framework headers never meant to become Kafka record headers.
         $excludedHeaders = @(
             'Content-Type', 'Content-Length', 'Host', 'Connection', 'Accept', 'Accept-Encoding',
@@ -394,7 +509,7 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
         )
 
         if ($request.HttpMethod -ne 'POST' -or $path -ne '/api/events') {
-            Send-JsonResponse $Sync $response 404 (@{ error = "Unknown route: $($request.HttpMethod) $path - use POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, or /api/shutdown" } | ConvertTo-Json -Compress)
+            Send-JsonResponse $Sync $response 404 (@{ error = "Unknown route: $($request.HttpMethod) $path - use POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, /api/shutdown, POST /oauth/token, or POST /nexus/deduper/api/dedupe" } | ConvertTo-Json -Compress)
             return
         }
 
@@ -550,6 +665,10 @@ $sync = [hashtable]::Synchronized(@{
     LogLock                  = New-Object object
     LogHistory                = New-Object System.Collections.Generic.List[string]
     LogSubscribers           = New-Object System.Collections.Generic.List[object]
+    TokenLock                = New-Object object
+    IssuedTokens             = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    DedupeLock               = New-Object object
+    DedupeCache              = New-Object System.Collections.Generic.HashSet[string]
 })
 
 # Startup-only sanity check and log line - NOT a cache. Get-EventMap is called again, fresh,
@@ -565,7 +684,8 @@ $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefau
 foreach ($functionName in @(
         'Build-EventMapFromEventsFolder', 'Build-EventMapFromMappingFile', 'Get-EventMap',
         'Write-KafkaRestLogs', 'Publish-LogLine', 'Write-RequestLog', 'Send-JsonResponse',
-        'Get-ClusterId', 'Invoke-LogsStreamRequest', 'Invoke-ShutdownRequest', 'Invoke-StartStopRequest', 'Invoke-ApiRequest'
+        'Get-ClusterId', 'Invoke-LogsStreamRequest', 'Invoke-ShutdownRequest', 'Invoke-StartStopRequest',
+        'Invoke-OAuthTokenRequest', 'Invoke-DedupeRequest', 'Invoke-ApiRequest'
     )) {
     $definition = Get-Item "function:$functionName"
     $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry($definition.Name, $definition.ScriptBlock)))
@@ -583,7 +703,7 @@ $runspacePool.Open()
 # localhost:$Port whether that's this process's own loopback (plain host run) or a
 # container's published port (setup-podman-kafka.bat's containerized run) - not how this
 # process itself bound its listening socket.
-Write-Host "Listening on http://localhost:$Port - POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, /api/shutdown. Ctrl+C to stop."
+Write-Host "Listening on http://localhost:$Port - POST /api/events?type=<EventName>, GET /logs, GET /api/mapping, /api/stop, /api/start, /api/shutdown, POST /oauth/token, POST /nexus/deduper/api/dedupe. Ctrl+C to stop."
 
 $activeHandlers = New-Object System.Collections.Generic.List[object]
 

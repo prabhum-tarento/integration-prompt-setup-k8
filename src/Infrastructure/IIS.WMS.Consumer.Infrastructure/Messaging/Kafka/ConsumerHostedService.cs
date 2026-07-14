@@ -751,7 +751,7 @@ public abstract class ConsumerHostedService : BackgroundService
         {
             try
             {
-                isDuplicate = await deduplicationService.IsDuplicateAsync(ConsumerName, deduplicationId, correlationId, cancellationToken);
+                isDuplicate = await deduplicationService.IsDuplicateAsync($"IIS_WMS_{eventType}", deduplicationId, correlationId, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -874,7 +874,7 @@ public abstract class ConsumerHostedService : BackgroundService
     private async Task WriteBlobAsync(
         IFileStore fileStore, string containerName, string schemaName, string correlationId, string extension, Stream content, CancellationToken cancellationToken)
     {
-        var blobName = $"{correlationId}/{ConsumerName}/{schemaName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.{extension}";
+        var blobName = $"{correlationId}/{schemaName}/{ConsumerName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.{extension}";
 
         await using (content)
         {

@@ -33,10 +33,12 @@ public static class NexusServiceCollectionExtensions
         {
             var options = sp.GetRequiredService<IOptions<NexusDeduplicationOptions>>().Value;
 
-            client.BaseAddress = new Uri(
+            var clientBaseAddress = new Uri(
                 options.BaseUrl
                     ?? throw new InvalidOperationException(
                         $"Missing '{NexusDeduplicationOptions.SectionName}:{nameof(NexusDeduplicationOptions.BaseUrl)}' configuration."));
+
+            client.BaseAddress = new Uri($"{clientBaseAddress.GetLeftPart(UriPartial.Authority)}/nexus/deduper/api/dedupe");
 
             client.DefaultRequestHeaders.Add(
                 Messaging.Kafka.KafkaHeaderNames.AppId,

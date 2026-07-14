@@ -312,6 +312,43 @@ curl -X POST "http://localhost:8087/api/events?type=inventory-events-value" -H "
 current epoch-millis value for repeat testing, same caveat as everywhere else `changeDate`
 shows up in this file.)
 
+##### Nexus deduplication mock (`/oauth/token`, `/nexus/deduper/api/dedupe`)
+
+`events-api.ps1` also mocks the external Nexus deduplication API this consumer calls (see
+[NexusDeduplicationService.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/NexusServices/NexusDeduplicationService.cs)/
+[NexusAuthenticationHandler.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/NexusServices/NexusAuthenticationHandler.cs)/
+[NexusServiceCollectionExtensions.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/NexusServices/NexusServiceCollectionExtensions.cs)),
+matching `appsettings.Development.json`'s `Nexus:Deduplication` config, which points both
+`BaseUrl` and `OAuthEndpoint` at this same `http://localhost:8087`:
+
+```
+POST /oauth/token                   - client-credentials token endpoint
+POST /nexus/deduper/api/dedupe      - dedupe check/store endpoint
+```
+
+`POST /oauth/token` accepts the form-urlencoded body `NexusAuthenticationHandler` sends
+(`grant_type`/`client_id`/`client_secret`/`scope`) without validating the credentials - it's a
+local testing double, not a security boundary - and responds with a fresh bearer token:
+
+```json
+{ "access_token": "nexus-local-...", "expires_in": 3600 }
+```
+
+`POST /nexus/deduper/api/dedupe` requires that token in an `Authorization: Bearer
+<access_token>` header (`401` if it's missing, malformed, or unknown/expired), and a body of
+`{ "dedupeId": "<value>" }` (matches `NexusDeduplicationService`'s request shape). The first
+request for a given `dedupeId` is stored in memory and answered `201 Created`; a repeat of the
+same `dedupeId` is answered `409 Conflict` - the only two outcomes `NexusDeduplicationService`
+distinguishes (only `409` means "duplicate"; any other non-success status is treated as a Nexus
+outage). Both the issued-token set and the dedupe cache live only in this process's memory, so
+restarting it forgets everything.
+
+```bat
+curl -X POST http://localhost:8087/oauth/token -d "grant_type=client_credentials&client_id=iis-wms-consumer&client_secret=iis-wms-consumer-secret&scope=dedup.readwrite"
+
+curl -X POST http://localhost:8087/nexus/deduper/api/dedupe -H "Authorization: Bearer <access_token from above>" -H "Content-Type: application/json" -d "{\"dedupeId\":\"test-123\"}"
+```
+
 The wrapper resolves the topic from `type` by stripping a trailing `-value` (Confluent's
 default subject-naming convention - `inventory-events-value` → topic `inventory-events`);
 it forwards every request header you send (other than the usual HTTP/framework ones -
