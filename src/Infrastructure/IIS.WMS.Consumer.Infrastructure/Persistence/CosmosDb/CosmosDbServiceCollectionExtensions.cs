@@ -56,7 +56,7 @@ public static class CosmosDbServiceCollectionExtensions
             logger.LogInformation(
                 "Configuring Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
+            return new CosmosClient(config.AccountEndpoint, config.PrimaryKey, options);
         });
 
         // Container factory: its own singleton, resolving named containers once from the client - this
@@ -99,7 +99,7 @@ public static class CosmosDbServiceCollectionExtensions
             logger.LogInformation(
                 "Configuring bulk-import Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
+            return new CosmosClient(config.AccountEndpoint, config.PrimaryKey, options);
 
         });
 
