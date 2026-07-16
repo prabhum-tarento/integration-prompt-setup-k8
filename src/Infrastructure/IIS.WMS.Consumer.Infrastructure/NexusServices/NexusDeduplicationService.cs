@@ -21,7 +21,7 @@ namespace IIS.WMS.Consumer.Infrastructure.NexusServices;
 public sealed class NexusDeduplicationService(
     HttpClient httpClient,
     ResiliencePipelineProvider<string> pipelineProvider,
-    IOptions<NexusDeduplicationOptions> options,
+    IOptions<ApplicationOptions> applicationOptions,
     ILogger<NexusDeduplicationService> logger)
     : IDeduplicationService
 {
@@ -29,14 +29,6 @@ public sealed class NexusDeduplicationService(
     public async Task<bool> IsDuplicateAsync(
         string consumerName, string deduplicationId, string correlationId, CancellationToken cancellationToken = default)
     {
-        var settings = options.Value;
-
-        if (!settings.Enabled)
-        {
-            logger.LogInformation("Deduplication check is disabled via configuration - skipping for correlation {CorrelationId}.", correlationId);
-            return false;
-        }
-
         if (string.IsNullOrEmpty(deduplicationId))
         {
             logger.LogWarning(
@@ -45,7 +37,7 @@ public sealed class NexusDeduplicationService(
             return false;
         }
 
-        var compositeDeduplicationId = $"{settings.AppId}_{consumerName}_{deduplicationId}_{correlationId}";
+        var compositeDeduplicationId = $"{applicationOptions.Value.AppId}_{consumerName}_{deduplicationId}_{correlationId}";
 
         logger.LogDebug(
             "Checking Nexus deduplication for {DeduplicationId}, correlation {CorrelationId}.",

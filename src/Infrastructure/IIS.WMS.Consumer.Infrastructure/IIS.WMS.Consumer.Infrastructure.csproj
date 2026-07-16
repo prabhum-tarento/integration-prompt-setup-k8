@@ -30,6 +30,14 @@
   <ItemGroup>
     <!-- Lets IIS.WMS.Consumer.UnitTests exercise internal types directly (e.g. InventoryStateChangedEventMapper) without widening this project's public API just for testability. -->
     <InternalsVisibleTo Include="IIS.WMS.Consumer.UnitTests" />
+    <!-- Lets IIS.WMS.Consumer.IntegrationTests call ServiceBusConsumerHostedService.HandleMessageAsync/BulkImportServiceBusConsumerHostedService.HandleMessageAsync directly via the Virtual Service Bus broker (integration-resiliency.instructions.md §9), without a working ServiceBusSessionProcessor/ServiceBusProcessor. -->
+    <InternalsVisibleTo Include="IIS.WMS.Consumer.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Persistence\CosmosDb\Entity\" />
+    <Folder Include="Persistence\CosmosDb\Mapper\" />
+    <Folder Include="Persistence\CosmosDb\Repository\" />
   </ItemGroup>
 
 </Project>

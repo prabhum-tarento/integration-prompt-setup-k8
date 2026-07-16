@@ -1,4 +1,5 @@
 using System.Net;
+using IIS.WMS.Consumer.Infrastructure;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
@@ -13,7 +14,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// Correctness tests for <see cref="NexusDeduplicationService"/> - the composite dedup-id
-/// construction, the "disabled"/"no header" short-circuits that skip calling Nexus entirely, and the
+/// construction, the "no header" short-circuit that skips calling Nexus entirely, and the
 /// 409-means-duplicate response contract (integration-resiliency.instructions.md §1).
 /// </summary>
 public class NexusDeduplicationServiceTests
@@ -21,23 +22,11 @@ public class NexusDeduplicationServiceTests
     private const string ConsumerName = "InventoryEvents Kafka consumer";
     private const string CorrelationId = "corr-1";
 
-    [Fact(DisplayName = "Disabled configuration skips the check without calling Nexus")]
-    public async Task IsDuplicateAsync_Disabled_ReturnsFalseWithoutCallingNexus()
-    {
-        var stubHandler = new StubHttpMessageHandler();
-        var service = CreateService(stubHandler, enabled: false);
-
-        var result = await service.IsDuplicateAsync(ConsumerName, "dedup-1", CorrelationId);
-
-        Assert.False(result);
-        Assert.Empty(stubHandler.Requests);
-    }
-
     [Fact(DisplayName = "A missing Deduplication-Id header skips the check without calling Nexus")]
     public async Task IsDuplicateAsync_MissingDeduplicationId_ReturnsFalseWithoutCallingNexus()
     {
         var stubHandler = new StubHttpMessageHandler();
-        var service = CreateService(stubHandler, enabled: true);
+        var service = CreateService(stubHandler);
 
         var result = await service.IsDuplicateAsync(ConsumerName, deduplicationId: string.Empty, CorrelationId);
 
@@ -52,7 +41,7 @@ public class NexusDeduplicationServiceTests
         {
             Respond = _ => new HttpResponseMessage(HttpStatusCode.Conflict),
         };
-        var service = CreateService(stubHandler, enabled: true);
+        var service = CreateService(stubHandler);
 
         var result = await service.IsDuplicateAsync(ConsumerName, "dedup-1", CorrelationId);
 
@@ -67,7 +56,7 @@ public class NexusDeduplicationServiceTests
         {
             Respond = _ => new HttpResponseMessage(HttpStatusCode.OK),
         };
-        var service = CreateService(stubHandler, enabled: true);
+        var service = CreateService(stubHandler);
 
         var result = await service.IsDuplicateAsync(ConsumerName, "dedup-1", CorrelationId);
 
@@ -84,7 +73,7 @@ public class NexusDeduplicationServiceTests
                 Content = new StringContent("boom"),
             },
         };
-        var service = CreateService(stubHandler, enabled: true);
+        var service = CreateService(stubHandler);
 
         await Assert.ThrowsAsync<HttpRequestException>(
             () => service.IsDuplicateAsync(ConsumerName, "dedup-1", CorrelationId));
@@ -94,7 +83,7 @@ public class NexusDeduplicationServiceTests
     public async Task IsDuplicateAsync_SendsCorrelationIdHeader()
     {
         var stubHandler = new StubHttpMessageHandler();
-        var service = CreateService(stubHandler, enabled: true);
+        var service = CreateService(stubHandler);
 
         await service.IsDuplicateAsync(ConsumerName, "dedup-1", CorrelationId);
 
@@ -102,7 +91,7 @@ public class NexusDeduplicationServiceTests
         Assert.Equal(CorrelationId, sentRequest.Headers.GetValues("Correlation-Id").Single());
     }
 
-    private static NexusDeduplicationService CreateService(StubHttpMessageHandler stubHandler, bool enabled)
+    private static NexusDeduplicationService CreateService(StubHttpMessageHandler stubHandler)
     {
         var httpClient = new HttpClient(stubHandler) { BaseAddress = new Uri("https://nexus.example/dedup") };
 
@@ -112,17 +101,12 @@ public class NexusDeduplicationServiceTests
         services.AddResiliencePipeline<string, HttpResponseMessage>(ResiliencePipelines.OutboundHttp, _ => { });
         var pipelineProvider = services.BuildServiceProvider().GetRequiredService<ResiliencePipelineProvider<string>>();
 
-        var options = Options.Create(new NexusDeduplicationOptions
+        var applicationOptions = Options.Create(new ApplicationOptions
         {
-            Enabled = enabled,
-            BaseUrl = "https://nexus.example/dedup",
+            AppName = "IIS.WMS.Consumer",
             AppId = "iis-wms-consumer",
-            OAuthEndpoint = "https://nexus.example/oauth/token",
-            ClientId = "client-id",
-            ClientSecret = "client-secret",
-            Scope = "dedup.readwrite",
         });
 
-        return new NexusDeduplicationService(httpClient, pipelineProvider, options, Substitute.For<ILogger<NexusDeduplicationService>>());
+        return new NexusDeduplicationService(httpClient, pipelineProvider, applicationOptions, Substitute.For<ILogger<NexusDeduplicationService>>());
     }
 }

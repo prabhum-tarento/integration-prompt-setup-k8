@@ -3,6 +3,7 @@ using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using Confluent.Kafka;
 using FluentValidation;
+using IIS.WMS.Consumer.Application.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
@@ -110,8 +111,21 @@ public static class MessagingServiceCollectionExtensions
                 ?? throw new InvalidOperationException(
                     $"Missing '{ServiceBusConsumerOptions.SectionName}' configuration section.");
 
-            logger.LogInformation("Configuring Service Bus client using connection string.");
-            return new ServiceBusClient(options.ConnectionString);
+            logger.LogInformation(
+                "Configuring Service Bus client using connection string. TransportType: {TransportType}, RetryMode: {RetryMode}, MaxRetries: {MaxRetries}",
+                options.TransportType, options.Retry.Mode, options.Retry.MaxRetries);
+
+            // Registered once as a singleton and reused for the lifetime of the app - ServiceBusClient
+            // (and every ServiceBusSender created from it, see ConsumerHostedService.GetServiceBusSender)
+            // is expensive to construct and explicitly documented as safe to share, per Microsoft's
+            // Service Bus client-lifetime guidance.
+            var clientOptions = new ServiceBusClientOptions
+            {
+                TransportType = options.TransportType,
+                RetryOptions = options.Retry,
+            };
+
+            return new ServiceBusClient(options.ConnectionString, clientOptions);
         });
 
         services.AddSingleton(sp =>
@@ -152,6 +166,11 @@ public static class MessagingServiceCollectionExtensions
             .AddTypeActivatedCheck<ServiceBusHealthCheck>("service-bus-bulk-import", failureStatus: null, tags: ["service-bus-consumer"], args: [bulkImportQueueName]);
 
         services.AddSingleton<ISpecificRecordDeserializerFactory, SpecificRecordDeserializerFactory>();
+
+        // Fans out to every IServiceBusSenderCacheSource registered below (one per Kafka consumer
+        // actually started) - backs the admin endpoint that lists/clears cached ServiceBusSenders.
+        // Single-process scope only - see IServiceBusSenderCacheService's own remarks.
+        services.AddSingleton<IServiceBusSenderCacheService, ServiceBusSenderCacheService>();
 
         // Facade bundling the six dependencies every Kafka consumer needs and which never vary
         // between them - see ConsumerRelayInfrastructure's own doc comment for why this exists and
@@ -239,6 +258,10 @@ public static class MessagingServiceCollectionExtensions
     {
         services.AddSingleton<THostedService>();
         services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<THostedService>());
+
+        // Forwards to the same singleton - backs the admin endpoint (IServiceBusSenderCacheService)
+        // that lists/clears every registered consumer's cached ServiceBusSenders.
+        services.AddSingleton<IServiceBusSenderCacheSource>(sp => sp.GetRequiredService<THostedService>());
 
         var healthChecksBuilder = services.AddHealthChecks();
 

@@ -72,9 +72,7 @@ public class NexusAuthenticationHandlerTests
 
         var options = Options.Create(new NexusDeduplicationOptions
         {
-            Enabled = true,
             BaseUrl = "https://nexus.example/dedup",
-            AppId = "iis-wms-consumer",
             OAuthEndpoint = "https://nexus.example/oauth/token",
             ClientId = "client-id",
             ClientSecret = "client-secret",

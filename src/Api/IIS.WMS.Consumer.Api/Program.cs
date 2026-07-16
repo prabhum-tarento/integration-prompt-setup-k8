@@ -1,8 +1,10 @@
 using Asp.Versioning;
+using IIS.WMS.Consumer.Api.Controllers;
 using IIS.WMS.Consumer.Api.ExceptionHandling;
 using IIS.WMS.Consumer.Api.Filters;
 using IIS.WMS.Consumer.Api.Middleware;
 using IIS.WMS.Consumer.Application.DependencyInjection;
+using IIS.WMS.Consumer.Infrastructure;
 using IIS.WMS.Consumer.Infrastructure.DependencyInjection;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -18,11 +20,14 @@ using Serilog;
 var builder = WebApplication.CreateBuilder(args);
 
 // Structured JSON logging with the correlation id enriched by CorrelationIdMiddleware
-// (engineering-standards.instructions.md §6).
+// (engineering-standards.instructions.md §6). ApplicationName (Application:ApplicationName) is
+// enriched onto every log line so this service's own log lines are identifiable when aggregated
+// alongside other services - see ApplicationOptions' own remarks.
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
     .Enrich.FromLogContext()
+    .Enrich.WithProperty("ApplicationName", context.Configuration[$"{ApplicationOptions.SectionName}:{nameof(ApplicationOptions.AppName)}"] ?? string.Empty)
     .WriteTo.Console(new Serilog.Formatting.Json.JsonFormatter()));
 
 builder.Services.AddHttpContextAccessor();
@@ -58,14 +63,24 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     {
         options.Authority = builder.Configuration["Authentication:Authority"];
         options.Audience = builder.Configuration["Authentication:Audience"];
+
+        // Microsoft Entra ID emits App Roles as the "roles" claim - ASP.NET Core's JwtBearerOptions
+        // otherwise defaults RoleClaimType to ClaimTypes.Role, which Entra ID tokens don't carry, so
+        // RequireRole/[Authorize(Roles = ...)] (see ServiceBusSendersController.AdminPolicyName below)
+        // would silently never match without this.
+        options.TokenValidationParameters.RoleClaimType = "roles";
     });
 
 // Authenticated by default (engineering-standards.instructions.md §6) - health endpoints opt out
 // explicitly with .AllowAnonymous() below, per aspnet-rest-apis.instructions.md "Health checks".
+// ServiceBusSendersController.AdminPolicyName is narrower still - a specific role on top of the
+// fallback's plain "is authenticated," for the one endpoint (ClearAsync) where that matters.
 builder.Services.AddAuthorizationBuilder()
     .SetFallbackPolicy(new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .Build());
+        .Build())
+    .AddPolicy(ServiceBusSendersController.AdminPolicyName, policy =>
+        policy.RequireRole(ServiceBusSendersController.AdminRoleName));
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);

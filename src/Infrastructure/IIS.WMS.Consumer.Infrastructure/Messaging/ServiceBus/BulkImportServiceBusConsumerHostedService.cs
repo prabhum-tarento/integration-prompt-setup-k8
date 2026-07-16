@@ -25,13 +25,16 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 /// </summary>
 public sealed class BulkImportServiceBusConsumerHostedService : BackgroundService, IAsyncDisposable
 {
-    private readonly ServiceBusProcessor processor;
+    private readonly ServiceBusClient client;
+    private readonly BulkImportServiceBusConsumerOptions options;
     private readonly IServiceScopeFactory scopeFactory;
     private readonly ServiceBusHealthState healthState;
     private readonly ILogger<BulkImportServiceBusConsumerHostedService> logger;
 
-    /// <summary>Builds the processor and wires its message/error event handlers.</summary>
-    /// <param name="client">Service Bus client used to create the processor - the same client <see cref="ServiceBusConsumerHostedService"/> uses, just a different queue.</param>
+    // Built lazily in ExecuteAsync, not the constructor - see ExecuteAsync's remarks for why.
+    private ServiceBusProcessor? processor;
+
+    /// <param name="client">Service Bus client the processor is built from, on first start (see <see cref="ExecuteAsync"/>) - the same client <see cref="ServiceBusConsumerHostedService"/> uses, just a different queue.</param>
     /// <param name="options">Queue name and concurrency settings.</param>
     /// <param name="scopeFactory">Creates a DI scope per message, since the hosted service itself is a singleton but <see cref="IBulkInventoryImportService"/> is scoped.</param>
     /// <param name="healthState">This consumer's own keyed <see cref="ServiceBusHealthState"/> instance.</param>
@@ -43,24 +46,32 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
         [FromKeyedServices(MessagingServiceCollectionExtensions.BulkInventoryImportServiceBusKey)] ServiceBusHealthState healthState,
         ILogger<BulkImportServiceBusConsumerHostedService> logger)
     {
+        this.client = client;
+        this.options = options.Value;
         this.scopeFactory = scopeFactory;
         this.healthState = healthState;
         this.logger = logger;
-
-        processor = client.CreateProcessor(options.Value.QueueName, new ServiceBusProcessorOptions
-        {
-            MaxConcurrentCalls = options.Value.MaxConcurrentCalls,
-            AutoCompleteMessages = false,
-        });
-
-        processor.ProcessMessageAsync += ProcessMessageAsync;
-        processor.ProcessErrorAsync += ProcessErrorAsync;
     }
 
-    /// <summary>Starts the processor and keeps the service alive until cancellation, then stops it cleanly.</summary>
+    /// <summary>
+    /// Builds the processor, wires its message/error event handlers, starts it, and keeps the service
+    /// alive until cancellation, then stops it cleanly. Building the processor here rather than in the
+    /// constructor is deliberate - see <see cref="ServiceBusConsumerHostedService.ExecuteAsync"/>'s
+    /// remarks for why (the same reasoning applies to the non-session <see cref="ServiceBusProcessor"/>
+    /// this class uses).
+    /// </summary>
     /// <param name="stoppingToken">Signaled when the host is shutting down.</param>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        processor = client.CreateProcessor(options.QueueName, new ServiceBusProcessorOptions
+        {
+            MaxConcurrentCalls = options.MaxConcurrentCalls,
+            AutoCompleteMessages = false,
+        });
+
+        processor.ProcessMessageAsync += OnProcessMessageAsync;
+        processor.ProcessErrorAsync += ProcessErrorAsync;
+
         await processor.StartProcessingAsync(stoppingToken);
         await processor.StartProcessingAsync(stoppingToken);
 
@@ -78,9 +89,38 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
         }
     }
 
-    /// <summary>Deserializes one received message, upserts it via <see cref="IBulkInventoryImportService"/>, and settles it (complete/abandon/dead-letter) based on the outcome.</summary>
+    /// <summary>Thin adapter wired to the real SDK event - runs <see cref="HandleMessageAsync"/> then settles the message (complete/abandon/dead-letter) per its returned outcome.</summary>
     /// <param name="args">Event args carrying the message and the settlement methods (complete/abandon/dead-letter).</param>
-    private async Task ProcessMessageAsync(ProcessMessageEventArgs args)
+    private async Task OnProcessMessageAsync(ProcessMessageEventArgs args)
+    {
+        var outcome = await HandleMessageAsync(args.Message, args.CancellationToken);
+
+        switch (outcome.Kind)
+        {
+            case ServiceBusMessageOutcomeKind.Completed:
+                await args.CompleteMessageAsync(args.Message, args.CancellationToken);
+                break;
+
+            case ServiceBusMessageOutcomeKind.Abandoned:
+                await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
+                break;
+
+            case ServiceBusMessageOutcomeKind.DeadLettered:
+                await args.DeadLetterMessageAsync(args.Message, outcome.Reason, outcome.Description, args.CancellationToken);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Deserializes one received message and upserts it via <see cref="IBulkInventoryImportService"/>,
+    /// returning the outcome instead of settling the message directly - see
+    /// <see cref="ServiceBusMessageOutcome"/>'s remarks for why this is split out of
+    /// <see cref="OnProcessMessageAsync"/>. <see langword="internal"/> so an integration test in the same
+    /// solution (<c>IIS.WMS.Consumer.IntegrationTests</c>, via <c>InternalsVisibleTo</c>) can call this
+    /// directly with a message built via <c>ServiceBusModelFactory</c>, without a working
+    /// <see cref="ServiceBusProcessor"/>.
+    /// </summary>
+    internal async Task<ServiceBusMessageOutcome> HandleMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken)
     {
         healthState.LastSuccessfulReceiveUtc = DateTimeOffset.UtcNow;
 
@@ -88,18 +128,17 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
 
         try
         {
-            inbound = JsonSerializer.Deserialize<BulkInventoryImportEvent>(args.Message.Body.ToString())
+            inbound = JsonSerializer.Deserialize<BulkInventoryImportEvent>(message.Body.ToString())
                 ?? throw new JsonException("Deserialized payload was null.");
         }
         catch (JsonException ex)
         {
-            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", args.Message.MessageId);
-            await args.DeadLetterMessageAsync(args.Message, "PoisonMessage", ex.Message, args.CancellationToken);
+            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
 
-            return;
+            return ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
         }
 
-        var correlationId = args.Message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
+        var correlationId = message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
             ? value?.ToString() ?? Guid.NewGuid().ToString()
             : Guid.NewGuid().ToString();
 
@@ -115,16 +154,18 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
                 inbound.WarehouseId, inbound.Sku, inbound.Quantity, inbound.SourceSystem,
                 DateTimeOffset.FromUnixTimeMilliseconds(inbound.LastUpdatedUtcMillis).UtcDateTime);
 
-            await bulkInventoryImportService.ImportAsync(request, args.CancellationToken);
-            await args.CompleteMessageAsync(args.Message, args.CancellationToken);
+            await bulkInventoryImportService.ImportAsync(request, cancellationToken);
+
+            return ServiceBusMessageOutcome.Completed;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // No concurrency-conflict case to special-case here, unlike ServiceBusConsumerHostedService -
             // the Cosmos write is an unconditional upsert (see class-level remarks), so the only failure
             // mode past deserialization is a transient infrastructure fault. Abandon for redelivery.
-            logger.LogError(ex, "Processing failed for message {MessageId} - abandoning for redelivery.", args.Message.MessageId);
-            await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
+            logger.LogError(ex, "Processing failed for message {MessageId} - abandoning for redelivery.", message.MessageId);
+
+            return ServiceBusMessageOutcome.Abandoned;
         }
     }
 
@@ -137,9 +178,12 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
         return Task.CompletedTask;
     }
 
-    /// <summary>Disposes the processor asynchronously - required since <see cref="ServiceBusProcessor"/> has no synchronous dispose.</summary>
+    /// <summary>Disposes the processor asynchronously, if one was ever built (see <see cref="ExecuteAsync"/>) - required since <see cref="ServiceBusProcessor"/> has no synchronous dispose.</summary>
     public async ValueTask DisposeAsync()
     {
-        await processor.DisposeAsync();
+        if (processor is not null)
+        {
+            await processor.DisposeAsync();
+        }
     }
 }

@@ -11,10 +11,11 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Facade bundling the dependencies every <see cref="ConsumerHostedService"/> subclass needs and
 /// which never vary from one consumer to the next - the same <see cref="ServiceBusClient"/>,
 /// <see cref="ResiliencePipelineProvider{TKey}"/>, hot/cold <see cref="IFileStore"/> pair,
-/// <see cref="BlobStorage.BlobStorageOptions"/>, <see cref="IDeduplicationService"/>, and
-/// <see cref="IServiceScopeFactory"/> instance is injected into every consumer today. Introduced to
-/// cut constructor over-injection (each consumer was individually re-declaring and forwarding all six
-/// to its own base call) - what's deliberately <b>not</b> folded in here is anything that genuinely
+/// <see cref="BlobStorage.BlobStorageOptions"/>, <see cref="IDeduplicationService"/>,
+/// <see cref="IServiceScopeFactory"/>, and <see cref="ApplicationOptions"/> instance is injected into
+/// every consumer today. Introduced to cut constructor over-injection (each consumer was individually
+/// re-declaring and forwarding every one of these to its own base call) - what's deliberately
+/// <b>not</b> folded in here is anything that genuinely
 /// varies per consumer: <c>ILogger&lt;T&gt;</c> (needs the concrete derived type for its category
 /// name), and consumer-specific collaborators like <see cref="ISpecificRecordDeserializerFactory"/> or
 /// a schema's own <c>IValidator&lt;T&gt;</c>. <see cref="ConsumerHealthState"/> isn't here either, but
@@ -29,7 +30,8 @@ public sealed class ConsumerRelayInfrastructure(
     [FromKeyedServices(BlobStorageServiceCollectionExtensions.ColdTierKey)] IFileStore coldFileStore,
     IOptions<BlobStorageOptions> blobStorageOptions,
     IDeduplicationService deduplicationService,
-    IServiceScopeFactory scopeFactory)
+    IServiceScopeFactory scopeFactory,
+    IOptions<ApplicationOptions> applicationOptions)
 {
     /// <summary>Client used to create the sender for each consumer's relay queue.</summary>
     public ServiceBusClient ServiceBusClient { get; } = serviceBusClient;
@@ -51,4 +53,7 @@ public sealed class ConsumerRelayInfrastructure(
 
     /// <summary>Creates the per-message DI scope used to resolve <see cref="Application.Common.ICorrelationContext"/>, since the hosted service itself is a singleton but that service is scoped.</summary>
     public IServiceScopeFactory ScopeFactory { get; } = scopeFactory;
+
+    /// <summary>This service's own identity - <see cref="ApplicationOptions.AppId"/> is the fallback <see cref="ConsumerHostedService"/> uses when a relayed message's Kafka <c>App-Id</c> header is missing or empty.</summary>
+    public ApplicationOptions ApplicationOptions { get; } = applicationOptions.Value;
 }

@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 

@@ -1,12 +1,15 @@
 using System.Linq.Expressions;
 using System.Net;
+using System.Reflection;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Exceptions;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Linq;
 using Microsoft.Extensions.Logging;
 
-namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 
 /// <summary>
 /// Generic Cosmos DB repository base (cosmos-db.instructions.md §5-§10). Every CRUD/query/concurrency/
@@ -16,10 +19,12 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 /// <typeparam name="TDomain">Domain aggregate/entity type exposed through the repository interface.</typeparam>
 /// <typeparam name="TDocument">
 /// Cosmos persistence document shape - must implement <see cref="ICosmosDocument"/> so this base class can
-/// log and re-read-on-conflict generically without knowing the concrete document type.
+/// log and re-read-on-conflict generically without knowing the concrete document type. Also requires a
+/// public parameterless constructor - the selective-column <c>GetAsync(partitionKey, select, ...)</c>
+/// overload's column selection builds a new, sparsely-populated instance of this type server-side.
 /// </typeparam>
 public abstract class CosmosRepository<TDomain, TDocument>
-    where TDocument : ICosmosDocument
+    where TDocument : ICosmosDocument, new()
 {
     private readonly Container _container;
     private readonly ILogger _logger;
@@ -42,7 +47,16 @@ public abstract class CosmosRepository<TDomain, TDocument>
     /// <summary>Projects a domain instance into its persistence shape for a write.</summary>
     protected abstract TDocument ToDocument(TDomain domain);
 
-    /// <summary>Rehydrates a domain instance from a document read back from Cosmos.</summary>
+    /// <summary>
+    /// Rehydrates a domain instance from a document read back from Cosmos. Called with a fully-populated
+    /// <typeparamref name="TDocument"/> from every method except the selective-column
+    /// <c>GetAsync(partitionKey, select, ...)</c> overload's <c>select</c> path, where
+    /// <paramref name="document"/> only has the caller's selected properties populated - every other
+    /// property is that type's default. An implementation that assigns every document property straight
+    /// into the domain instance (the pattern every mapper in this repo follows) already tolerates this
+    /// correctly; it must not additionally validate/throw on a property being absent, since "absent" is
+    /// expected there, not a data-integrity problem.
+    /// </summary>
     protected abstract TDomain ToDomain(TDocument document);
 
     /// <summary>Reads a single item by id, or <see langword="null"/> if it doesn't exist.</summary>
@@ -204,7 +218,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
         }
     }
 
-    /// <summary>Runs a filtered, paged query over full items.</summary>
+    /// <summary>Runs a filtered, sorted, paged query over full items.</summary>
     public async Task<PagedResult<TDomain>> GetPagedAsync(
         QueryOptions<TDomain> options, CancellationToken cancellationToken = default)
     {
@@ -220,10 +234,9 @@ public abstract class CosmosRepository<TDomain, TDocument>
             queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(options.Predicate));
         }
 
-        queryable = ApplyOrdering(queryable, options.OrderBy, options.OrderDescending);
+        queryable = ApplyOrdering(queryable, options.OrderBy);
 
-        using var iterator = queryable.ToFeedIterator();
-        var page = await iterator.ReadNextAsync(cancellationToken);
+        var page = await ReadNextPageAsync(queryable, cancellationToken);
 
         _logger.LogInformation(
             "Query on {Container} returned {Count} item(s), request charge {RequestCharge} RU.",
@@ -237,7 +250,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
         };
     }
 
-    /// <summary>Runs a filtered, paged, projected query - use when only a few fields are needed, to reduce RU cost and payload size.</summary>
+    /// <summary>Runs a filtered, sorted, paged, projected query - use when only a few fields are needed, to reduce RU cost and payload size.</summary>
     public async Task<PagedResult<TResult>> QueryAsync<TResult>(
         QueryOptions<TDomain, TResult> options, CancellationToken cancellationToken = default)
     {
@@ -253,13 +266,12 @@ public abstract class CosmosRepository<TDomain, TDocument>
             queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(options.Predicate));
         }
 
-        queryable = ApplyOrdering(queryable, options.OrderBy, options.OrderDescending);
+        queryable = ApplyOrdering(queryable, options.OrderBy);
 
         var selector = ExpressionRetargeter.Retarget<TDomain, TDocument, TResult>(options.Selector);
         var projected = queryable.Select(selector);
 
-        using var iterator = projected.ToFeedIterator();
-        var page = await iterator.ReadNextAsync(cancellationToken);
+        var page = await ReadNextPageAsync(projected, cancellationToken);
 
         _logger.LogInformation(
             "Projected query on {Container} returned {Count} item(s), request charge {RequestCharge} RU.",
@@ -271,6 +283,85 @@ public abstract class CosmosRepository<TDomain, TDocument>
             ContinuationToken = page.ContinuationToken,
             Count = page.Count,
         };
+    }
+
+    /// <summary>
+    /// Runs a filtered, sorted, column-limited query scoped to one partition - a lighter-weight
+    /// alternative to <see cref="GetPagedAsync"/> when the caller only needs a handful of fields, without
+    /// standing up a dedicated projected <c>TResult</c> shape the way <see cref="QueryAsync{TResult}"/>
+    /// requires. Unlike <see cref="QueryAsync{TResult}"/>, <paramref name="select"/> still returns
+    /// <typeparamref name="TDomain"/> - only the selected properties are populated by Cosmos server-side
+    /// (see <see cref="ToDomain"/>'s remarks); every unselected property on each returned instance is that
+    /// property's default. <b>Callers must only read properties they explicitly selected.</b> Always scoped
+    /// to a single partition - unlike <see cref="GetPagedAsync"/>/<see cref="QueryAsync{TResult}"/>, there
+    /// is no cross-partition option here, since every call site this method exists for already knows its
+    /// partition key.
+    /// </summary>
+    /// <param name="partitionKey">Partition to scope the query to.</param>
+    /// <param name="select">
+    /// Properties to fetch, e.g. <c>[x => x.Id, x => x.Category]</c> - omit (or pass <see langword="null"/>/empty)
+    /// to fetch every property, same as <see cref="GetPagedAsync"/>. Each selector must be a single simple
+    /// property access on <typeparamref name="TDomain"/>.
+    /// </param>
+    /// <param name="where">Filter applied to the query; <see langword="null"/> means no filter.</param>
+    /// <param name="orderBy">Multi-key sort - see <see cref="OrderByClause{T}"/>. <see langword="null"/>/empty means no explicit ordering.</param>
+    /// <param name="pageSize">Maximum number of items to return in one page.</param>
+    /// <param name="continuationToken">Continuation token from a previous page's <see cref="PagedResult{T}"/>, or <see langword="null"/> to start from the beginning.</param>
+    /// <param name="cancellationToken">Token to cancel the query.</param>
+    public async Task<PagedResult<TDomain>> GetAsync(
+        string partitionKey,
+        IReadOnlyList<Expression<Func<TDomain, object>>>? select = null,
+        Expression<Func<TDomain, bool>>? where = null,
+        IReadOnlyList<OrderByClause<TDomain>>? orderBy = null,
+        int pageSize = 20,
+        string? continuationToken = null,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug(
+            "Querying selective columns in {Container}, partition {PartitionKey}, page size {PageSize}.",
+            _container.Id, partitionKey, pageSize);
+
+        var queryable = CreateBaseQueryable(partitionKey, pageSize, continuationToken);
+
+        if (where is not null)
+        {
+            queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(where));
+        }
+
+        queryable = ApplyOrdering(queryable, orderBy);
+
+        var projected = select is { Count: > 0 }
+            ? queryable.Select(BuildPartialDocumentSelector(select))
+            : queryable;
+
+        var page = await ReadNextPageAsync(projected, cancellationToken);
+
+        _logger.LogInformation(
+            "Selective-column query on {Container} returned {Count} item(s), request charge {RequestCharge} RU.",
+            _container.Id, page.Count, page.RequestCharge);
+
+        return new PagedResult<TDomain>
+        {
+            Items = page.Select(ToDomain).ToList(),
+            ContinuationToken = page.ContinuationToken,
+            Count = page.Count,
+        };
+    }
+
+    /// <summary>
+    /// Reads the next page from a Cosmos LINQ queryable via <see cref="CosmosLinqExtensions.ToFeedIterator{T}"/>.
+    /// A <see langword="protected virtual"/> seam solely so an integration-test-only subclass backed by an
+    /// in-memory <see cref="ICosmosContainerFactory"/> fake can override it: <c>ToFeedIterator</c> requires the
+    /// queryable's provider to be the real Cosmos SDK's internal <c>CosmosLinqQuery&lt;T&gt;</c>, which a plain
+    /// in-memory <see cref="IQueryable{T}"/> can never satisfy, so a fake container's query path has nothing
+    /// else to intercept. Not configurable via constructor injection - the six CRUD methods above need no such
+    /// seam, so this stays a single overridable method rather than a new dependency threaded through every
+    /// repository's constructor.
+    /// </summary>
+    protected virtual async Task<FeedResponse<T>> ReadNextPageAsync<T>(IQueryable<T> queryable, CancellationToken cancellationToken)
+    {
+        using var iterator = queryable.ToFeedIterator();
+        return await iterator.ReadNextAsync(cancellationToken);
     }
 
     /// <summary>Builds the base Cosmos LINQ queryable for a page, scoped to a partition key when one is supplied.</summary>
@@ -286,20 +377,82 @@ public abstract class CosmosRepository<TDomain, TDocument>
             continuationToken: continuationToken, requestOptions: requestOptions);
     }
 
-    /// <summary>Applies the caller's ordering expression to the queryable, retargeted onto the persistence document's properties.</summary>
+    /// <summary>
+    /// Applies the caller's multi-key sort to the queryable, retargeted onto the persistence document's
+    /// properties - the first clause becomes <c>OrderBy</c>/<c>OrderByDescending</c>, every clause after
+    /// it chains on as <c>ThenBy</c>/<c>ThenByDescending</c>, so ties left by an earlier key are broken by
+    /// the next one in list order.
+    /// </summary>
     private static IQueryable<TDocument> ApplyOrdering(
         IQueryable<TDocument> queryable,
-        Expression<Func<TDomain, object>>? orderBy,
-        bool descending)
+        IReadOnlyList<OrderByClause<TDomain>>? orderBy)
     {
-        if (orderBy is null)
+        if (orderBy is not { Count: > 0 })
         {
             return queryable;
         }
 
-        var retargeted = ExpressionRetargeter.Retarget<TDomain, TDocument, object>(orderBy);
+        IOrderedQueryable<TDocument>? ordered = null;
 
-        return descending ? queryable.OrderByDescending(retargeted) : queryable.OrderBy(retargeted);
+        foreach (var clause in orderBy)
+        {
+            var retargeted = ExpressionRetargeter.Retarget<TDomain, TDocument, object>(clause.KeySelector);
+
+            ordered = (ordered, clause.Descending) switch
+            {
+                (null, false) => queryable.OrderBy(retargeted),
+                (null, true) => queryable.OrderByDescending(retargeted),
+                (not null, false) => ordered.ThenBy(retargeted),
+                (not null, true) => ordered.ThenByDescending(retargeted),
+            };
+        }
+
+        return ordered!;
+    }
+
+    /// <summary>
+    /// Builds a projection from <typeparamref name="TDocument"/> to a new, sparsely-populated
+    /// <typeparamref name="TDocument"/> carrying only the properties <paramref name="select"/> names -
+    /// Cosmos executes this server-side (a SQL <c>SELECT</c> naming only those properties), so unselected
+    /// properties never leave the server, unlike fetching the full document and discarding fields
+    /// client-side. Requires <typeparamref name="TDocument"/> to have a public parameterless
+    /// constructor (the class-level <see langword="new()"/> constraint) - object-initializer-style
+    /// construction is exactly what this expression tree builds.
+    /// </summary>
+    private static Expression<Func<TDocument, TDocument>> BuildPartialDocumentSelector(
+        IReadOnlyList<Expression<Func<TDomain, object>>> select)
+    {
+        var parameter = Expression.Parameter(typeof(TDocument), "x");
+
+        var bindings = select.Select(selector =>
+        {
+            var member = GetSelectedMember(selector);
+            var targetProperty = typeof(TDocument).GetProperty(member.Name)
+                ?? throw new InvalidOperationException(
+                    $"'{typeof(TDocument).Name}' has no property named '{member.Name}' to select.");
+
+            return Expression.Bind(targetProperty, Expression.Property(parameter, targetProperty));
+        });
+
+        var body = Expression.MemberInit(Expression.New(typeof(TDocument)), bindings);
+
+        return Expression.Lambda<Func<TDocument, TDocument>>(body, parameter);
+    }
+
+    /// <summary>
+    /// Extracts the single property <paramref name="selector"/> accesses (e.g. <c>x => x.Id</c>),
+    /// unwrapping the boxing <see cref="UnaryExpression"/> the compiler inserts when a value-type member
+    /// is converted to <see cref="object"/> to satisfy <c>Expression&lt;Func&lt;TDomain, object&gt;&gt;</c>.
+    /// </summary>
+    private static MemberInfo GetSelectedMember(Expression<Func<TDomain, object>> selector)
+    {
+        var body = selector.Body is UnaryExpression { NodeType: ExpressionType.Convert } unary
+            ? unary.Operand
+            : selector.Body;
+
+        return body is MemberExpression member
+            ? member.Member
+            : throw new ArgumentException($"'{selector}' must be a simple property access (e.g. x => x.Id).", nameof(selector));
     }
 
     /// <summary>Throws if a query would scan across partitions without the caller explicitly allowing it (cosmos-db.instructions.md §6).</summary>

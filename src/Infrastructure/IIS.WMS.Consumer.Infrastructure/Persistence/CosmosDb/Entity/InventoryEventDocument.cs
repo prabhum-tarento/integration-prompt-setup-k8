@@ -1,11 +1,11 @@
 using Newtonsoft.Json;
 
-namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 /// <summary>
 /// Cosmos DB persistence shape for the inventory aggregate (cosmos-db.instructions.md §3). Kept
 /// separate from <c>Domain.Aggregates.InventoryEvent</c> so the Domain layer never references
-/// Newtonsoft.Json - only <see cref="InventoryEventMapper"/> and the repository see this type.
+/// Newtonsoft.Json - only <c>InventoryEventMapper</c> and the repository see this type.
 /// </summary>
 public sealed class InventoryEventDocument : ICosmosDocument
 {

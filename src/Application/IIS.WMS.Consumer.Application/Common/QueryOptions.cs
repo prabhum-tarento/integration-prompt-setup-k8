@@ -13,11 +13,12 @@ public class QueryOptions<T>
     /// <summary>Filter applied to the query; <see langword="null"/> means no filter.</summary>
     public Expression<Func<T, bool>>? Predicate { get; set; }
 
-    /// <summary>Property to sort by; <see langword="null"/> means no explicit ordering.</summary>
-    public Expression<Func<T, object>>? OrderBy { get; set; }
-
-    /// <summary>Whether <see cref="OrderBy"/> sorts descending instead of ascending.</summary>
-    public bool OrderDescending { get; set; }
+    /// <summary>
+    /// Multi-key sort - see <see cref="OrderByClause{T}"/>. Applied in list order (the first clause
+    /// is the primary sort key, each following clause breaks ties left by the ones before it);
+    /// <see langword="null"/>/empty means no explicit ordering.
+    /// </summary>
+    public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
 
     /// <summary>Maximum number of items to return in one page.</summary>
     public int PageSize { get; set; } = 20;
@@ -41,11 +42,12 @@ public class QueryOptions<T, TResult>
     /// <summary>Projection applied to each matching item before it's returned.</summary>
     public Expression<Func<T, TResult>> Selector { get; set; } = default!;
 
-    /// <summary>Property to sort by; <see langword="null"/> means no explicit ordering.</summary>
-    public Expression<Func<T, object>>? OrderBy { get; set; }
-
-    /// <summary>Whether <see cref="OrderBy"/> sorts descending instead of ascending.</summary>
-    public bool OrderDescending { get; set; }
+    /// <summary>
+    /// Multi-key sort - see <see cref="OrderByClause{T}"/>. Applied in list order (the first clause
+    /// is the primary sort key, each following clause breaks ties left by the ones before it);
+    /// <see langword="null"/>/empty means no explicit ordering.
+    /// </summary>
+    public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
 
     /// <summary>Maximum number of items to return in one page.</summary>
     public int PageSize { get; set; } = 20;

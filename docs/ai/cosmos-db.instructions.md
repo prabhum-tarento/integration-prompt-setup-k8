@@ -164,6 +164,14 @@ Every Cosmos entity:
   unbounded child collections; reference large or growing sub-collections
   as separate items instead.
 * Carries the ETag Cosmos assigns (see §9) — don't strip it in mapping.
+* Has a public parameterless constructor — required by the `new()`
+  constraint on `CosmosRepository<TDomain,TDocument>`'s `TDocument`, which
+  §8's selective-column `GetAsync` needs to build a sparse instance
+  server-side. Every entity here already gets one implicitly (no explicit
+  constructor is declared), so this is rarely something to think about.
+* Lives in this project's `Persistence/CosmosDb/Entity/` folder (namespace
+  `...Persistence.CosmosDb.Entity`) — see §5 for the matching
+  `Persistence/CosmosDb/Repository/` convention.
 
 ```csharp
 public sealed class InventoryEvent
@@ -209,7 +217,19 @@ query pattern (lookup by SKU/warehouse), and avoid hot partitions.
 ## 5. Repository Pattern
 
 Controllers and Application services never reference `CosmosClient` or
-`Container` directly — only the repository interface.
+`Container` directly — only the repository interface. `CosmosRepository<TDomain,TDocument>`
+and every concrete repository live in this project's
+`Persistence/CosmosDb/Repository/` folder (namespace `...Persistence.CosmosDb.Repository`),
+mirroring the `Entity/` convention from §3.
+
+A mapper's `ToDomain(TDocument document)` must assign every document
+property straight into the domain instance without validating or throwing
+on an absent one. Every method here hands it a fully-populated document
+**except** §8's selective-column `GetAsync`, which hands it a document with
+only the caller's selected properties set — the rest at that property's
+default. A `ToDomain` that follows the plain-assignment pattern already
+tolerates this; one that adds its own non-null checks would break that one
+call path.
 
 ```csharp
 public interface IInventoryEventRepository
@@ -275,13 +295,24 @@ catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
 public class QueryOptions<T>
 {
     public Expression<Func<T, bool>>? Predicate { get; set; }
-    public Expression<Func<T, object>>? OrderBy { get; set; }
-    public bool OrderDescending { get; set; }
+    public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
     public int PageSize { get; set; } = 20;
     public string? ContinuationToken { get; set; }
     public string? PartitionKey { get; set; }
     public bool AllowCrossPartitionScan { get; set; } = false;
 }
+```
+
+`OrderBy` is a **multi-key** sort, not a single field — each
+`OrderByClause<T>` is a `(KeySelector, Descending)` pair, applied in list
+order as `OrderBy(...).ThenBy(...)`/`OrderByDescending(...).ThenByDescending(...)`:
+the first clause is the primary sort key, every clause after it breaks ties
+left by the ones before it. Build the list with the `OrderByClause.Asc<T>(...)`/
+`OrderByClause.Desc<T>(...)` factory helpers rather than constructing
+`OrderByClause<T>` directly:
+
+```csharp
+OrderBy = [OrderByClause.Asc<InventoryEvent>(x => x.Sku), OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)]
 ```
 
 For a projection query (§8) that selects a DTO instead of the full entity,
@@ -293,8 +324,7 @@ public class QueryOptions<T, TResult>
 {
     public Expression<Func<T, bool>>? Predicate { get; set; }
     public Expression<Func<T, TResult>> Selector { get; set; } = default!;
-    public Expression<Func<T, object>>? OrderBy { get; set; }
-    public bool OrderDescending { get; set; }
+    public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
     public int PageSize { get; set; } = 20;
     public string? ContinuationToken { get; set; }
     public string? PartitionKey { get; set; }
@@ -349,8 +379,7 @@ this is the common case, a point-ish lookup within one partition:
 var options = new QueryOptions<InventoryEvent>
 {
     Predicate = x => x.Sku == sku && x.WarehouseId == warehouseId,
-    OrderBy = x => x.CreatedUtc,
-    OrderDescending = true,
+    OrderBy = [OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)],
     PartitionKey = $"{warehouseId}:{sku}",
 };
 ```
@@ -364,8 +393,7 @@ guessing a partial partition key:
 var options = new QueryOptions<InventoryEvent>
 {
     Predicate = x => x.WarehouseId == warehouseId,
-    OrderBy = x => x.CreatedUtc,
-    OrderDescending = true,
+    OrderBy = [OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)],
     AllowCrossPartitionScan = true, // querying by WarehouseId alone, not the full WarehouseId:Sku key
 };
 ```
@@ -381,6 +409,28 @@ var options = new QueryOptions<InventoryEvent, InventoryEventSummary>
     PartitionKey = $"{warehouseId}:{sku}",
 };
 ```
+
+**Selective-column reads without a dedicated DTO.** `CosmosRepository<TDomain,TDocument>`
+also exposes a lighter-weight `GetAsync(partitionKey, select:, where:, orderBy:, ...)`
+overload for when a caller wants only a handful of fields but doesn't want
+to stand up a projected `TResult` shape just for that one call site:
+
+```csharp
+var page = await repository.GetAsync(
+    partitionKey,
+    select: [x => x.Id, x => x.Sku],
+    where: x => x.Sku == sku,
+    orderBy: [OrderByClause.Asc<InventoryEvent>(x => x.Id), OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)]);
+```
+
+Unlike the projected `QueryAsync<TResult>` above, this still returns
+`TDomain` — Cosmos only fetches the named properties server-side, and every
+**unselected** property on each returned instance is that property's
+default. Callers must only read properties they explicitly named in
+`select`. This is why a Cosmos document type needs a public parameterless
+constructor (`ICosmosDocument, new()` on the repository base class) and why
+a mapper's `ToDomain` must not validate/throw when a property is
+absent — see §3 and §5.
 
 ## 9. Concurrency & ETag (required reading)
 
@@ -503,11 +553,27 @@ Controllers and Application services:
 
 * **Unit tests**: mock the repository interface; test Application services
   and Domain rules in isolation.
-* **Integration tests**: run against the Cosmos DB Emulator via
-  Testcontainers, covering concurrency conflicts (§9), patch operation
-  limits (§10), and cross-partition guardrail behavior (§6) — see
-  [integration-resiliency.instructions.md](integration-resiliency.instructions.md)
-  for the shared test-project setup.
+* **Integration tests**: no Cosmos DB Emulator container image was ever
+  successfully wired up for this repo — instead, run against an **in-memory
+  `Container` fake** (`InMemoryCosmosContainer`, registered as
+  `ICosmosContainerFactory` in place of the real `CosmosContainerFactory` —
+  see [integration-resiliency.instructions.md](integration-resiliency.instructions.md)
+  §9 for the full pipeline test setup this is part of), covering concurrency
+  conflicts (§9) and patch operation limits (§10) with faithful
+  `CosmosException`/`HttpStatusCode` semantics (real `412`/`409`/`404`), not
+  just enough surface to compile. Cross-partition guardrail behavior (§6) is
+  a repository-level check (`ValidatePartitionScope`), not a Cosmos-specific
+  one, and needs no container fake to test at all.
+* `CosmosRepository`'s two query methods (`GetPagedAsync`/`QueryAsync`) call
+  the SDK's own `IQueryable.ToFeedIterator()` extension, which requires a
+  genuinely Cosmos-backed queryable — an in-memory fake can never satisfy
+  it. `ReadNextPageAsync` is a `protected virtual` seam that exists solely
+  for this: its default implementation is exactly today's
+  `ToFeedIterator()`/`ReadNextAsync` call, and a test-only repository
+  subclass overrides it to materialize the in-memory queryable directly
+  instead. The six CRUD methods (`GetAsync`/`CreateAsync`/`UpsertAsync`/
+  `ReplaceAsync`/`PatchAsync`/`DeleteAsync`) need no such seam — they call
+  `Container` methods the in-memory fake implements directly.
 
 ## 14. Security
 

@@ -7,7 +7,7 @@ namespace IIS.WMS.Consumer.Application.InventoryEvents;
 /// <summary>
 /// Port for inventory aggregate persistence (cosmos-db.instructions.md §5). Controllers and other
 /// Application services never reference <c>CosmosClient</c>/<c>Container</c> directly - only this
-/// interface, implemented by <c>Infrastructure.Persistence.CosmosDb.InventoryEventRepository</c>.
+/// interface, implemented by <c>Infrastructure.Persistence.CosmosDb.Repository.InventoryEventRepository</c>.
 /// Every <c>expectedETag</c> parameter below is required, not optional, on a mutating call - see
 /// cosmos-db.instructions.md §9 for why last-write-wins is never acceptable for a
 /// quantity-bearing entity.

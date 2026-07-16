@@ -17,6 +17,8 @@ public static class InfrastructureServiceCollectionExtensions
     /// <returns>The same <paramref name="services"/> instance, for chaining.</returns>
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        services.Configure<ApplicationOptions>(configuration.GetSection(ApplicationOptions.SectionName));
+
         services.AddResiliencePipelines();
         services.AddCosmosDb(configuration);
         services.AddBlobStorage(configuration);

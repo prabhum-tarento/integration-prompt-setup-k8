@@ -209,6 +209,33 @@ every hop, log line, and outbound call this flow makes.
   that partitions the data they write to. This groups every message for
   the same inventory aggregate into one Service Bus session — see §2 for
   why that matters for ordering, not just dedup.
+- **`ServiceBusSender` lifecycle.** `ConsumerHostedService` caches one
+  `ServiceBusSender` per distinct queue name actually used (keyed off
+  `ISchemaHandler.ServiceBusQueueName`/`ConsumerOptions.ServiceBusQueueName`,
+  not per schema), reused for the lifetime of the app per Microsoft's
+  Service Bus client-lifetime guidance — never opened per message. Since
+  `ConsumerHostedService` is itself registered `AddSingleton`, this cache
+  lives for the process's lifetime. It implements `IAsyncDisposable`
+  alongside `IDisposable` so every cached sender is disposed on a graceful
+  shutdown: the default `ServiceProvider` prefers `DisposeAsync` over
+  `Dispose` when a singleton implements both, and that runs during
+  `IHost.StopAsync` — the window a Kubernetes-initiated pod termination
+  (redeploy, scale-down) opens with SIGTERM before `terminationGracePeriodSeconds`
+  elapses and SIGKILL follows
+  (kubernetes-deployment-best-practices.instructions.md). A hard
+  crash/SIGKILL/OOM-kill runs no disposal code at all — by design, not a gap
+  to close — the broker reclaims that connection's AMQP links via its own
+  idle-connection timeout, and a fresh process opens fresh senders on
+  restart. An admin endpoint (`GET`/`DELETE /api/v{version}/service-bus-senders`,
+  `IServiceBusSenderCacheService`) lists and force-clears every registered
+  consumer's cached senders on demand — scoped to **whichever pod handles
+  the request**, not every replica: no cross-pod broadcast mechanism exists
+  in this repo, and building one was explicitly out of scope when this
+  endpoint was added. This also only covers consumers running in the same
+  process as the Api — once the target 3-Deployment split below separates
+  the Kafka consumer into its own Pod, this service needs to move there too,
+  the same way each Pod's own `/health/ready` already only reports on that
+  process's own dependencies.
 - **Single poll loop, many concurrent workers.** `Consume`/`Commit` on one
   `IConsumer` are meant to be driven from a single thread, so the poll loop
   itself stays single-threaded — but polling is decoupled from the Service
@@ -449,13 +476,29 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
   Nexus/WMS producers already use, not this repo's own invention), use it;
   otherwise generate a new GUID at the point of consumption. The same
   `KafkaHeaderNames` class also names the `Deduplication-Id`, `App-Id`, and
-  `Type` headers read for the dedup check and structured logging in §1.
+  `Type` headers read for the dedup check and structured logging in §1. If
+  `App-Id` is missing or empty, `ConsumerHostedService` falls back to this
+  service's own identity (`ApplicationOptions.ApplicationId`, bound from the
+  `Application` configuration section — `ApplicationOptions` also carries
+  `ApplicationName`, enriched onto every Serilog log line in `Program.cs`)
+  so a relayed event never carries a blank `AppId` downstream.
 - **Kafka → Service Bus**: set the correlation ID as a Service Bus message
   `ApplicationProperties["CorrelationId"]` when relaying (alongside the
-  `SessionId` set in §1) — this is the only hop where it needs to move
-  from one transport's header shape to another's.
-- **Service Bus consumer**: read `ApplicationProperties["CorrelationId"]`
-  back into `ICorrelationContext` and the Serilog `LogContext` before
+  `SessionId` set in §1) — this is the transport-hop property a
+  broker-level filter or log line can read without deserializing the body.
+  In addition, the full `ICorrelationContext` this consumer built
+  (`CorrelationId`, `AppId`, `Types`) travels in the message **body**,
+  wrapping the schema's own JSON as `ServiceBusRelayEnvelope.Payload` — see
+  `ServiceBusRelayEnvelope` (`Infrastructure/Messaging`). The schema's wire
+  contract itself (e.g. `InboundInventoryEventMessage`) still carries no
+  correlation id of its own; the envelope is what carries it, not a field
+  on the payload type.
+- **Service Bus consumer**: deserialize the body as `ServiceBusRelayEnvelope`
+  first, then its `Payload` as the schema's own type. Read the correlation
+  id from `ApplicationProperties["CorrelationId"]` when present (falling
+  back to the envelope's own `CorrelationId`, then a fresh GUID only if
+  neither is set) and set the full context — correlation id, `AppId`, and
+  `Types` — on `ICorrelationContext` and the Serilog `LogContext` before
   processing, so every log line for this message — including the eventual
   Cosmos DB write and any Blob upload — carries the same ID an operator can
   grep across all three systems.
@@ -704,15 +747,55 @@ and which cannot observe another Pod's internal state:
   tree in isolation. Follow
   `MethodName_Condition_ExpectedResult()` per
   [dotnet-architecture-good-practices.instructions.md](dotnet-architecture-good-practices.instructions.md) §4.
-- **Integration tests**: `Testcontainers` spinning up the Kafka broker, the
-  Azure Service Bus emulator, the Cosmos DB emulator, and Azurite (Blob
-  Storage emulator) — exercise the full
-  Kafka → Service Bus → Cosmos DB path against real (containerized)
-  dependencies, not mocks, for at least: happy path, duplicate/redelivered
-  message, and a forced Cosmos `412 PreconditionFailed` to prove the
-  concurrency retry loop in §2 above actually re-reads and re-applies
-  against the fresh ETag (the exception itself is raised the way
-  [cosmos-db.instructions.md](cosmos-db.instructions.md) §9 shows).
+- **Integration tests**: exercise the full Kafka → Service Bus → Cosmos DB
+  path for at least: happy path, duplicate/redelivered message, and a forced
+  Cosmos `412 PreconditionFailed` to prove the concurrency retry loop in §2
+  above actually re-reads and re-applies against the fresh ETag (the
+  exception itself is raised the way
+  [cosmos-db.instructions.md](cosmos-db.instructions.md) §9 shows). No
+  Cosmos DB Emulator/Azure Service Bus emulator container image was ever
+  successfully wired up for this (`KafkaRelayContainerTests` covered only
+  the Kafka leg on its own) — the standard is now:
+  - **Kafka**: `Testcontainers` spinning up a real (containerized) broker —
+    unchanged, still not a mock.
+  - **Service Bus**: a **Virtual Service Bus** — an in-process fake built by
+    subclassing the Azure SDK's own mockable client types
+    (`ServiceBusClient`/`ServiceBusSender` on the publish side;
+    `ServiceBusSessionProcessor`/`ServiceBusProcessor` on the consume side),
+    which Microsoft's own SDK design already supports (public/protected
+    parameterless constructors, virtual factory methods — see
+    `VirtualServiceBusClient`/`VirtualServiceBusSender` in the integration
+    test project). This is not a generic mock of the messaging contract —
+    the consume side calls the exact same `HandleMessageAsync` core method
+    (see below) the real `ServiceBusSessionProcessor`/`ServiceBusProcessor`
+    event handler calls in production, so the business logic under test is
+    identical either way.
+  - **Cosmos DB**: an **in-memory `Container` fake** (`InMemoryCosmosContainer`,
+    registered as `ICosmosContainerFactory` in place of the real
+    `CosmosContainerFactory`) with faithful `CosmosException`/`HttpStatusCode`
+    semantics — real ETag-conflict (`412`), duplicate-create (`409`), and
+    missing-item (`404`) behavior, not just enough surface to compile.
+  - Subscribing to `ServiceBusSessionProcessor.ProcessMessageAsync`/
+    `ServiceBusProcessor.ProcessMessageAsync` on a processor not built
+    through a real connected `ServiceBusClient` throws on the subscription
+    itself — a hard SDK limitation, confirmed by direct reproduction, not a
+    design choice. This is why `ServiceBusConsumerHostedService`/
+    `BulkImportServiceBusConsumerHostedService` build their processor
+    lazily in `ExecuteAsync` rather than their constructor, and split their
+    event handler into a thin SDK-facing adapter plus an `internal
+    HandleMessageAsync(ServiceBusReceivedMessage, CancellationToken)` core
+    that returns a `ServiceBusMessageOutcome` instead of calling
+    `CompleteMessageAsync`/`AbandonMessageAsync`/`DeadLetterMessageAsync`
+    directly — an integration test constructs the hosted service normally
+    (safe, since the processor isn't built until `ExecuteAsync` runs, which
+    the test never calls) and wires `HandleMessageAsync` directly to the
+    Virtual Service Bus broker instead.
+  - `CosmosRepository`'s two query methods (`GetPagedAsync`/`QueryAsync`)
+    call the real SDK's `IQueryable.ToFeedIterator()` extension, which
+    requires a genuinely Cosmos-backed queryable and cannot be satisfied by
+    any in-memory fake — `ReadNextPageAsync` is a `protected virtual` seam
+    on `CosmosRepository` solely for this; a test-only repository subclass
+    overrides it to materialize the in-memory queryable directly instead.
 - Coverage target and the shared `WebApplicationFactory<Program>` test host
   setup are defined in
   [engineering-standards.instructions.md](engineering-standards.instructions.md) §7 —

@@ -1,7 +1,7 @@
-namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 /// <summary>
-/// Minimum shape a Cosmos persistence document must expose so <see cref="CosmosRepository{TDomain,TDocument}"/>
+/// Minimum shape a Cosmos persistence document must expose so <c>CosmosRepository{TDomain,TDocument}</c>
 /// can log and dedupe generically without knowing the concrete document type (cosmos-db.instructions.md §3).
 /// </summary>
 public interface ICosmosDocument

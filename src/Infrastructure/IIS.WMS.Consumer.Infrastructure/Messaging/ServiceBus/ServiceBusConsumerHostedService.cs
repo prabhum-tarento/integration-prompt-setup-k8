@@ -24,13 +24,16 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 /// </summary>
 public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncDisposable
 {
-    private readonly ServiceBusSessionProcessor processor;
+    private readonly ServiceBusClient client;
+    private readonly ServiceBusConsumerOptions options;
     private readonly IServiceScopeFactory scopeFactory;
     private readonly ServiceBusHealthState healthState;
     private readonly ILogger<ServiceBusConsumerHostedService> logger;
 
-    /// <summary>Builds the session processor and wires its message/error event handlers.</summary>
-    /// <param name="client">Service Bus client used to create the session processor.</param>
+    // Built lazily in ExecuteAsync, not the constructor - see ExecuteAsync's remarks for why.
+    private ServiceBusSessionProcessor? processor;
+
+    /// <param name="client">Service Bus client the session processor is built from, on first start (see <see cref="ExecuteAsync"/>).</param>
     /// <param name="options">Queue name and other Service Bus settings.</param>
     /// <param name="scopeFactory">Creates a DI scope per message, since the hosted service itself is a singleton but the Application services it calls are scoped.</param>
     /// <param name="healthState">This consumer's own keyed <see cref="ServiceBusHealthState"/> instance - keyed since the bulk-import consumer has its own, separate instance too.</param>
@@ -42,25 +45,39 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
         [FromKeyedServices(MessagingServiceCollectionExtensions.InventoryEventsServiceBusKey)] ServiceBusHealthState healthState,
         ILogger<ServiceBusConsumerHostedService> logger)
     {
+        this.client = client;
+        this.options = options.Value;
         this.scopeFactory = scopeFactory;
         this.healthState = healthState;
         this.logger = logger;
+    }
 
-        processor = client.CreateSessionProcessor(options.Value.QueueName, new ServiceBusSessionProcessorOptions
+    /// <summary>
+    /// Builds the session processor, wires its message/error event handlers, starts it, and keeps the
+    /// service alive until cancellation, then stops it cleanly. Building the processor here rather than
+    /// in the constructor is deliberate, not just style: subscribing to
+    /// <see cref="ServiceBusSessionProcessor.ProcessMessageAsync"/> on a processor built from a
+    /// <see cref="ServiceBusClient"/> with no real connection throws on the subscription itself (a hard
+    /// SDK limitation - that event's add accessor is not virtual and touches internal state only a
+    /// genuine connection populates), so an integration test swapping in such a client
+    /// (integration-resiliency.instructions.md §9) can safely construct this hosted service and call
+    /// <see cref="HandleMessageAsync"/> directly as long as it never calls <see cref="ExecuteAsync"/>.
+    /// This is not a behavior change for production - the class is a DI singleton either way, so the
+    /// processor is still built exactly once, just on first start instead of at construction.
+    /// </summary>
+    /// <param name="stoppingToken">Signaled when the host is shutting down.</param>
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        processor = client.CreateSessionProcessor(options.QueueName, new ServiceBusSessionProcessorOptions
         {
             MaxConcurrentSessions = 8,
             MaxConcurrentCallsPerSession = 1,
             AutoCompleteMessages = false,
         });
 
-        processor.ProcessMessageAsync += ProcessMessageAsync;
+        processor.ProcessMessageAsync += OnProcessMessageAsync;
         processor.ProcessErrorAsync += ProcessErrorAsync;
-    }
 
-    /// <summary>Starts the session processor and keeps the service alive until cancellation, then stops it cleanly.</summary>
-    /// <param name="stoppingToken">Signaled when the host is shutting down.</param>
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
         await processor.StartProcessingAsync(stoppingToken);
 
         try
@@ -77,34 +94,71 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
         }
     }
 
-    /// <summary>Deserializes one received message, dispatches it to the matching use case by <c>EventType</c>, and settles it (complete/abandon/dead-letter) based on the outcome.</summary>
+    /// <summary>Thin adapter wired to the real SDK event - runs <see cref="HandleMessageAsync"/> then settles the message (complete/abandon/dead-letter) per its returned outcome.</summary>
     /// <param name="args">Event args carrying the message and the settlement methods (complete/abandon/dead-letter).</param>
-    private async Task ProcessMessageAsync(ProcessSessionMessageEventArgs args)
+    private async Task OnProcessMessageAsync(ProcessSessionMessageEventArgs args)
+    {
+        var outcome = await HandleMessageAsync(args.Message, args.CancellationToken);
+
+        switch (outcome.Kind)
+        {
+            case ServiceBusMessageOutcomeKind.Completed:
+                await args.CompleteMessageAsync(args.Message, args.CancellationToken);
+                break;
+
+            case ServiceBusMessageOutcomeKind.Abandoned:
+                await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
+                break;
+
+            case ServiceBusMessageOutcomeKind.DeadLettered:
+                await args.DeadLetterMessageAsync(args.Message, outcome.Reason, outcome.Description, args.CancellationToken);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Deserializes one received message and dispatches it to the matching use case by <c>EventType</c>,
+    /// returning the outcome instead of settling the message directly - see
+    /// <see cref="ServiceBusMessageOutcome"/>'s remarks for why this is split out of
+    /// <see cref="OnProcessMessageAsync"/>. <see langword="internal"/> so an integration test in the same
+    /// solution (<c>IIS.WMS.Consumer.IntegrationTests</c>, via <c>InternalsVisibleTo</c>) can call this
+    /// directly with a message built via <c>ServiceBusModelFactory</c>, without a working
+    /// <see cref="ServiceBusSessionProcessor"/>.
+    /// </summary>
+    internal async Task<ServiceBusMessageOutcome> HandleMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken)
     {
         healthState.LastSuccessfulReceiveUtc = DateTimeOffset.UtcNow;
 
+        ServiceBusRelayEnvelope envelope;
         InboundInventoryEventMessage inbound;
 
         try
         {
-            inbound = JsonSerializer.Deserialize<InboundInventoryEventMessage>(args.Message.Body.ToString())
+            envelope = JsonSerializer.Deserialize<ServiceBusRelayEnvelope>(message.Body.ToString())
+                ?? throw new JsonException("Deserialized envelope was null.");
+            inbound = envelope.Payload.Deserialize<InboundInventoryEventMessage>()
                 ?? throw new JsonException("Deserialized payload was null.");
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
-            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", args.Message.MessageId);
-            await args.DeadLetterMessageAsync(args.Message, "PoisonMessage", ex.Message, args.CancellationToken);
+            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
 
-            return;
+            return ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
         }
 
-        var correlationId = args.Message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
-            ? value?.ToString() ?? Guid.NewGuid().ToString()
-            : Guid.NewGuid().ToString();
+        // ApplicationProperties is the transport-hop property (integration-resiliency.instructions.md
+        // §4) - preferred when present, with the envelope's own CorrelationId as a fallback for a
+        // message relayed without it, and a fresh id only if neither is set.
+        var correlationId = message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
+                && value?.ToString() is { Length: > 0 } propertyCorrelationId
+            ? propertyCorrelationId
+            : envelope.CorrelationId is { Length: > 0 } envelopeCorrelationId
+                ? envelopeCorrelationId
+                : Guid.NewGuid().ToString();
 
         using var scope = scopeFactory.CreateScope();
         var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
-        correlationContext.Set(correlationId);
+        correlationContext.Set(correlationId, envelope.AppId, envelope.Types);
 
         var inventoryEventService = scope.ServiceProvider.GetRequiredService<IInventoryEventService>();
 
@@ -115,26 +169,25 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
                 case "Create":
                     await inventoryEventService.CreateAsync(
                         new CreateInventoryEventRequest(inbound.WarehouseId, inbound.Sku, inbound.Quantity),
-                        args.CancellationToken);
+                        cancellationToken);
                     break;
 
                 case "Reserve":
                     await inventoryEventService.ReserveStockAsync(
                         inbound.WarehouseId, inbound.Sku,
                         new ReserveStockRequest(inbound.EventId, inbound.Quantity),
-                        args.CancellationToken);
+                        cancellationToken);
                     break;
 
                 default:
                     logger.LogWarning(
                         "Unknown inventory event type '{EventType}' for message {MessageId} - dead-lettering.",
-                        inbound.EventType, args.Message.MessageId);
-                    await args.DeadLetterMessageAsync(args.Message, "UnknownEventType", cancellationToken: args.CancellationToken);
+                        inbound.EventType, message.MessageId);
 
-                    return;
+                    return ServiceBusMessageOutcome.DeadLettered("UnknownEventType");
             }
 
-            await args.CompleteMessageAsync(args.Message, args.CancellationToken);
+            return ServiceBusMessageOutcome.Completed;
         }
         catch (ConcurrencyException ex)
         {
@@ -144,13 +197,15 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
             // only covers transient infrastructure faults, not application-level conflicts.
             logger.LogWarning(
                 ex, "Concurrency retries exhausted for message {MessageId} - abandoning for redelivery.",
-                args.Message.MessageId);
-            await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
+                message.MessageId);
+
+            return ServiceBusMessageOutcome.Abandoned;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Processing failed for message {MessageId} - abandoning for redelivery.", args.Message.MessageId);
-            await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
+            logger.LogError(ex, "Processing failed for message {MessageId} - abandoning for redelivery.", message.MessageId);
+
+            return ServiceBusMessageOutcome.Abandoned;
         }
     }
 
@@ -163,9 +218,12 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
         return Task.CompletedTask;
     }
 
-    /// <summary>Disposes the session processor asynchronously - required since <see cref="ServiceBusSessionProcessor"/> has no synchronous dispose.</summary>
+    /// <summary>Disposes the session processor asynchronously, if one was ever built (see <see cref="ExecuteAsync"/>) - required since <see cref="ServiceBusSessionProcessor"/> has no synchronous dispose.</summary>
     public async ValueTask DisposeAsync()
     {
-        await processor.DisposeAsync();
+        if (processor is not null)
+        {
+            await processor.DisposeAsync();
+        }
     }
 }

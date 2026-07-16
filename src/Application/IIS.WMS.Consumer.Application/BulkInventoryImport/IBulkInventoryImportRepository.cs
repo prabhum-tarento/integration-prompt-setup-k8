@@ -4,7 +4,7 @@ namespace IIS.WMS.Consumer.Application.BulkInventoryImport;
 
 /// <summary>
 /// Port for bulk-import item persistence (cosmos-db.instructions.md §5), implemented by
-/// <c>Infrastructure.Persistence.CosmosDb.InventoryBulkImportItemRepository</c>. Only
+/// <c>Infrastructure.Persistence.CosmosDb.Repository.InventoryBulkImportItemRepository</c>. Only
 /// <see cref="UpsertAsync"/> is exposed - unlike <c>IInventoryEventRepository</c>, this data is an
 /// unordered, idempotent snapshot reload with no read-modify-write step, so there is no ETag-guarded
 /// replace/patch surface to expose here.

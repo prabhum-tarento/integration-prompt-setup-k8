@@ -7,8 +7,10 @@ using Azure.Messaging.ServiceBus;
 using Confluent.Kafka;
 using Confluent.SchemaRegistry;
 using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -92,7 +94,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Service Bus consumer dedupe (§2).
 /// </para>
 /// </remarks>
-public abstract class ConsumerHostedService : BackgroundService
+public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposable, IServiceBusSenderCacheSource
 {
     /// <summary>
     /// The key a schema handler is registered under when a consumer doesn't distinguish by the Kafka
@@ -151,6 +153,14 @@ public abstract class ConsumerHostedService : BackgroundService
 
         /// <summary>Business-rule validation for a previously-deserialized value (of this schema).</summary>
         Task<bool> ValidateAsync(object value, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Computes this schema's <c>OrderArchive</c> category key for a previously-deserialized
+        /// value, or <see langword="null"/>/empty if this schema doesn't archive to Cosmos before
+        /// publishing - see <see cref="ConsumerHostedService.CreateSchemaHandler{TAvro,TValue}"/>'s
+        /// <c>getOrderArchiveKey</c> parameter.
+        /// </summary>
+        string? GetOrderArchiveKey(object value);
     }
 
     /// <summary>Type-erasing <see cref="ISchemaHandler"/> implementation - see <see cref="CreateSchemaHandler{TValue}"/>, the only place this is constructed.</summary>
@@ -159,10 +169,12 @@ public abstract class ConsumerHostedService : BackgroundService
         Func<TValue, string> serializeToJson,
         Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
         Func<TValue, CancellationToken, Task<bool>>? validateAsync,
-        string? serviceBusQueueName)
+        string? serviceBusQueueName,
+        Func<TValue, string?>? getOrderArchiveKey = null)
         : ISchemaHandler
     {
         private readonly Func<TValue, CancellationToken, Task<bool>> validateAsync = validateAsync ?? ((_, _) => Task.FromResult(true));
+        private readonly Func<TValue, string?> getOrderArchiveKey = getOrderArchiveKey ?? (_ => null);
 
         public string SchemaName { get; } = typeof(TValue).Name;
 
@@ -175,6 +187,8 @@ public abstract class ConsumerHostedService : BackgroundService
         public (string SessionId, string MessageId) GetServiceBusRouting(object value, string? key) => getServiceBusRouting((TValue)value, key);
 
         public Task<bool> ValidateAsync(object value, CancellationToken cancellationToken) => validateAsync((TValue)value, cancellationToken);
+
+        public string? GetOrderArchiveKey(object value) => getOrderArchiveKey((TValue)value);
     }
 
     /// <summary>
@@ -189,10 +203,12 @@ public abstract class ConsumerHostedService : BackgroundService
         Func<TValue, string> serializeToJson,
         Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
         Func<TValue, CancellationToken, Task<bool>>? validateAsync,
-        string? serviceBusQueueName)
+        string? serviceBusQueueName,
+        Func<TValue, string?>? getOrderArchiveKey = null)
         : ISchemaHandler
     {
         private readonly Func<TValue, CancellationToken, Task<bool>> validateAsync = validateAsync ?? ((_, _) => Task.FromResult(true));
+        private readonly Func<TValue, string?> getOrderArchiveKey = getOrderArchiveKey ?? (_ => null);
 
         // TAvro, not TValue - SchemaName is this schema's identity on the wire (and the cold/hot-tier
         // blob path segment), independent of which internal DTO it happens to be mapped into.
@@ -208,6 +224,8 @@ public abstract class ConsumerHostedService : BackgroundService
         public (string SessionId, string MessageId) GetServiceBusRouting(object value, string? key) => getServiceBusRouting((TValue)value, key);
 
         public Task<bool> ValidateAsync(object value, CancellationToken cancellationToken) => validateAsync((TValue)value, cancellationToken);
+
+        public string? GetOrderArchiveKey(object value) => getOrderArchiveKey((TValue)value);
     }
 
     /// <summary>
@@ -242,13 +260,20 @@ public abstract class ConsumerHostedService : BackgroundService
     /// different Service Bus queues; the base class opens one <see cref="Azure.Messaging.ServiceBus.ServiceBusSender"/>
     /// per distinct queue name actually used, not one per schema.
     /// </param>
+    /// <param name="getOrderArchiveKey">
+    /// Computes the <c>OrderArchive</c> category key for one deserialized value of this schema, or
+    /// omit (default <see langword="null"/>) if this schema never archives to Cosmos. When the
+    /// computed key is non-null/non-empty for a given message, <see cref="ProcessMessageAsync"/>
+    /// upserts an <c>OrderArchive</c> record before publishing that message to Service Bus.
+    /// </param>
     protected static ISchemaHandler CreateSchemaHandler<TValue>(
         IDeserializer<TValue> deserializer,
         Func<TValue, string> serializeToJson,
         Func<TValue, string?, (string SessionId, string MessageId)> getServiceBusRouting,
         Func<TValue, CancellationToken, Task<bool>>? validateAsync = null,
-        string? serviceBusQueueName = null) =>
-        new SchemaHandler<TValue>(deserializer, serializeToJson, getServiceBusRouting, validateAsync, serviceBusQueueName);
+        string? serviceBusQueueName = null,
+        Func<TValue, string?>? getOrderArchiveKey = null) =>
+        new SchemaHandler<TValue>(deserializer, serializeToJson, getServiceBusRouting, validateAsync, serviceBusQueueName, getOrderArchiveKey);
 
     /// <summary>
     /// Builds a type-erased schema entry for one Avro event type that gets mapped into an internal
@@ -262,7 +287,7 @@ public abstract class ConsumerHostedService : BackgroundService
     /// dictionary to <see cref="RegisterSchemaHandlers"/> - not from the dictionary literal passed to
     /// <c>base(...)</c> itself. The Schema Registry client behind it is built once per consumer instance,
     /// on the first call, and reused for every subsequent schema on the same consumer (and disposed
-    /// automatically by this base class - see <see cref="Dispose"/>), so a consumer with two Avro
+    /// automatically by this base class - see <see cref="Dispose()"/>), so a consumer with two Avro
     /// schemas does not need to manage sharing it itself.
     /// </summary>
     /// <typeparam name="TAvro">The Avro-generated <c>ISpecificRecord</c> type this schema deserializes to.</typeparam>
@@ -277,11 +302,13 @@ public abstract class ConsumerHostedService : BackgroundService
     /// </param>
     /// <param name="serviceBusQueueName">Per-schema Service Bus queue override - see <see cref="CreateSchemaHandler{TValue}"/>'s remarks.</param>
     /// <param name="validateAsync">Business-rule validation for one mapped <typeparamref name="TValue"/> - see <see cref="CreateSchemaHandler{TValue}"/>'s remarks for the throw-vs-return-false distinction.</param>
+    /// <param name="getOrderArchiveKey">Computes the <c>OrderArchive</c> category key for one mapped <typeparamref name="TValue"/> - see <see cref="CreateSchemaHandler{TValue}"/>'s remarks.</param>
     protected ISchemaHandler CreateSchemaHandler<TAvro, TValue>(
         Func<TAvro, TValue> map,
         Func<TValue, string?, (string SessionId, string MessageId)>? getServiceBusRouting = null,
         string? serviceBusQueueName = null,
-        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null)
+        Func<TValue, CancellationToken, Task<bool>>? validateAsync = null,
+        Func<TValue, string?>? getOrderArchiveKey = null)
         where TAvro : Avro.Specific.ISpecificRecord
     {
         var factory = specificRecordDeserializerFactory
@@ -298,7 +325,8 @@ public abstract class ConsumerHostedService : BackgroundService
             value => JsonSerializer.Serialize(value, RelayJsonOptions),
             getServiceBusRouting ?? RouteByEventKey,
             validateAsync,
-            serviceBusQueueName);
+            serviceBusQueueName,
+            getOrderArchiveKey);
     }
 
     /// <summary>First Avro schema registered on this consumer instance - builds (and caches, via <see cref="schemaRegistryClient"/>) the Schema Registry client every later schema on the same consumer reuses.</summary>
@@ -348,6 +376,7 @@ public abstract class ConsumerHostedService : BackgroundService
     private readonly IFileStore coldFileStore;
     private readonly IDeduplicationService deduplicationService;
     private readonly IServiceScopeFactory scopeFactory;
+    private readonly ApplicationOptions applicationOptions;
 
     // Keyed by the same event-type strings as schemaHandlers (built by RegisterSchemaHandlers, from
     // that same dictionary's keys) - one ConsumerHealthState per registered schema/event type, not one
@@ -360,11 +389,22 @@ public abstract class ConsumerHostedService : BackgroundService
     private readonly PartitionOffsetCommitTracker offsetTracker;
     private readonly BlobStorageOptions blobStorageOptions;
 
+    // Guards DisposeKafkaResources against running twice - the DI-driven shutdown path (ServiceProvider
+    // prefers DisposeAsync over Dispose when a singleton implements both) only ever triggers one of
+    // Dispose()/DisposeAsync(), so this is defensive hardening for a caller that disposes this instance
+    // directly more than once, not something the app's own lifecycle hits.
+    private bool disposed;
+
     /// <summary>Settings this consumer was configured with.</summary>
     protected ConsumerOptions Options { get; }
 
-    /// <summary>Display name used in log messages and the cold/hot-tier blob path - distinguishes this consumer's log lines and audit records from other consumers sharing the same pod/process.</summary>
-    protected string ConsumerName { get; }
+    /// <summary>
+    /// Display name used in log messages and the cold/hot-tier blob path - distinguishes this
+    /// consumer's log lines and audit records from other consumers sharing the same pod/process.
+    /// Public (not just <c>protected</c>) so it doubles as <see cref="IServiceBusSenderCacheSource.ConsumerName"/>
+    /// for the Service Bus sender cache admin endpoint.
+    /// </summary>
+    public string ConsumerName { get; }
 
     /// <summary>Builds the Kafka consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, enabled flag, worker/channel sizing, and Service Bus queue settings for this consumer.</param>
@@ -404,6 +444,7 @@ public abstract class ConsumerHostedService : BackgroundService
         blobStorageOptions = infrastructure.BlobStorageOptions.Value;
         deduplicationService = infrastructure.DeduplicationService;
         scopeFactory = infrastructure.ScopeFactory;
+        applicationOptions = infrastructure.ApplicationOptions;
         this.logger = logger;
         this.specificRecordDeserializerFactory = specificRecordDeserializerFactory;
 
@@ -633,7 +674,13 @@ public abstract class ConsumerHostedService : BackgroundService
         var correlationId = rawCorrelationId ?? $"-{Guid.NewGuid().ToString()}";
         var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
         var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
-        var appId = TryGetHeader(headers, KafkaHeaderNames.AppId) ?? string.Empty;
+
+        // Falls back to this service's own configured identity (ApplicationOptions.ApplicationId)
+        // when the producer didn't set an App-Id header, so a relayed event never carries a blank
+        // AppId downstream - see ApplicationOptions' own remarks.
+        var rawAppId = TryGetHeader(headers, KafkaHeaderNames.AppId);
+        var appId = string.IsNullOrEmpty(rawAppId) ? applicationOptions.AppId : rawAppId;
+
         var eventKey = TryGetHeader(headers, KafkaHeaderNames.EventKey) ?? string.Empty;
 
         // Scoped for the lifetime of this one message, since the hosted service itself is a
@@ -806,11 +853,45 @@ public abstract class ConsumerHostedService : BackgroundService
             return;
         }
 
+        // Opt-in per schema (CreateSchemaHandler's getOrderArchiveKey) - a schema that doesn't supply
+        // one never computes this and every message skips straight to Service Bus, same as before this
+        // archive step existed.
+        var orderArchiveKey = schemaHandler.GetOrderArchiveKey(value);
+
+        if (!string.IsNullOrEmpty(orderArchiveKey))
+        {
+            try
+            {
+                var orderArchive = OrderArchive.Create(
+                    $"{schemaHandler.SchemaName}_{correlationId}", orderArchiveKey, json, DateTime.UtcNow);
+
+                var orderArchiveRepository = scope.ServiceProvider.GetRequiredService<IOrderArchiveRepository>();
+                await orderArchiveRepository.UpsertAsync(orderArchive, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                await HandleNonFatalFailureAsync("OrderArchiveUpsert", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
+                return;
+            }
+        }
+
         try
         {
             var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value, result.Message.Key);
 
-            var message = new ServiceBusMessage(json)
+            // Wraps the schema's own JSON with the full CorrelationContext this consumer built above -
+            // see ServiceBusRelayEnvelope's own remarks for why this travels in the body in addition to
+            // (not instead of) the ApplicationProperties property below.
+            using var payloadDocument = JsonDocument.Parse(json);
+            var envelope = new ServiceBusRelayEnvelope
+            {
+                CorrelationId = correlationId,
+                AppId = appId,
+                Types = correlationContext.Types,
+                Payload = payloadDocument.RootElement.Clone(),
+            };
+
+            var message = new ServiceBusMessage(JsonSerializer.Serialize(envelope))
             {
                 // Deterministic id from the event payload - this is what makes the Service Bus
                 // consumer's dedupe check on redelivery actually work.
@@ -902,12 +983,94 @@ public abstract class ConsumerHostedService : BackgroundService
             : null;
     }
 
-    /// <summary>Closes and disposes the underlying Kafka consumer, plus the Schema Registry client <see cref="CreateSchemaHandler{TAvro,TValue}"/> built (if any) - Confluent.Kafka has no async-dispose equivalent.</summary>
-    public override void Dispose()
+    /// <summary>
+    /// Closes the underlying Kafka consumer and disposes the Schema Registry client
+    /// <see cref="CreateSchemaHandler{TAvro,TValue}"/> built (if any) - shared by both
+    /// <see cref="Dispose()"/> and <see cref="DisposeAsync"/> so the cleanup isn't duplicated between
+    /// them. Guarded by <see cref="disposed"/> so a caller that disposes this instance more than once
+    /// (through either interface, or both) only closes the consumer once - the DI-driven shutdown path
+    /// never does this itself (see <see cref="DisposeAsync"/>'s remarks), but nothing stops a test or
+    /// other caller from calling <see cref="Dispose()"/>/<see cref="DisposeAsync"/> directly more than
+    /// once.
+    /// </summary>
+    private void DisposeKafkaResources()
     {
+        if (disposed)
+        {
+            return;
+        }
+
         consumer.Close();
         consumer.Dispose();
         schemaRegistryClient?.Dispose();
+
+        disposed = true;
+    }
+
+    /// <summary>
+    /// Synchronous fallback for a caller that disposes this instance directly (e.g. a <c>using</c> in
+    /// a unit test) rather than through the host's own shutdown. Cannot release the cached
+    /// <see cref="ServiceBusSender"/>s here - <see cref="ServiceBusSender"/> only exposes
+    /// <see cref="ServiceBusSender.DisposeAsync"/>, no synchronous <c>Dispose</c> - so those are left
+    /// for the GC/broker-side idle timeout to reclaim on this path. <see cref="DisposeAsync"/> is what
+    /// actually runs on a normal AKS shutdown (see its own remarks) and is the path that matters.
+    /// </summary>
+    public override void Dispose()
+    {
+        DisposeKafkaResources();
         base.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Disposes every cached <see cref="ServiceBusSender"/> (see <see cref="serviceBusSenders"/>)
+    /// alongside the Kafka consumer/Schema Registry client - this is the path the host actually takes
+    /// on a graceful shutdown: this class implements <see cref="IAsyncDisposable"/> alongside
+    /// <see cref="IDisposable"/>, and the default <c>Microsoft.Extensions.DependencyInjection</c>
+    /// <c>ServiceProvider</c> prefers <see cref="IAsyncDisposable.DisposeAsync"/> over
+    /// <see cref="IDisposable.Dispose"/> when a singleton implements both, calling it once as the root
+    /// provider itself is disposed at the end of <c>IHost.StopAsync</c> - a Kubernetes-initiated pod
+    /// termination (redeploy, scale-down, `kubectl delete pod`) sends SIGTERM first and waits up to
+    /// `terminationGracePeriodSeconds` (kubernetes-deployment-best-practices.instructions.md) before
+    /// SIGKILL, which is exactly the window the generic host uses to run this. <b>A hard
+    /// crash/SIGKILL/OOM-kill runs no code at all</b> - no `Dispose`/`DisposeAsync` override on any
+    /// type can run in that case; the AMQP links these senders hold are instead reclaimed by Service
+    /// Bus's own idle-connection timeout on the broker side, and a fresh process/pod opens fresh
+    /// senders on restart via <see cref="GetServiceBusSender"/>. Also callable directly (e.g. the
+    /// admin endpoint that lists/clears cached senders) without disposing the rest of this instance -
+    /// see <see cref="ClearServiceBusSendersAsync"/>.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        DisposeKafkaResources();
+        await ClearServiceBusSendersAsync();
+        base.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Queue names this consumer currently holds a cached <see cref="ServiceBusSender"/> for - read by
+    /// the admin endpoint that lists cached senders across every registered consumer.
+    /// </summary>
+    public IReadOnlyCollection<string> CachedServiceBusSenderQueueNames => [.. serviceBusSenders.Keys];
+
+    /// <summary>
+    /// Disposes and evicts every <see cref="ServiceBusSender"/> this consumer currently has cached -
+    /// the next publish re-opens a fresh sender for its queue via <see cref="GetServiceBusSender"/>.
+    /// Safe to call while the consumer is running: a publish already in flight holds its own reference
+    /// to the sender it fetched, so clearing the cache underneath it does not fault that in-flight
+    /// send - it only affects senders fetched after this call returns. Removes each entry before
+    /// awaiting its disposal, not after, so a concurrent <see cref="GetServiceBusSender"/> call never
+    /// observes (and reuses) a sender this method has already started disposing.
+    /// </summary>
+    public async Task ClearServiceBusSendersAsync()
+    {
+        foreach (var queueName in serviceBusSenders.Keys.ToArray())
+        {
+            if (serviceBusSenders.TryRemove(queueName, out var sender))
+            {
+                await sender.DisposeAsync();
+            }
+        }
     }
 }

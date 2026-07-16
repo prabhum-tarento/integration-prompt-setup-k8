@@ -5,7 +5,7 @@ using Microsoft.Extensions.Options;
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 
 /// <summary>
-/// Singleton container cache backing every repository's <see cref="CosmosRepository{TDomain,TDocument}"/>.
+/// Singleton container cache backing every repository's <c>CosmosRepository{TDomain,TDocument}</c>.
 /// Registered once (see <see cref="CosmosDbServiceCollectionExtensions"/>) and reused for the life of the
 /// process, the same lifetime the single <c>Container</c> singleton used to have before container names moved
 /// into individual repositories - <see cref="Container"/> instances are cheap client-side handles, so caching

@@ -32,6 +32,7 @@ public static class NexusServiceCollectionExtensions
         services.AddHttpClient<IDeduplicationService, NexusDeduplicationService>((sp, client) =>
         {
             var options = sp.GetRequiredService<IOptions<NexusDeduplicationOptions>>().Value;
+            var applicationOptions = sp.GetRequiredService<IOptions<ApplicationOptions>>().Value;
 
             var clientBaseAddress = new Uri(
                 options.BaseUrl
@@ -42,9 +43,9 @@ public static class NexusServiceCollectionExtensions
 
             client.DefaultRequestHeaders.Add(
                 Messaging.Kafka.KafkaHeaderNames.AppId,
-                options.AppId
+                applicationOptions.AppId
                     ?? throw new InvalidOperationException(
-                        $"Missing '{NexusDeduplicationOptions.SectionName}:{nameof(NexusDeduplicationOptions.AppId)}' configuration."));
+                        $"Missing '{ApplicationOptions.SectionName}:{nameof(ApplicationOptions.AppId)}' configuration."));
         }).AddHttpMessageHandler<NexusAuthenticationHandler>();
 
         return services;

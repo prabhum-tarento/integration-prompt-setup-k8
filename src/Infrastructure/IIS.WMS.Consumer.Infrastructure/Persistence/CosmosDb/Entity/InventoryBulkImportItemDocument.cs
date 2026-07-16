@@ -1,11 +1,11 @@
 using Newtonsoft.Json;
 
-namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 /// <summary>
 /// Cosmos DB persistence shape for the bulk-import aggregate (cosmos-db.instructions.md §3). Kept
 /// separate from <c>Domain.Aggregates.InventoryBulkImportItem</c> so the Domain layer never
-/// references Newtonsoft.Json - only <see cref="InventoryBulkImportItemMapper"/> and the repository
+/// references Newtonsoft.Json - only <c>InventoryBulkImportItemMapper</c> and the repository
 /// see this type.
 /// </summary>
 public sealed class InventoryBulkImportItemDocument : ICosmosDocument

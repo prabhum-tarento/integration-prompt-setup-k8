@@ -52,7 +52,8 @@ public sealed class InventoryStateChangedConsumerHostedService : ConsumerHostedS
         RegisterSchemaHandlers(new Dictionary<string, ISchemaHandler>
         {
             [KafkaEvents.InventoryStateChangedEventType] = CreateSchemaHandler<InventoryStateChanged, InventoryStateChangedEvent>(
-                InventoryStateChangedEventMapper.ToInventoryStateChangedEvent),
+                InventoryStateChangedEventMapper.ToInventoryStateChangedEvent,
+                getOrderArchiveKey: x => x.Id + "_" + x.ReferenceId),
             [KafkaEvents.InventoryAdjustedEventType] = CreateSchemaHandler<InventoryAdjusted, InventoryAdjustedEvent>(
                 InventoryAdjustedEventMapper.ToInventoryAdjustedEvent,
                 // Null (the default) unless InventoryAdjustedServiceBusQueueName is configured -

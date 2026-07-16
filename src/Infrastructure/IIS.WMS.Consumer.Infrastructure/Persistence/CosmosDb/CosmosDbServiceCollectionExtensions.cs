@@ -1,6 +1,8 @@
 using Azure.Identity;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
+using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -50,21 +52,11 @@ public static class CosmosDbServiceCollectionExtensions
                 },
             };
 
-            // Local dev only: the Cosmos DB Emulator's well-known fixed key, from user-secrets.
-            // Every other environment authenticates with DefaultAzureCredential (AKS Workload
-            // Identity) - there is no key configuration entry once you leave IsDevelopment().
-            if (env.IsDevelopment())
-            {
-                logger.LogInformation(
-                    "Configuring Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
-
-                return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
-            }
 
             logger.LogInformation(
-                "Configuring Cosmos client for {AccountEndpoint} using DefaultAzureCredential.", config.AccountEndpoint);
+                "Configuring Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, new DefaultAzureCredential(), options);
+            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
         });
 
         // Container factory: its own singleton, resolving named containers once from the client - this
@@ -75,6 +67,7 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddSingleton<ICosmosContainerFactory, CosmosContainerFactory>();
 
         services.AddScoped<IInventoryEventRepository, InventoryEventRepository>();
+        services.AddScoped<IOrderArchiveRepository, OrderArchiveRepository>();
 
         // Bulk-import client: same account/database, but AllowBulkExecution = true and connection
         // settings tuned for throughput (Microsoft's documented bulk-executor guidance), so the
@@ -103,18 +96,11 @@ public static class CosmosDbServiceCollectionExtensions
                 },
             };
 
-            if (env.IsDevelopment())
-            {
-                logger.LogInformation(
-                    "Configuring bulk-import Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
-
-                return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
-            }
-
             logger.LogInformation(
-                "Configuring bulk-import Cosmos client for {AccountEndpoint} using DefaultAzureCredential.", config.AccountEndpoint);
+                "Configuring bulk-import Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, new DefaultAzureCredential(), options);
+            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
+
         });
 
         services.AddKeyedSingleton<ICosmosContainerFactory>(BulkCosmosClientKey, (sp, key) =>

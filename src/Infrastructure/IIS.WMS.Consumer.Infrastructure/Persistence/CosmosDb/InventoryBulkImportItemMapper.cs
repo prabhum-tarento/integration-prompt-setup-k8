@@ -1,4 +1,5 @@
 using IIS.WMS.Consumer.Domain.Aggregates;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 
