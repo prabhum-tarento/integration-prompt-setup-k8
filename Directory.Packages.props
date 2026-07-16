@@ -47,6 +47,12 @@
     <!-- Serilog.Context (LogContext) for the Kafka consumer's per-message correlation scope -
          same version Serilog.AspNetCore 10.0.0 already resolves transitively for the Api project. -->
     <PackageVersion Include="Serilog" Version="4.3.0" />
+    <!-- Roslyn C# scripting for the blob-stored event validation templates
+         ({SchemaName}/{EventType}.cs in the hot-tier validation-template container) the Kafka
+         consumer compiles and executes per event type. First-party Microsoft (MIT), approved
+         2026-07-16 for exactly this dynamic-validation use - nothing else should compile code at
+         runtime. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="5.6.0" />
   </ItemGroup>
 
   <!-- Infrastructure layer: Avro/Schema Registry consumer for the inventory.InventoryStateChanged

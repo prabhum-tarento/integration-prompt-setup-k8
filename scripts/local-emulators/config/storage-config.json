@@ -1,0 +1,27 @@
+{
+  "accounts": [
+    {
+      "name": "iiswmshotstore",
+      "key": "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+      "containers": [
+        "imports",
+        "exports",
+        "consumer-dead-letter",
+        "validation-templates"
+      ],
+      "tables": []
+    },
+    {
+      "name": "iiswmscoldstore",
+      "key": "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+      "containers": [
+        "request-audit"
+      ],
+      "tables": []
+    }
+  ],
+  "rcloneUi": {
+    "username": "rcloneui",
+    "password": "Rcl0ne-Ui-Local!"
+  }
+}

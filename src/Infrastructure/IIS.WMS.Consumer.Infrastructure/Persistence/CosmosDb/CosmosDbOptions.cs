@@ -20,5 +20,5 @@ public sealed class CosmosDbOptions
     public string PartitionKeyPath { get; init; } = "/partitionKey";
 
     /// <summary>Local development only - the Cosmos DB Emulator's well-known fixed key, read from user-secrets, never appsettings.json.</summary>
-    public string? PrimaryKey { get; init; }
+    public string? EmulatorKey { get; init; }
 }

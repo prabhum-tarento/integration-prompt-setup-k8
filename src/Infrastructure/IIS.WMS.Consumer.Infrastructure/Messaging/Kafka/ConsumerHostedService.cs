@@ -9,6 +9,7 @@ using Confluent.SchemaRegistry;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
+using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -375,6 +376,7 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
     private readonly IFileStore hotFileStore;
     private readonly IFileStore coldFileStore;
     private readonly IDeduplicationService deduplicationService;
+    private readonly IDynamicEventValidator dynamicEventValidator;
     private readonly IServiceScopeFactory scopeFactory;
     private readonly ApplicationOptions applicationOptions;
 
@@ -443,6 +445,7 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         coldFileStore = infrastructure.ColdFileStore;
         blobStorageOptions = infrastructure.BlobStorageOptions.Value;
         deduplicationService = infrastructure.DeduplicationService;
+        dynamicEventValidator = infrastructure.DynamicEventValidator;
         scopeFactory = infrastructure.ScopeFactory;
         applicationOptions = infrastructure.ApplicationOptions;
         this.logger = logger;
@@ -798,7 +801,12 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         {
             try
             {
+                var deduplicationStopwatch = Stopwatch.StartNew();
                 isDuplicate = await deduplicationService.IsDuplicateAsync($"IIS_WMS_{eventType}", deduplicationId, correlationId, cancellationToken);
+
+                logger.LogDebug(
+                    "{ConsumerName}: deduplication check completed for message at {Topic}:{Partition}:{Offset} in {DeduplicationDurationMs}ms - IsDuplicate: {IsDuplicate}. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, deduplicationStopwatch.Elapsed.TotalMilliseconds, isDuplicate, correlationId, eventType, appId);
             }
             catch (Exception ex)
             {
@@ -833,6 +841,20 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         {
             var validationStopwatch = Stopwatch.StartNew();
             isValid = await schemaHandler.ValidateAsync(value, cancellationToken);
+
+            // Second validation stage: the blob-stored {SchemaName}/{eventType}.cs template, when one
+            // exists (no template means the message passes this stage untouched). Same throw-vs-false
+            // contract as ValidateAsync itself - a throw lands in the catch below like any other
+            // validation failure - and only reached when the static handler already passed, so a
+            // template can tighten a schema's validation but never overrule a rejection. The message's
+            // own DI scope rides along as the template's `services` global, so a template resolves
+            // this message's scoped instances (e.g. ICorrelationContext), not fresh ones.
+            if (isValid)
+            {
+                isValid = await dynamicEventValidator.ValidateAsync(
+                    schemaHandler.SchemaName, eventType, value, headers, logger, scope.ServiceProvider, cancellationToken);
+            }
+
             validationDuration = validationStopwatch.Elapsed;
         }
         catch (Exception ex)
@@ -857,16 +879,25 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         // one never computes this and every message skips straight to Service Bus, same as before this
         // archive step existed.
         var orderArchiveKey = schemaHandler.GetOrderArchiveKey(value);
+        var orderArchiveDuration = TimeSpan.Zero;
 
         if (!string.IsNullOrEmpty(orderArchiveKey))
         {
             try
             {
+                var orderArchiveStopwatch = Stopwatch.StartNew();
+
                 var orderArchive = OrderArchive.Create(
                     $"{schemaHandler.SchemaName}_{correlationId}", orderArchiveKey, json, DateTime.UtcNow);
 
                 var orderArchiveRepository = scope.ServiceProvider.GetRequiredService<IOrderArchiveRepository>();
                 await orderArchiveRepository.UpsertAsync(orderArchive, cancellationToken);
+
+                orderArchiveDuration = orderArchiveStopwatch.Elapsed;
+
+                logger.LogInformation(
+                    "{ConsumerName}: OrderArchive upsert for {SchemaName}_{CorrelationId} took {OrderArchiveDurationMs}ms. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                    ConsumerName, schemaHandler.SchemaName, correlationId, orderArchiveDuration.TotalMilliseconds, correlationId, eventType, appId);
             }
             catch (Exception ex)
             {
@@ -877,7 +908,8 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
 
         try
         {
-            var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value, result.Message.Key);
+            var kafkaEventKey = string.IsNullOrWhiteSpace(result.Message.Key) ? eventKey : result.Message.Key;
+            var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value, kafkaEventKey);
 
             // Wraps the schema's own JSON with the full CorrelationContext this consumer built above -
             // see ServiceBusRelayEnvelope's own remarks for why this travels in the body in addition to
@@ -913,9 +945,9 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
 
             logger.LogInformation(
                 "{ConsumerName}: relayed {MessageId} for session {SessionId} from {Topic}:{Partition}:{Offset} to Service Bus. " +
-                "CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, TotalDurationMs: {TotalDurationMs}",
+                "CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, OrderArchiveDurationMs: {OrderArchiveDurationMs}, TotalDurationMs: {TotalDurationMs}",
                 ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId,
-                deserializeDuration.TotalMilliseconds, validationDuration.TotalMilliseconds, totalStopwatch.Elapsed.TotalMilliseconds);
+                deserializeDuration.TotalMilliseconds, validationDuration.TotalMilliseconds, orderArchiveDuration.TotalMilliseconds, totalStopwatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {

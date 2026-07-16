@@ -52,11 +52,25 @@ public static class CosmosDbServiceCollectionExtensions
                 },
             };
 
+            if (env.IsDevelopment())
+            {
+                // Local Cosmos DB Emulator (Podman Linux vNext, scripts/local-emulators) serves a
+                // self-signed cert that isn't chained to a trusted root, and
+                // setup-podman-emulators.bat recreates the container - with a fresh cert - on
+                // every run, so trusting it via the OS cert store would go stale immediately.
+                // HttpClientFactory/the custom validation callback is only honored under Gateway
+                // mode, not Direct.
+                options.ConnectionMode = ConnectionMode.Gateway;
+                options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
+                {
+                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+                });
+            }
 
             logger.LogInformation(
                 "Configuring Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, config.PrimaryKey, options);
+            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
         });
 
         // Container factory: its own singleton, resolving named containers once from the client - this
@@ -96,10 +110,23 @@ public static class CosmosDbServiceCollectionExtensions
                 },
             };
 
+            if (env.IsDevelopment())
+            {
+                // Same emulator cert-trust workaround as the default client above. Note
+                // MaxRequestsPerTcpConnection/MaxTcpConnectionsPerEndpoint above are Direct-mode-only
+                // settings - they become no-ops locally under Gateway mode, but stay fully effective
+                // in every non-dev environment, which never takes this branch.
+                options.ConnectionMode = ConnectionMode.Gateway;
+                options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
+                {
+                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+                });
+            }
+
             logger.LogInformation(
                 "Configuring bulk-import Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
-            return new CosmosClient(config.AccountEndpoint, config.PrimaryKey, options);
+            return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
 
         });
 

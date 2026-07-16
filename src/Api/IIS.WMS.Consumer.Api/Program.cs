@@ -80,7 +80,9 @@ builder.Services.AddAuthorizationBuilder()
         .RequireAuthenticatedUser()
         .Build())
     .AddPolicy(ServiceBusSendersController.AdminPolicyName, policy =>
-        policy.RequireRole(ServiceBusSendersController.AdminRoleName));
+        policy.RequireRole(ServiceBusSendersController.AdminRoleName))
+    .AddPolicy(EventValidationTemplatesController.AdminPolicyName, policy =>
+        policy.RequireRole(EventValidationTemplatesController.AdminRoleName));
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);

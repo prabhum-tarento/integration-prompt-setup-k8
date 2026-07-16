@@ -1,4 +1,5 @@
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
+using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
@@ -22,6 +23,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddResiliencePipelines();
         services.AddCosmosDb(configuration);
         services.AddBlobStorage(configuration);
+        services.AddDynamicValidation(configuration);
         services.AddNexusDeduplicationService(configuration);
 
         // Each Kafka consumer's health check, and both Service Bus queues' ServiceBusHealthCheck

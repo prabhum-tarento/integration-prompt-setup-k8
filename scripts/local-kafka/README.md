@@ -24,6 +24,9 @@ profile:
 | Kafka REST Proxy, curl-based produce API (`.bat` and `kube play` setups - not the custom-image path) | `http://localhost:8086` |
 | `events-api.ps1` wrapper, run manually (see "Producing a real InventoryStateChanged event" below) | `http://localhost:8087` |
 
+All five ports above (`.bat` setup only) are defaults from [../ports.env](../ports.env) - see
+[Configuring ports](#configuring-ports) to change any of them.
+
 ## Prerequisites
 
 - [Podman Desktop](https://podman-desktop.io/) installed, with its Podman machine started.
@@ -35,6 +38,10 @@ profile:
 - [curl](https://curl.se/) if you want to push messages via the REST Proxy instead of
   `kafka-console-producer` - see "Push a message via curl" below. It ships with Windows 10+
   and macOS/Linux by default.
+
+To start this alongside the Cosmos DB/Service Bus emulators in one step, see
+[scripts\setup-podman-local-stack.bat](../setup-podman-local-stack.bat) instead of running the
+command below directly.
 
 ## Quick start
 
@@ -70,9 +77,9 @@ Schema Registry container itself, so there'd be nothing gained by keeping the Sc
 Registry container around separately. If you want a genuinely empty broker (no persisted
 topics/messages/offsets/schemas), delete the volume yourself first - see
 [Cleanup](#cleanup). To change the local credentials themselves, edit
-`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`/`SCHEMA_REGISTRY_USERNAME`/
-`SCHEMA_REGISTRY_PASSWORD` near the top of [setup-podman-kafka.bat](setup-podman-kafka.bat)
-- the same steps it runs are broken out individually below.
+[config/credentials.json](config/credentials.json) - see
+[Configuring credentials](#configuring-credentials) below - the same steps the script runs
+are broken out individually further down.
 
 Kafka UI and Kafka REST Proxy here each run as their own container (not sharing a Pod
 network namespace the way [kafka-pod.yaml](kafka-pod.yaml)'s does - see that section
@@ -82,6 +89,97 @@ below), which needs a dedicated **third Kafka listener**, `SASL_PLAINTEXT_NET` o
 `localhost:9092`, and "localhost" from inside either container isn't the broker. See the
 comments in [setup-podman-kafka.bat](setup-podman-kafka.bat)'s Kafka broker section for the
 full explanation if you're adapting this elsewhere.
+
+## Configuring ports
+
+Every host-side port `setup-podman-kafka.bat` publishes - the broker, Schema Registry,
+Kafka UI, Kafka REST Proxy, and the `events-api.ps1` wrapper - comes from
+[../ports.env](../ports.env), a plain `KEY=VALUE` file (one setting per line, `#` for
+comments) **shared with**
+[../local-emulators/setup-podman-emulators.bat](../local-emulators/setup-podman-emulators.bat)
+(see [../local-emulators/README.md](../local-emulators/README.md)'s own "Configuring ports"
+section for that script's keys in the same file):
+
+```
+KAFKA_BROKER_PORT=9092
+SCHEMA_REGISTRY_PORT=8085
+KAFKA_UI_PORT=8090
+KAFKA_REST_PORT=8086
+EVENTS_API_PORT=8087
+```
+
+Edit a value there and re-run `setup-podman-kafka.bat` to remap it - useful when a default
+already conflicts with something else already running on your machine (another local Kafka
+broker, a different container stack, etc). The script falls back to the defaults above for
+any key that's missing or if the file itself is absent, so `ports.env` only needs to declare
+the values you actually want to change.
+
+Only the **host-side** mapping is configurable - each container's own internal port stays
+fixed, so this only ever helps with port conflicts on your machine, not anything
+container-to-container (Kafka UI/REST Proxy still reach the broker over the in-network
+`SASL_PLAINTEXT_NET` listener on its fixed port 9093, regardless of `KAFKA_BROKER_PORT`).
+`KAFKA_BROKER_PORT` is the one exception worth calling out: changing it also updates
+`KAFKA_ADVERTISED_LISTENERS`' `SASL_PLAINTEXT_HOST` value to match, since that's the address
+Kafka hands back to a client on its first connect for every subsequent reconnect - a stale
+value there would silently send clients back to the old host port.
+
+**Changing a port here does not update `appsettings.json`/`appsettings.Development.json` or
+your user-secrets** - if you move `Kafka:BootstrapServers`/`Kafka:SchemaRegistryUrl` onto a
+non-default port, update those to match yourself, or the app will keep pointing at the old
+one. The script's own console output at the end of a run always reflects the ports actually
+in effect, so treat that as the source of truth if you're unsure what to put in config.
+
+This only applies to the `.bat` script - the `kube play` ([kafka-pod.yaml](kafka-pod.yaml))
+and custom-image setups below still use their own fixed ports; see those sections' own
+`podman run`/`kube play` commands if you need to remap a port there instead.
+
+## Configuring credentials
+
+The broker's SASL/PLAIN username/password, Schema Registry's HTTP Basic Auth username/
+password, and the Nexus deduplication mock's client id/secret all come from
+[config/credentials.json](config/credentials.json):
+
+```json
+{
+  "Kafka": {
+    "Username": "kafkaclient",
+    "Password": "kafkaclient-secret",
+    "SchemaRegistryApiKey": "schemaregistry",
+    "SchemaRegistryApiSecret": "schemaregistry-secret"
+  },
+  "Nexus": {
+    "Deduplication": {
+      "ClientId": "iis-wms-consumer",
+      "ClientSecret": "iis-wms-consumer-secret"
+    }
+  }
+}
+```
+
+Field names match the real `appsettings.json`/`appsettings.Development.json` config paths
+1:1 (`Kafka:Username`/`Password`/`SchemaRegistryApiKey`/`SchemaRegistryApiSecret`,
+`Nexus:Deduplication:ClientId`/`ClientSecret`) - there's no separate naming scheme to
+translate when copying a value into user-secrets. Edit a value and re-run
+`setup-podman-kafka.bat` to pick it up (it regenerates the JAAS/properties files under
+`secrets\` - see [Generate local credential files](#1-generate-local-credential-files) below
+- and recreates the broker/Schema Registry containers on every run regardless, so a
+credential change always takes effect). The script falls back to the defaults shown above
+for any key that's missing or if the file itself is absent, so `credentials.json` only needs
+to declare the values you actually want to change.
+
+**`Nexus:Deduplication:ClientId`/`ClientSecret` aren't enforced by anything this script
+starts** - `events-api.ps1`'s Nexus mock deliberately accepts any `client_id`/`client_secret`
+on `POST /oauth/token` (it's a local testing double, not a security boundary - see
+"Nexus deduplication mock" below). They're recorded here purely so this file is the one
+place documenting the value `appsettings.Development.json`/user-secrets should actually
+carry for `Nexus:Deduplication:ClientId`/`ClientSecret` to match what a real Nexus
+environment would issue.
+
+Like [ports.env](../ports.env), this file is local-only, throwaway credentials - never the
+real Confluent Cloud/Nexus ones from `appsettings.json` - so it's safe to commit and safe to
+edit freely. This only applies to the `.bat` script; the `kube play`/custom-image setups
+below bake their own copies of these same default values in inline instead (see their own
+sections) and would need editing separately if you want different credentials there too.
 
 ### Push a message via curl (Kafka REST Proxy)
 
@@ -801,8 +899,10 @@ SchemaRegistry-Props {
 schemaregistry: schemaregistry-secret,admin
 ```
 
-(`setup-podman-kafka.bat` generates all four of these for you from its
-`KAFKA_SASL_USERNAME`/etc. variables - the manual step above just shows what it writes.)
+(`setup-podman-kafka.bat` generates all four of these for you from
+[config/credentials.json](config/credentials.json) - see
+[Configuring credentials](#configuring-credentials) above - the manual step above just shows
+what it writes.)
 
 ### 2. Create a network
 

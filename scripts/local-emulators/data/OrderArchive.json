@@ -1,0 +1,35 @@
+[
+  {
+    "id": "InventoryStateChanged_c1a2b3d4-0001",
+    "category": "InventoryStateChanged",
+    "orderDetail": {
+      "warehouseId": "WH-EAST-01",
+      "sku": "SKU-1001",
+      "onHandQuantity": 250,
+      "eventType": "Adjusted"
+    },
+    "timestamp": "2026-07-15T14:30:05Z"
+  },
+  {
+    "id": "InventoryAdjusted_c1a2b3d4-0002",
+    "category": "InventoryAdjusted",
+    "orderDetail": {
+      "warehouseId": "WH-WEST-02",
+      "sku": "SKU-2002",
+      "adjustmentQuantity": -5,
+      "reason": "CycleCount"
+    },
+    "timestamp": "2026-07-14T11:05:00Z"
+  },
+  {
+    "id": "InventoryStateChanged_c1a2b3d4-0003",
+    "category": "InventoryStateChanged",
+    "orderDetail": {
+      "warehouseId": "WH-EAST-01",
+      "sku": "SKU-3003",
+      "onHandQuantity": 0,
+      "eventType": "Reserved"
+    },
+    "timestamp": "2026-07-14T18:45:05Z"
+  }
+]

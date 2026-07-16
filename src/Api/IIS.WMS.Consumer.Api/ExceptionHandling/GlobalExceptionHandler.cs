@@ -40,7 +40,9 @@ public sealed class GlobalExceptionHandler(
         var (status, title) = exception switch
         {
             ValidationException => (StatusCodes.Status400BadRequest, "Validation failed"),
+            TemplateCompilationException => (StatusCodes.Status400BadRequest, "Validation template compilation failed"),
             NotFoundException => (StatusCodes.Status404NotFound, "Resource not found"),
+            ConflictException => (StatusCodes.Status409Conflict, "Resource already exists"),
             InsufficientStockException => (StatusCodes.Status409Conflict, "Insufficient stock"),
             ConcurrencyException => (StatusCodes.Status409Conflict, "Concurrent modification"),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred"),
@@ -60,16 +62,26 @@ public sealed class GlobalExceptionHandler(
 
         httpContext.Response.StatusCode = status;
 
+        var problemDetails = new ProblemDetails
+        {
+            Status = status,
+            Title = title,
+            Extensions = { ["correlationId"] = correlationContext.CorrelationId },
+        };
+
+        // Compiler diagnostics are the whole point of the 400 - without them the caller can't fix
+        // their template's code. Safe to return: they describe the caller's own submitted code, not
+        // this service's internals, unlike the general no-exception-details-to-the-client rule.
+        if (exception is TemplateCompilationException compilationException)
+        {
+            problemDetails.Extensions["errors"] = compilationException.Errors;
+        }
+
         return await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
         {
             HttpContext = httpContext,
             Exception = exception,
-            ProblemDetails = new ProblemDetails
-            {
-                Status = status,
-                Title = title,
-                Extensions = { ["correlationId"] = correlationContext.CorrelationId },
-            },
+            ProblemDetails = problemDetails,
         });
     }
 }

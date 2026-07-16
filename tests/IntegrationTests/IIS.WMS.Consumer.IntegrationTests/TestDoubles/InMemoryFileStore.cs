@@ -32,4 +32,25 @@ public sealed class InMemoryFileStore : IFileStore
 
         return Task.FromResult<Stream>(new MemoryStream(bytes));
     }
+
+    public Task<bool> ExistsAsync(string containerName, string blobName, CancellationToken cancellationToken = default) =>
+        Task.FromResult(blobs.ContainsKey($"{containerName}/{blobName}"));
+
+    public Task<bool> DeleteAsync(string containerName, string blobName, CancellationToken cancellationToken = default) =>
+        Task.FromResult(blobs.TryRemove($"{containerName}/{blobName}", out _));
+
+    public Task<IReadOnlyList<string>> ListAsync(string containerName, string? prefix = null, CancellationToken cancellationToken = default)
+    {
+        // Keys are stored as {containerName}/{blobName}, so strip the container segment back off -
+        // ListAsync's contract returns blob names within the container, not full storage paths.
+        var containerPrefix = $"{containerName}/";
+
+        IReadOnlyList<string> names = blobs.Keys
+            .Where(key => key.StartsWith(containerPrefix, StringComparison.Ordinal))
+            .Select(key => key[containerPrefix.Length..])
+            .Where(name => string.IsNullOrEmpty(prefix) || name.StartsWith(prefix, StringComparison.Ordinal))
+            .ToArray();
+
+        return Task.FromResult(names);
+    }
 }

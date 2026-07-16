@@ -26,6 +26,15 @@ public sealed class BlobStorageOptions
     public string ConsumerDeadLetterContainerName { get; init; } = "consumer-dead-letter";
 
     /// <summary>
+    /// Hot-tier container holding the event validation templates - one <c>{SchemaName}/{EventType}.cs</c>
+    /// C# script blob per schema/event type, managed through the event-validation-templates API and
+    /// compiled/executed by the Kafka consumer's dynamic-validation step right after each schema
+    /// handler's own <c>ValidateAsync</c>. Configurable per environment. Lives in the <see cref="Hot"/>
+    /// storage account - templates are read on the consume hot path.
+    /// </summary>
+    public string ValidationTemplateContainerName { get; init; } = "validation-templates";
+
+    /// <summary>
     /// Hot-tier Blob Storage account - <c>imports</c>/<c>exports</c> and <see cref="ConsumerDeadLetterContainerName"/>
     /// live here. A distinct account from <see cref="Cold"/>, not just a distinct container, since hot
     /// and cold data have different access-frequency and retention needs and this deployment's two

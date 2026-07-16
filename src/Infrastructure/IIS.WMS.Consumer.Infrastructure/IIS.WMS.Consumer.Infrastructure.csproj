@@ -7,6 +7,7 @@
     <PackageReference Include="Azure.Storage.Blobs" />
     <PackageReference Include="Confluent.Kafka" />
     <PackageReference Include="Confluent.SchemaRegistry.Serdes.Avro" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" />
     <PackageReference Include="Microsoft.Azure.Cosmos" />
     <PackageReference Include="NexusFacades.Common.AvroSchemas" />
     <PackageReference Include="NexusFacades.Common.Core" />

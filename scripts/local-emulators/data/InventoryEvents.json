@@ -1,0 +1,37 @@
+[
+  {
+    "id": "WH-EAST-01:SKU-1001",
+    "warehouseId": "WH-EAST-01",
+    "sku": "SKU-1001",
+    "category": "WH-EAST-01:SKU-1001",
+    "onHandQuantity": 250,
+    "activeReservations": {
+      "RES-9001": 10
+    },
+    "createdUtc": "2026-07-01T08:00:00Z",
+    "modifiedUtc": "2026-07-15T14:30:00Z"
+  },
+  {
+    "id": "WH-WEST-02:SKU-2002",
+    "warehouseId": "WH-WEST-02",
+    "sku": "SKU-2002",
+    "category": "WH-WEST-02:SKU-2002",
+    "onHandQuantity": 75,
+    "activeReservations": {},
+    "createdUtc": "2026-07-05T09:15:00Z",
+    "modifiedUtc": "2026-07-05T09:15:00Z"
+  },
+  {
+    "id": "WH-EAST-01:SKU-3003",
+    "warehouseId": "WH-EAST-01",
+    "sku": "SKU-3003",
+    "category": "WH-EAST-01:SKU-3003",
+    "onHandQuantity": 0,
+    "activeReservations": {
+      "RES-9002": 5,
+      "RES-9003": 3
+    },
+    "createdUtc": "2026-06-20T10:00:00Z",
+    "modifiedUtc": "2026-07-14T18:45:00Z"
+  }
+]

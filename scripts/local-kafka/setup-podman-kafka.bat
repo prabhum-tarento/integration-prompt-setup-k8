@@ -4,7 +4,8 @@ REM both requiring username/password (SASL/PLAIN on the broker, HTTP Basic on th
 REM matching the credentialed shape of Kafka:Username/Password/SchemaRegistryApiKey/
 REM SchemaRegistryApiSecret in src/Api/IIS.WMS.Consumer.Api/appsettings.json, unlike the
 REM unauthenticated appsettings.Developments.json profile. BootstrapServers/SchemaRegistryUrl
-REM still point at localhost:9092 / http://localhost:8085.
+REM point at localhost:9092 / http://localhost:8085 by default - see ..\ports.env below to remap
+REM any host port this script publishes.
 REM
 REM Credentials are generated into JAAS/properties files (see %CONFIG_DIR% below) and mounted
 REM into the containers, rather than passed as inline -e JAAS strings - avoids the nested
@@ -12,11 +13,16 @@ REM quote-escaping that a PlainLoginModule config string (embedded quotes, space
 REM would otherwise need inside a single cmd.exe argument.
 REM
 REM Usage: setup-podman-kafka.bat
-REM Edit KAFKA_SASL_USERNAME/PASSWORD and SCHEMA_REGISTRY_USERNAME/PASSWORD below to change
-REM the local credentials themselves.
+REM Edit config\credentials.json to change the local Kafka/Schema Registry/Nexus deduplication
+REM credentials - see that file's own section further below. Edit ..\ports.env (shared with
+REM scripts\local-emulators\setup-podman-emulators.bat) to change any host-side port.
 REM
 REM Also registers this app's default topics/consumer-groups/Avro schema via
 REM register-defaults.bat, so Kafka UI (http://localhost:8090) shows them immediately.
+REM
+REM Once everything is up, opens a one-page HTML summary of every port/credential across BOTH
+REM Podman stacks (this one and scripts\local-emulators's) in your default browser - see
+REM ..\generate-local-stack-summary.ps1 and its own "Opening local stack summary" step below.
 REM
 REM Starts Kafka UI too, pre-wired to this broker/registry - it runs as its own container
 REM on this script's Podman network, not sharing a Pod network namespace the way
@@ -89,12 +95,39 @@ set SCHEMA_REGISTRY_CONTAINER=iis-wms-schema-registry
 set KAFKA_UI_CONTAINER=iis-wms-kafka-ui
 set KAFKA_REST_CONTAINER=iis-wms-kafka-rest
 set EVENTS_API_CONTAINER=iis-wms-events-api
+REM Serves generate-local-stack-summary.ps1's generated HTML as http://localhost instead of
+REM file:// - see the "Opening local stack summary" step below and dashboard-server.ps1's own
+REM header comment for why. Reuses EVENTS_API_IMAGE (pwsh already bundled) - no new image pulled.
+set DASHBOARD_CONTAINER=iis-wms-dashboard
 REM Bind-mounted into both register-defaults.bat (as its own output\ subfolder, where it
 REM writes event-map.json - see that script) and the events-api.ps1 container (read-write,
 REM as -MappingFile's source) - this is how the mapping gets from one to the other without
 REM the events-api.ps1 container ever needing events\ mounted in itself. Generated, not
 REM meant to be committed - see .gitignore.
 set EVENTS_API_OUTPUT_DIR=%~dp0registration\output
+
+REM --- Host ports (..\ports.env, shared with scripts\local-emulators\setup-podman-emulators.bat) ---
+REM Defaults set first so a missing file, or one missing a key, still leaves every port usable -
+REM ports.env only needs to declare the keys you want to override. See that file's own header
+REM comment and README.md's "Configuring ports" section for what each port is used for and why
+REM changing one here does not also update appsettings.json/user-secrets. Every container's own
+REM internal port stays fixed (only the host-side mapping is configurable) - except
+REM KAFKA_ADVERTISED_LISTENERS below, which has to be kept in sync with KAFKA_BROKER_PORT: it's the
+REM address Kafka hands back to a client on its first connect for every subsequent reconnect, so a
+REM stale value there would send clients back to the old host port regardless of the current -p
+REM mapping.
+set KAFKA_BROKER_PORT=9092
+set SCHEMA_REGISTRY_PORT=8085
+set KAFKA_UI_PORT=8090
+set KAFKA_REST_PORT=8086
+set EVENTS_API_PORT=8087
+set DASHBOARD_PORT=8098
+set PORTS_FILE=%~dp0..\ports.env
+if exist "%PORTS_FILE%" (
+    for /f "usebackq eol=# tokens=1,2 delims==" %%A in ("%PORTS_FILE%") do set "%%A=%%B"
+) else (
+    echo %PORTS_FILE% not found - using built-in default ports.
+)
 REM Named Podman volume for the broker's own log dir (/var/lib/kafka/data - topics,
 REM messages, consumer offsets, and the KRaft metadata log) - unlike the broker CONTAINER
 REM (always removed and recreated below), a named volume survives "podman rm", so this data
@@ -104,12 +137,31 @@ REM topic), not in the Schema Registry container.
 set KAFKA_DATA_VOLUME=iis-wms-kafka-data
 set CONFIG_DIR=%~dp0secrets
 
-REM Local-only credentials - not read from Key Vault/user-secrets, this stack never leaves
-REM your machine. Change these if you want different local values.
+REM --- Local-only credentials (config\credentials.json) ---
+REM Not read from Key Vault/user-secrets - this stack never leaves your machine, same
+REM reasoning as ..\ports.env. Defaults set first so a missing file, or one missing a key,
+REM still leaves every credential usable; edit config\credentials.json (then re-run this
+REM script) for different local values instead of editing these defaults directly. Field
+REM names match the real appsettings.json config paths 1:1 (Kafka:Username/Password/
+REM SchemaRegistryApiKey/SchemaRegistryApiSecret, Nexus:Deduplication:ClientId/ClientSecret)
+REM so there's no separate naming scheme to remember when copying a value into user-secrets.
+REM DEDUP_CLIENT_ID/SECRET aren't consumed by anything this script starts (events-api.ps1's
+REM Nexus mock deliberately accepts any client_id/client_secret - see its own header comment
+REM under "Nexus deduplication mock") - they're recorded here and echoed at the end purely so
+REM this is the one place documenting the value appsettings.Development.json/user-secrets
+REM should actually carry for Nexus:Deduplication:ClientId/ClientSecret.
 set KAFKA_SASL_USERNAME=kafkaclient
 set KAFKA_SASL_PASSWORD=kafkaclient-secret
 set SCHEMA_REGISTRY_USERNAME=schemaregistry
 set SCHEMA_REGISTRY_PASSWORD=schemaregistry-secret
+set DEDUP_CLIENT_ID=iis-wms-consumer
+set DEDUP_CLIENT_SECRET=iis-wms-consumer-secret
+set CREDENTIALS_FILE=%~dp0config\credentials.json
+if exist "%CREDENTIALS_FILE%" (
+    for /f "usebackq tokens=1,2 delims==" %%A in (`powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $c = Get-Content -Raw '%CREDENTIALS_FILE%' | ConvertFrom-Json; Write-Output ('KAFKA_SASL_USERNAME=' + $c.Kafka.Username); Write-Output ('KAFKA_SASL_PASSWORD=' + $c.Kafka.Password); Write-Output ('SCHEMA_REGISTRY_USERNAME=' + $c.Kafka.SchemaRegistryApiKey); Write-Output ('SCHEMA_REGISTRY_PASSWORD=' + $c.Kafka.SchemaRegistryApiSecret); Write-Output ('DEDUP_CLIENT_ID=' + $c.Nexus.Deduplication.ClientId); Write-Output ('DEDUP_CLIENT_SECRET=' + $c.Nexus.Deduplication.ClientSecret)"`) do set "%%A=%%B"
+) else (
+    echo %CREDENTIALS_FILE% not found - using built-in default credentials.
+)
 
 echo(
 echo === Checking Podman ===
@@ -242,7 +294,7 @@ REM advertised address - and "localhost" from inside Kafka UI's own container me
 REM its own loopback, not the broker. kafka-pod.yaml's containers don't hit this
 REM because they share one Pod's network namespace, where "localhost" really is the
 REM same place for everyone; these are separate containers, so it isn't here.
-podman run -d --name %KAFKA_CONTAINER% --network %NETWORK_NAME% -p 9092:9092 ^
+podman run -d --name %KAFKA_CONTAINER% --network %NETWORK_NAME% -p %KAFKA_BROKER_PORT%:9092 ^
     -v "%CONFIG_DIR%:/etc/kafka/secrets:Z" ^
     -v %KAFKA_DATA_VOLUME%:/var/lib/kafka/data ^
     -e KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf ^
@@ -250,7 +302,7 @@ podman run -d --name %KAFKA_CONTAINER% --network %NETWORK_NAME% -p 9092:9092 ^
     -e CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk ^
     -e KAFKA_PROCESS_ROLES=broker,controller ^
     -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,SASL_PLAINTEXT_HOST://0.0.0.0:9092,SASL_PLAINTEXT_NET://0.0.0.0:9093 ^
-    -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://%KAFKA_CONTAINER%:29092,SASL_PLAINTEXT_HOST://localhost:9092,SASL_PLAINTEXT_NET://%KAFKA_CONTAINER%:9093 ^
+    -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://%KAFKA_CONTAINER%:29092,SASL_PLAINTEXT_HOST://localhost:%KAFKA_BROKER_PORT%,SASL_PLAINTEXT_NET://%KAFKA_CONTAINER%:9093 ^
     -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT_HOST:SASL_PLAINTEXT,SASL_PLAINTEXT_NET:SASL_PLAINTEXT ^
     -e KAFKA_SASL_ENABLED_MECHANISMS=PLAIN ^
     -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER ^
@@ -268,7 +320,7 @@ REM schema) lives entirely in the broker's "_schemas" topic (now persisted via
 REM %KAFKA_DATA_VOLUME%, not this container), so a fresh Schema Registry container picks up
 REM every previously registered schema from that topic the moment it starts.
 podman rm -f %SCHEMA_REGISTRY_CONTAINER% >nul 2>&1
-podman run -d --name %SCHEMA_REGISTRY_CONTAINER% --network %NETWORK_NAME% -p 8085:8081 ^
+podman run -d --name %SCHEMA_REGISTRY_CONTAINER% --network %NETWORK_NAME% -p %SCHEMA_REGISTRY_PORT%:8081 ^
     -v "%CONFIG_DIR%:/etc/schema-registry/secrets:Z" ^
     -e SCHEMA_REGISTRY_OPTS=-Djava.security.auth.login.config=/etc/schema-registry/secrets/schema-registry.jaas ^
     -e SCHEMA_REGISTRY_AUTHENTICATION_METHOD=BASIC ^
@@ -285,7 +337,7 @@ REM Always removed and recreated too - purely stateless (no data of its own wort
 REM preserving), so there's no reason not to guarantee it's always current, same as REST
 REM Proxy below.
 podman rm -f %KAFKA_UI_CONTAINER% >nul 2>&1
-podman run -d --name %KAFKA_UI_CONTAINER% --network %NETWORK_NAME% -p 8090:8080 ^
+podman run -d --name %KAFKA_UI_CONTAINER% --network %NETWORK_NAME% -p %KAFKA_UI_PORT%:8080 ^
     --env-file "%CONFIG_DIR%\kafka-ui.env" ^
     %KAFKA_UI_IMAGE% || exit /b 1
 
@@ -293,7 +345,7 @@ echo(
 echo === Kafka REST Proxy ===
 REM Always (re)created fresh, same reasoning as Kafka UI above.
 podman rm -f %KAFKA_REST_CONTAINER% >nul 2>&1
-podman run -d --name %KAFKA_REST_CONTAINER% --network %NETWORK_NAME% -p 8086:8082 ^
+podman run -d --name %KAFKA_REST_CONTAINER% --network %NETWORK_NAME% -p %KAFKA_REST_PORT%:8082 ^
     --env-file "%CONFIG_DIR%\kafka-rest.env" ^
     %KAFKA_REST_IMAGE% || exit /b 1
 
@@ -313,15 +365,54 @@ goto wait_broker
 :broker_ready
 echo Broker is ready.
 
-call "%~dp0registration\register-defaults.bat" %KAFKA_CONTAINER%
+call "%~dp0registration\register-defaults.bat" %KAFKA_CONTAINER% %SCHEMA_REGISTRY_PORT% %KAFKA_REST_PORT%
 if errorlevel 1 exit /b 1
 
 echo(
-echo Bootstrap servers:  localhost:9092   (Kafka:Username=%KAFKA_SASL_USERNAME%  Kafka:Password=%KAFKA_SASL_PASSWORD%)
-echo Schema Registry:    http://localhost:8085   (Kafka:SchemaRegistryApiKey=%SCHEMA_REGISTRY_USERNAME%  Kafka:SchemaRegistryApiSecret=%SCHEMA_REGISTRY_PASSWORD%)
+echo Bootstrap servers:  localhost:%KAFKA_BROKER_PORT%   (Kafka:Username=%KAFKA_SASL_USERNAME%  Kafka:Password=%KAFKA_SASL_PASSWORD%)
+echo Schema Registry:    http://localhost:%SCHEMA_REGISTRY_PORT%   (Kafka:SchemaRegistryApiKey=%SCHEMA_REGISTRY_USERNAME%  Kafka:SchemaRegistryApiSecret=%SCHEMA_REGISTRY_PASSWORD%)
 echo Kafka:Protocol should be SaslSsl -^> SaslPlaintext locally (no TLS here), Kafka:AuthenticationMode=Plain.
-echo Kafka UI: http://localhost:8090
-echo Kafka REST Proxy (push messages via curl): http://localhost:8086 - see README.md "Push a message via curl"
+echo Nexus:Deduplication:ClientId=%DEDUP_CLIENT_ID%  Nexus:Deduplication:ClientSecret=%DEDUP_CLIENT_SECRET%  (only enforced by the real Nexus API, not events-api.ps1's mock - see config\credentials.json)
+echo Kafka UI: http://localhost:%KAFKA_UI_PORT%
+echo Kafka REST Proxy (push messages via curl): http://localhost:%KAFKA_REST_PORT% - see README.md "Push a message via curl"
+
+echo(
+echo === Opening local stack summary (ports + credentials) in your browser ===
+REM Everything above (and, when this script was launched via
+REM setup-podman-local-stack.bat, the Cosmos DB/Service Bus/Azurite emulators too) is up and
+REM registered by this point - generate-local-stack-summary.ps1 (one level up, shared - it
+REM independently reads ..\ports.env plus both stacks' own config\*.json files, so it needs
+REM nothing passed in from here beyond -OutFile/-NoLaunch) builds one HTML page listing every
+REM port/credential across both stacks. -NoLaunch here because THIS script opens the browser
+REM instead, once the dashboard-server.ps1 container below is actually up - see that script's own
+REM header comment for why the old plain Start-Process-on-the-file approach broke its refresh
+REM (&#x21bb;) buttons (Chromium's Private Network Access check). -OutFile is a fixed, known path
+REM (not generate-local-stack-summary.ps1's own $env:TEMP default) so the container mount below and
+REM this script agree on it explicitly rather than relying on both sides independently landing on
+REM the same default.
+REM
+REM Non-fatal if any of this fails (e.g. no default browser configured, port already in use) -
+REM errorlevel is deliberately not checked below, since a summary page failing to open shouldn't
+REM block the actual stack from finishing setup.
+set DASHBOARD_HTML=%TEMP%\iis-wms-local-stack-summary.html
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\generate-local-stack-summary.ps1" -OutFile "%DASHBOARD_HTML%" -NoLaunch
+
+REM Re-created fresh on every run, like every other container above - see this file's own header
+REM comment on why. Long-running (-d, not --rm) so it keeps serving %DASHBOARD_HTML% across browser
+REM reloads without needing this script's console to stay open - re-running
+REM generate-local-stack-summary.ps1 alone (e.g. via this same -OutFile path) refreshes its content
+REM with no restart needed, since dashboard-server.ps1 re-reads the file on every request. No
+REM --network - it never talks to any other container; the browser's own refresh-button fetches go
+REM straight to the emulators' host-published ports. -ListenHost + is required for the same reason
+REM the events-api.ps1 container below needs it - see that container's own comment just below.
+podman rm -f %DASHBOARD_CONTAINER% >nul 2>&1
+podman run -d --name %DASHBOARD_CONTAINER% -p %DASHBOARD_PORT%:%DASHBOARD_PORT% ^
+    -v "%DASHBOARD_HTML%:/app/dashboard.html:ro,Z" ^
+    -v "%~dp0..\dashboard-server.ps1:/app/dashboard-server.ps1:ro,Z" ^
+    %EVENTS_API_IMAGE% pwsh -NoProfile -File /app/dashboard-server.ps1 ^
+    -FilePath /app/dashboard.html -Port %DASHBOARD_PORT% -ListenHost +
+
+start "" "http://localhost:%DASHBOARD_PORT%/"
 
 echo(
 echo === events-api.ps1 output directory ===
@@ -338,13 +429,13 @@ REM running again.
 REM
 REM Runs on %NETWORK_NAME% like every other container here, so it reaches Schema
 REM Registry/Kafka REST Proxy by CONTAINER name on their IN-NETWORK ports (8081/8082, not
-REM the host-published 8085/8086 - "localhost" from inside this container means its own
-REM loopback, not those sibling containers, same reasoning as the Kafka broker section
-REM above). -ListenHost + (HttpListener's wildcard-all-interfaces syntax) is required here,
-REM unlike the script's own "localhost" default: a service bound only to loopback never sees
-REM traffic arriving through -p 8087:8087's published port - see events-api.ps1's -ListenHost
-REM doc comment. Only two things are mounted in: the script itself (read-only) and
-REM %EVENTS_API_OUTPUT_DIR% (read-write) - events\ itself is NOT mounted here at all;
+REM the host-published %SCHEMA_REGISTRY_PORT%/%KAFKA_REST_PORT% - "localhost" from inside this
+REM container means its own loopback, not those sibling containers, same reasoning as the Kafka
+REM broker section above). -ListenHost + (HttpListener's wildcard-all-interfaces syntax) is
+REM required here, unlike the script's own "localhost" default: a service bound only to loopback
+REM never sees traffic arriving through -p %EVENTS_API_PORT%:%EVENTS_API_PORT%'s published port -
+REM see events-api.ps1's -ListenHost doc comment. Only two things are mounted in: the script
+REM itself (read-only) and %EVENTS_API_OUTPUT_DIR% (read-write) - events\ itself is NOT mounted here at all;
 REM -MappingFile instead points at event-map.json, which register-defaults.bat (called
 REM above, before this container starts) already wrote into that same output directory. See
 REM events-api.ps1's header comment for why reading that prepared file is preferred over
@@ -354,11 +445,11 @@ REM call, on a failed produce) is a no-op in here - this plain dotnet/sdk image 
 REM CLI/socket access - already handled gracefully by that function's own try/catch, so a
 REM failed produce just won't show container logs.
 podman rm -f %EVENTS_API_CONTAINER% >nul 2>&1
-podman run --rm --name %EVENTS_API_CONTAINER% --network %NETWORK_NAME% -p 8087:8087 ^
+podman run --rm --name %EVENTS_API_CONTAINER% --network %NETWORK_NAME% -p %EVENTS_API_PORT%:%EVENTS_API_PORT% ^
     -v "%~dp0registration\events-api.ps1:/app/events-api.ps1:ro,Z" ^
     -v "%EVENTS_API_OUTPUT_DIR%:/app/output:Z" ^
     %EVENTS_API_IMAGE% pwsh -NoProfile -File /app/events-api.ps1 ^
-    -Port 8087 ^
+    -Port %EVENTS_API_PORT% ^
     -ListenHost + ^
     -RestProxyUrl "http://%KAFKA_REST_CONTAINER%:8082" ^
     -SchemaRegistryUrl "http://%SCHEMA_REGISTRY_CONTAINER%:8081" ^

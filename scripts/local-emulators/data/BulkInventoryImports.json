@@ -1,0 +1,29 @@
+[
+  {
+    "id": "WH-EAST-01:SKU-1001",
+    "warehouseId": "WH-EAST-01",
+    "sku": "SKU-1001",
+    "category": "WH-EAST-01:SKU-1001",
+    "quantity": 250,
+    "sourceSystem": "LegacyWMS",
+    "sourceLastUpdatedUtc": "2026-07-15T06:00:00Z"
+  },
+  {
+    "id": "WH-WEST-02:SKU-2002",
+    "warehouseId": "WH-WEST-02",
+    "sku": "SKU-2002",
+    "category": "WH-WEST-02:SKU-2002",
+    "quantity": 80,
+    "sourceSystem": "LegacyWMS",
+    "sourceLastUpdatedUtc": "2026-07-15T06:00:00Z"
+  },
+  {
+    "id": "WH-EAST-01:SKU-3003",
+    "warehouseId": "WH-EAST-01",
+    "sku": "SKU-3003",
+    "category": "WH-EAST-01:SKU-3003",
+    "quantity": 3,
+    "sourceSystem": "LegacyWMS",
+    "sourceLastUpdatedUtc": "2026-07-14T18:00:00Z"
+  }
+]

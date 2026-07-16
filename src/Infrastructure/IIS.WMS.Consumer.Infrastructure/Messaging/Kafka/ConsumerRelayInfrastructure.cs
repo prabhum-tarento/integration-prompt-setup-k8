@@ -1,6 +1,7 @@
 using Azure.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure.BlobStorage;
+using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Polly.Registry;
@@ -30,6 +31,7 @@ public sealed class ConsumerRelayInfrastructure(
     [FromKeyedServices(BlobStorageServiceCollectionExtensions.ColdTierKey)] IFileStore coldFileStore,
     IOptions<BlobStorageOptions> blobStorageOptions,
     IDeduplicationService deduplicationService,
+    IDynamicEventValidator dynamicEventValidator,
     IServiceScopeFactory scopeFactory,
     IOptions<ApplicationOptions> applicationOptions)
 {
@@ -50,6 +52,9 @@ public sealed class ConsumerRelayInfrastructure(
 
     /// <summary>Checks each message against the Nexus deduplication service.</summary>
     public IDeduplicationService DeduplicationService { get; } = deduplicationService;
+
+    /// <summary>Runs the schema/event type's blob-stored validation template (if one exists) against each message, right after the schema handler's own <c>ValidateAsync</c>.</summary>
+    public IDynamicEventValidator DynamicEventValidator { get; } = dynamicEventValidator;
 
     /// <summary>Creates the per-message DI scope used to resolve <see cref="Application.Common.ICorrelationContext"/>, since the hosted service itself is a singleton but that service is scoped.</summary>
     public IServiceScopeFactory ScopeFactory { get; } = scopeFactory;
