@@ -52,6 +52,27 @@ belongs in one of those files instead — don't duplicate it.
 * Validate inputs and fail fast at the boundary (Api request binding,
   message deserialization) rather than deep inside a call chain.
 
+## Method design
+
+* Aim for 10–20 lines of executable code per method; treat 40+ lines as a
+  signal to split it, unless there's a clear technical reason not to (a
+  large switch expression, generated code, a performance-critical
+  algorithm). Line count is a signal, not the goal — prioritize reducing
+  cognitive complexity over hitting a specific number.
+* Prefer three or fewer parameters. Beyond that, introduce a request/options
+  object or a domain model rather than adding a fourth parameter.
+* Minimize nesting with guard clauses and early returns; three nested levels
+  is the practical ceiling. Avoid an `else` block after a `return`.
+* Keep every statement in a method at one level of abstraction — a
+  high-level orchestration method delegates implementation detail to
+  well-named helpers rather than mixing business rules with low-level
+  detail inline.
+* Single Responsibility at the method level follows the same SRP
+  definition [dotnet-architecture-good-practices.instructions.md](dotnet-architecture-good-practices.instructions.md)
+  uses at the class level — this file doesn't restate it. A method that
+  validates, mutates state, and logs has more than one reason to change;
+  split it.
+
 ## Naming conventions
 
 * PascalCase for type names, method names, and public members.

@@ -19,13 +19,30 @@ public sealed class VirtualServiceBusBroker
     private readonly ConcurrentDictionary<string, Func<ServiceBusReceivedMessage, CancellationToken, Task>> routes =
         new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly ConcurrentQueue<(string QueueName, ServiceBusMessage Message)> dispatched = new();
+
+    /// <summary>
+    /// Every message dispatched through this broker so far, in send order, alongside the queue it was
+    /// sent to - recorded regardless of whether a handler is registered for that queue via
+    /// <see cref="RegisterQueue"/>, so a test asserting on what a publisher sent doesn't need to stand
+    /// up a fake consumer just to observe it.
+    /// </summary>
+    public IReadOnlyList<(string QueueName, ServiceBusMessage Message)> Dispatched => [.. dispatched];
+
     /// <summary>Registers <paramref name="handler"/> as the consumer for <paramref name="queueName"/> - a later <see cref="DispatchAsync"/> for the same name invokes it directly, in-process.</summary>
     public void RegisterQueue(string queueName, Func<ServiceBusReceivedMessage, CancellationToken, Task> handler) =>
         routes[queueName] = handler;
 
-    /// <summary>Converts <paramref name="message"/> into a <see cref="ServiceBusReceivedMessage"/> and hands it to whatever's registered for <paramref name="queueName"/> - a no-op if nothing is (mirrors a real broker with no active consumer on that queue).</summary>
+    /// <summary>
+    /// Records <paramref name="message"/> in <see cref="Dispatched"/>, then converts it into a
+    /// <see cref="ServiceBusReceivedMessage"/> and hands it to whatever's registered for
+    /// <paramref name="queueName"/> - the second step is a no-op if nothing is (mirrors a real broker
+    /// with no active consumer on that queue).
+    /// </summary>
     public async Task DispatchAsync(string queueName, ServiceBusMessage message, CancellationToken cancellationToken)
     {
+        dispatched.Enqueue((queueName, message));
+
         if (!routes.TryGetValue(queueName, out var handler))
         {
             return;

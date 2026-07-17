@@ -1,7 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
-using IIS.WMS.Consumer.Infrastructure.Resilience;
+using IIS.WMS.Common.Resilience;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly.Registry;

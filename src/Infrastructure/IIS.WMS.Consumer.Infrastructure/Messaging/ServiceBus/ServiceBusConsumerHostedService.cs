@@ -1,14 +1,17 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.Logging;
+using IIS.WMS.Common.Messaging;
+using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Serilog.Context;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 
@@ -22,6 +25,17 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 /// create id, reservation-id-keyed reserve) rather than a separate dedupe record store - the
 /// alternative the doc allows when the target write is already idempotent.
 /// </summary>
+/// <remarks>
+/// TODO(ai): <see cref="ServiceBusRelayEnvelope.BlobPath"/> (set by <c>ConsumerHostedService</c>'s
+/// claim-check offload when a schema payload exceeds <c>ConsumerOptions.MaxServiceBusMessageSizeBytes</c>
+/// - see <see cref="BlobStorage.BlobStorageOptions.LargePayloadContainerName"/>) is not read here yet.
+/// <see cref="HandleMessageAsync"/> only ever deserializes <see cref="ServiceBusRelayEnvelope.ReflexSchema"/>,
+/// which is empty for an offloaded message - once a producer can exceed the threshold, this needs to
+/// download the blob at <c>BlobPath</c> (hot-tier <see cref="IFileStore"/>) and
+/// deserialize <see cref="InboundInventoryEventMessage"/> from that instead when <c>BlobPath</c> is set.
+/// </remarks>
+[LogLevelCriteria(LogCriteria.High)]
+[Module("Inventory")]
 public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncDisposable
 {
     private readonly ServiceBusClient client;
@@ -136,7 +150,7 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
         {
             envelope = JsonSerializer.Deserialize<ServiceBusRelayEnvelope>(message.Body.ToString())
                 ?? throw new JsonException("Deserialized envelope was null.");
-            inbound = envelope.Payload.Deserialize<InboundInventoryEventMessage>()
+            inbound = envelope.ReflexSchema.Deserialize<InboundInventoryEventMessage>()
                 ?? throw new JsonException("Deserialized payload was null.");
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
@@ -156,9 +170,15 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
                 ? envelopeCorrelationId
                 : Guid.NewGuid().ToString();
 
+        var (logLevel, module) = LogMetadataResolver.Resolve(GetType());
+        string[] types = envelope.Type is { Length: > 0 } envelopeType ? [envelopeType] : [];
+
         using var scope = scopeFactory.CreateScope();
         var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
-        correlationContext.Set(correlationId, envelope.AppId, envelope.Types);
+        correlationContext.Set(correlationId, envelope.AppId ?? string.Empty, types, logLevel, module);
+
+        using var logLevelLogContext = LogContext.PushProperty("LogLevel", logLevel);
+        using var moduleLogContext = LogContext.PushProperty("Module", module);
 
         var inventoryEventService = scope.ServiceProvider.GetRequiredService<IInventoryEventService>();
 

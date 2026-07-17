@@ -1,7 +1,6 @@
 using System.Text;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;

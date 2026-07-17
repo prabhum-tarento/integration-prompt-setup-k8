@@ -1,11 +1,12 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Confluent.Kafka;
+using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.DependencyInjection;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
+using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.DependencyInjection;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;

@@ -1,4 +1,5 @@
 using FluentValidation;
+using IIS.WMS.Common.Logging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,6 +20,8 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// exactly one schema regardless of the Kafka <c>Type</c> header's value (registered under
 /// <see cref="DefaultEventType"/>), same as before this class supported registering more than one.
 /// </summary>
+[LogLevelCriteria(LogCriteria.Low)]
+[Module("BulkImport")]
 public sealed class BulkInventoryImportConsumerHostedService : ConsumerHostedService
 {
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>

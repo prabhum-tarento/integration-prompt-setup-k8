@@ -1,3 +1,4 @@
+using IIS.WMS.Common.Logging;
 using net.pandora.nexus.@event.inventory;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
@@ -30,6 +31,8 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Service Bus message keyed by the producer's own Kafka key, per team decision - a future per-line
 /// fan-out would need a different SessionId derivation.
 /// </remarks>
+[LogLevelCriteria(LogCriteria.High)]
+[Module("Inventory")]
 public sealed class InventoryStateChangedConsumerHostedService : ConsumerHostedService
 {
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>

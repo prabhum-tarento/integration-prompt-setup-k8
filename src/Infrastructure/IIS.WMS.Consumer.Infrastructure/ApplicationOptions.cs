@@ -1,4 +1,4 @@
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 namespace IIS.WMS.Consumer.Infrastructure;

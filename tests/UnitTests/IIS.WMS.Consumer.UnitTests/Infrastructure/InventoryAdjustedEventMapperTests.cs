@@ -105,4 +105,29 @@ public class InventoryAdjustedEventMapperTests
         Assert.Equal("USD", line.UnitPrice!.CurrencyCode);
         Assert.Equal(29.99m, line.UnitPrice.Amount);
     }
+
+    [Theory(DisplayName = "ToInventoryAdjustedEvent maps every ReasonCode enum value by symbol name, including Unknown for the enum's own UNKNOWN member")]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.UNKNOWN, InventoryEventReasonCode.Unknown)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.ADJUSTMENT, InventoryEventReasonCode.Adjustment)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.BUNDLING, InventoryEventReasonCode.Bundling)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.COUNTING, InventoryEventReasonCode.Counting)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.CUSTOMER_RETURN, InventoryEventReasonCode.CustomerReturn)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.OTHER, InventoryEventReasonCode.Other)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.RECEIPT, InventoryEventReasonCode.Receipt)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.RECEIPT_ADJUSTMENT, InventoryEventReasonCode.ReceiptAdjustment)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.RETURN, InventoryEventReasonCode.Return)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.SALE, InventoryEventReasonCode.Sale)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.TRANSFER, InventoryEventReasonCode.Transfer)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.VENDOR_RETURN, InventoryEventReasonCode.VendorReturn)]
+    [InlineData(net.pandora.nexus.@object.inventory.ReasonCode.AUTO_RECONCILIATION, InventoryEventReasonCode.AutoReconciliation)]
+    public void ToInventoryAdjustedEvent_EveryReasonCodeEnumValue_MapsBySymbolName(
+        net.pandora.nexus.@object.inventory.ReasonCode reason, InventoryEventReasonCode expected)
+    {
+        var source = CreateSource();
+        source.adjustment.reason = reason;
+
+        var result = source.ToInventoryAdjustedEvent();
+
+        Assert.Equal(expected, result.Adjustment.Reason);
+    }
 }

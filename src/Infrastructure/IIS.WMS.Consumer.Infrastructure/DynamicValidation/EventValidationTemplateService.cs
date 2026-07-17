@@ -3,7 +3,6 @@ using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.EventValidationTemplates;
 using IIS.WMS.Consumer.Application.EventValidationTemplates.Dtos;
 using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;

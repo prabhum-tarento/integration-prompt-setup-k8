@@ -1,4 +1,6 @@
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Logging;
@@ -14,18 +16,19 @@ namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles.Cosmos;
 /// <see cref="InMemoryCosmosContainer"/>'s own remarks. Production behavior is unchanged: this only
 /// exists so <see cref="IInventoryEventRepository.GetPagedAsync"/>/<see cref="IInventoryEventRepository.QueryAsync{TResult}"/>
 /// work against <see cref="InMemoryCosmosContainerFactory"/> in integration tests
-/// (integration-resiliency.instructions.md §9).
+/// (integration-resiliency.instructions.md §9). Uses <see cref="NullAuditTrailWriter"/> since these
+/// tests exercise the query methods, not the audited mutating ones.
 /// </summary>
-public sealed class InMemoryQueryInventoryEventRepository(ICosmosContainerFactory containerFactory, ILogger<InventoryEventRepository> logger)
-    : InventoryEventRepository(containerFactory, logger)
+public sealed class InMemoryQueryInventoryEventRepository(ICosmosContainerFactory containerFactory, ILogger<InventoryEventRepository> logger, ICorrelationContext correlationContext)
+    : InventoryEventRepository(containerFactory, logger, correlationContext, NullAuditTrailWriter.Instance)
 {
     protected override Task<FeedResponse<T>> ReadNextPageAsync<T>(IQueryable<T> queryable, CancellationToken cancellationToken) =>
         Task.FromResult<FeedResponse<T>>(new InMemoryFeedResponse<T>(queryable.ToList()));
 }
 
 /// <summary>Same pattern as <see cref="InMemoryQueryInventoryEventRepository"/>, for the bulk-import repository.</summary>
-public sealed class InMemoryQueryInventoryBulkImportItemRepository(ICosmosContainerFactory containerFactory, ILogger<InventoryBulkImportItemRepository> logger)
-    : InventoryBulkImportItemRepository(containerFactory, logger)
+public sealed class InMemoryQueryInventoryBulkImportItemRepository(ICosmosContainerFactory containerFactory, ILogger<InventoryBulkImportItemRepository> logger, ICorrelationContext correlationContext)
+    : InventoryBulkImportItemRepository(containerFactory, logger, correlationContext, NullAuditTrailWriter.Instance)
 {
     protected override Task<FeedResponse<T>> ReadNextPageAsync<T>(IQueryable<T> queryable, CancellationToken cancellationToken) =>
         Task.FromResult<FeedResponse<T>>(new InMemoryFeedResponse<T>(queryable.ToList()));

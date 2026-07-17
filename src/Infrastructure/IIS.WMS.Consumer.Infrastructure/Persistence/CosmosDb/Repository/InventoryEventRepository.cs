@@ -1,6 +1,8 @@
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Extensions.Logging;
 
@@ -21,8 +23,12 @@ public class InventoryEventRepository : CosmosRepository<InventoryEvent, Invento
     /// </summary>
     private const string ContainerName = "InventoryEvents";
 
-    public InventoryEventRepository(ICosmosContainerFactory containerFactory, ILogger<InventoryEventRepository> logger)
-        : base(ContainerName, containerFactory, logger)
+    public InventoryEventRepository(
+        ICosmosContainerFactory containerFactory,
+        ILogger<InventoryEventRepository> logger,
+        ICorrelationContext correlationContext,
+        IAuditTrailWriter auditTrailWriter)
+        : base(ContainerName, containerFactory, logger, correlationContext, auditTrailWriter)
     {
     }
 

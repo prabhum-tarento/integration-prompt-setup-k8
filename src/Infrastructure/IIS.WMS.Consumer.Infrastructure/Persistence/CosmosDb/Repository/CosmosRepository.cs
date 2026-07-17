@@ -1,13 +1,19 @@
 using System.Linq.Expressions;
 using System.Net;
 using System.Reflection;
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Consumer.Domain.Aggregates;
+using IIS.WMS.Consumer.Domain.Common;
 using IIS.WMS.Consumer.Domain.Exceptions;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Linq;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 
@@ -24,10 +30,18 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 /// overload's column selection builds a new, sparsely-populated instance of this type server-side.
 /// </typeparam>
 public abstract class CosmosRepository<TDomain, TDocument>
-    where TDocument : ICosmosDocument, new()
+    where TDocument : class, ICosmosDocument, new()
 {
+    /// <summary>Camel-cases a document's properties for the audit trail's <see cref="AuditEntry.DocumentJson"/>, matching the Cosmos SDK's own <c>CosmosPropertyNamingPolicy.CamelCase</c> (cosmos-db.instructions.md §2) rather than Newtonsoft's PascalCase default.</summary>
+    private static readonly JsonSerializerSettings AuditDocumentSerializerSettings = new()
+    {
+        ContractResolver = new CamelCasePropertyNamesContractResolver(),
+    };
+
     private readonly Container _container;
     private readonly ILogger _logger;
+    private readonly ICorrelationContext _correlationContext;
+    private readonly IAuditTrailWriter _auditTrailWriter;
 
     /// <param name="containerName">
     /// The container this repository reads/writes, declared by the derived repository (e.g. a private
@@ -38,10 +52,24 @@ public abstract class CosmosRepository<TDomain, TDocument>
     /// </param>
     /// <param name="containerFactory">Resolves and caches the named <see cref="Container"/>.</param>
     /// <param name="logger">Derived repository's own categorized logger (e.g. <c>ILogger&lt;InventoryEventRepository&gt;</c>).</param>
-    protected CosmosRepository(string containerName, ICosmosContainerFactory containerFactory, ILogger logger)
+    /// <param name="correlationContext">Read for <see cref="AuditEntry.CorrelationId"/>/<see cref="AuditEntry.Schema"/> on every mutation - see <see cref="EnqueueAudit"/>.</param>
+    /// <param name="auditTrailWriter">
+    /// Non-blocking sink every mutating method below enqueues an <see cref="AuditEntry"/> onto.
+    /// <c>AuditRepository</c> (the <c>AuditLog</c> container's own repository) is constructed with
+    /// <see cref="NullAuditTrailWriter.Instance"/> instead of the real singleton, so persisting an audit
+    /// record never itself enqueues another one.
+    /// </param>
+    protected CosmosRepository(
+        string containerName,
+        ICosmosContainerFactory containerFactory,
+        ILogger logger,
+        ICorrelationContext correlationContext,
+        IAuditTrailWriter auditTrailWriter)
     {
         _container = containerFactory.GetContainer(containerName);
         _logger = logger;
+        _correlationContext = correlationContext;
+        _auditTrailWriter = auditTrailWriter;
     }
 
     /// <summary>Projects a domain instance into its persistence shape for a write.</summary>
@@ -94,6 +122,8 @@ public abstract class CosmosRepository<TDomain, TDocument>
                 "Created item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
                 document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
 
+            EnqueueAudit(AuditOperation.Create, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+
             return ToDomain(response.Resource);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
@@ -129,6 +159,8 @@ public abstract class CosmosRepository<TDomain, TDocument>
             "Upserted item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
             document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
 
+        EnqueueAudit(AuditOperation.Upsert, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+
         return ToDomain(response.Resource);
     }
 
@@ -149,6 +181,8 @@ public abstract class CosmosRepository<TDomain, TDocument>
             _logger.LogInformation(
                 "Replaced item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
                 document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
+
+            EnqueueAudit(AuditOperation.Replace, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
 
             return ToDomain(response.Resource);
         }
@@ -187,6 +221,8 @@ public abstract class CosmosRepository<TDomain, TDocument>
                 "Patched item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
                 id, partitionKey, _container.Id, response.RequestCharge);
 
+            EnqueueAudit(AuditOperation.Patch, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+
             return ToDomain(response.Resource);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.PreconditionFailed)
@@ -210,6 +246,8 @@ public abstract class CosmosRepository<TDomain, TDocument>
                 id, new PartitionKey(partitionKey), cancellationToken: cancellationToken);
 
             _logger.LogInformation("Deleted item {Id} from partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+
+            EnqueueAudit(AuditOperation.Delete, id, partitionKey, document: null);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
@@ -463,5 +501,36 @@ public abstract class CosmosRepository<TDomain, TDocument>
             throw new ArgumentException(
                 "PartitionKey is required unless AllowCrossPartitionScan is explicitly set to true.");
         }
+    }
+
+    /// <summary>
+    /// Enqueues a background, non-blocking audit record for a mutation that already completed
+    /// successfully against Cosmos - never called for a redelivered <see cref="CreateAsync"/> that
+    /// turned out to be a no-op, or a "not found"/precondition-failed branch where nothing actually
+    /// changed. <see cref="IAuditTrailWriter.Enqueue"/> is a synchronous, non-blocking hand-off (see its
+    /// own remarks); this method never throws and never delays the caller.
+    /// </summary>
+    /// <param name="operation">The kind of mutation that just completed.</param>
+    /// <param name="entityId">Id of the mutated entity, in its own container.</param>
+    /// <param name="entityPartitionKey">Partition key of the mutated entity, in its own container.</param>
+    /// <param name="document">The entity's full new-state document, as persisted - <see langword="null"/> for a delete.</param>
+    private void EnqueueAudit(AuditOperation operation, string entityId, string entityPartitionKey, TDocument? document)
+    {
+        var documentJson = document is null
+            ? null
+            : JsonConvert.SerializeObject(document, AuditDocumentSerializerSettings);
+
+        var entry = AuditEntry.Create(
+            id: $"{entityId}:{Guid.NewGuid()}",
+            containerName: _container.Id,
+            entityId: entityId,
+            entityPartitionKey: entityPartitionKey,
+            operation: operation,
+            correlationId: _correlationContext.CorrelationId,
+            schema: _correlationContext.Type,
+            documentJson: documentJson,
+            timestampUtc: DateTime.UtcNow);
+
+        _auditTrailWriter.Enqueue(entry);
     }
 }

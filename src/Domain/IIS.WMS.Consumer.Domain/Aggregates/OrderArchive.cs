@@ -19,6 +19,9 @@ public sealed class OrderArchive : AggregateRoot
     /// <summary>The relayed event's JSON body, as archived at the time of processing.</summary>
     public OrderDetail OrderDetail { get; private init; } = default!;
 
+    /// <summary>Correlation id of the Kafka message this record was archived from - also embedded in <see cref="AggregateRoot.Id"/>.</summary>
+    public string CorrelationId { get; private init; } = default!;
+
     /// <summary>UTC timestamp this record was archived.</summary>
     public DateTime Timestamp { get; private init; }
 
@@ -40,9 +43,10 @@ public sealed class OrderArchive : AggregateRoot
     /// <c>{SchemaName}_{CorrelationId}</c> composite, so a redelivered event naturally upserts rather
     /// than duplicating. <paramref name="orderDetailJson"/> is the caller's raw JSON body - parsed into
     /// the <see cref="ValueObjects.OrderDetail"/> Value Object here, so a caller never constructs that
-    /// type directly.
+    /// type directly. <paramref name="correlationId"/> is stored as its own field (not just embedded in
+    /// <paramref name="id"/>) so it can be logged/queried without parsing the composite id.
     /// </summary>
-    public static OrderArchive Create(string id, string category, string orderDetailJson, DateTime timestamp)
+    public static OrderArchive Create(string id, string category, string orderDetailJson, string correlationId, DateTime timestamp)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentException.ThrowIfNullOrWhiteSpace(category);
@@ -52,6 +56,7 @@ public sealed class OrderArchive : AggregateRoot
             Id = id,
             Category = category,
             OrderDetail = OrderDetail.FromJson(orderDetailJson),
+            CorrelationId = correlationId ?? string.Empty,
             Timestamp = timestamp,
         };
     }
@@ -63,11 +68,12 @@ public sealed class OrderArchive : AggregateRoot
     /// cosmos-db.instructions.md §8's selective-column reads, which can hand this a document with
     /// <c>OrderDetail</c> unset.
     /// </summary>
-    public static OrderArchive Rehydrate(string id, string category, OrderDetail? orderDetail, DateTime timestamp) => new()
+    public static OrderArchive Rehydrate(string id, string category, OrderDetail? orderDetail, string correlationId, DateTime timestamp) => new()
     {
         Id = id,
         Category = category,
         OrderDetail = orderDetail!,
+        CorrelationId = correlationId,
         Timestamp = timestamp,
     };
 }

@@ -1,8 +1,7 @@
 using System.Text;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Consumer.Application.EventValidationTemplates.Dtos;
 using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -136,5 +135,13 @@ public class EventValidationTemplateServiceTests
 
         Assert.True(await sut.DeleteAsync(SchemaName, EventType));
         Assert.False(await sut.DeleteAsync(SchemaName, EventType));
+    }
+
+    [Fact(DisplayName = "GetExamples returns the shared worked-example catalog")]
+    public void GetExamples_Always_ReturnsExampleTemplateExamplesAll()
+    {
+        var result = sut.GetExamples();
+
+        Assert.Same(EventValidationTemplateExamples.All, result);
     }
 }

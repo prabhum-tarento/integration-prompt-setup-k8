@@ -26,9 +26,26 @@ public sealed class VirtualServiceBusClient() : ServiceBusClient
     /// <summary>The shared in-process router every <see cref="VirtualServiceBusSender"/> this client creates publishes through - register consumer queues on this before sending.</summary>
     public VirtualServiceBusBroker Broker { get; } = new();
 
-    public override ServiceBusSender CreateSender(string queueOrTopicName) => new VirtualServiceBusSender(queueOrTopicName, Broker);
+    /// <summary>
+    /// Every <see cref="VirtualServiceBusSender"/> this client has created, keyed by queue name - lets a
+    /// test reach back into the sender a cached-sender caller (e.g. <c>ServiceBusRelayPublisher</c>)
+    /// already resolved, to tune <see cref="VirtualServiceBusSender.MaxMessagesPerBatch"/> for a
+    /// bulk-batching scenario.
+    /// </summary>
+    public IReadOnlyDictionary<string, VirtualServiceBusSender> CreatedSenders => createdSenders;
 
-    public override ServiceBusSender CreateSender(string queueOrTopicName, ServiceBusSenderOptions options) => new VirtualServiceBusSender(queueOrTopicName, Broker);
+    private readonly Dictionary<string, VirtualServiceBusSender> createdSenders = [];
+
+    public override ServiceBusSender CreateSender(string queueOrTopicName) => CreateAndTrackSender(queueOrTopicName);
+
+    public override ServiceBusSender CreateSender(string queueOrTopicName, ServiceBusSenderOptions options) => CreateAndTrackSender(queueOrTopicName);
+
+    private VirtualServiceBusSender CreateAndTrackSender(string queueOrTopicName)
+    {
+        var sender = new VirtualServiceBusSender(queueOrTopicName, Broker);
+        createdSenders[queueOrTopicName] = sender;
+        return sender;
+    }
 
     public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

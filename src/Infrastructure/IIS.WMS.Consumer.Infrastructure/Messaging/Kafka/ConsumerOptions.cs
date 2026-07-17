@@ -31,6 +31,15 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 public class ConsumerOptions
 {
     /// <summary>
+    /// Hardcoded fallback for <see cref="MaxServiceBusMessageSizeBytes"/> when unset at both the event
+    /// and Kafka level - 200 KiB, a conservative margin under Service Bus Standard tier's 256 KB
+    /// per-message limit that leaves headroom for <see cref="IIS.WMS.Common.Messaging.ServiceBusRelayEnvelope"/>'s own
+    /// fields (<c>CorrelationId</c>/<c>AppId</c>/<c>Type</c>/<c>BlobPath</c>) wrapped around the schema
+    /// payload.
+    /// </summary>
+    public const int DefaultMaxServiceBusMessageSizeBytes = 200 * 1024;
+
+    /// <summary>
     /// Whether this consumer runs at all. Unset (<see langword="null"/>) at the event level falls
     /// back to the Kafka-level value (see remarks); unset at the Kafka level itself defaults to
     /// <see langword="true"/>, preserving today's always-on behavior. Set to
@@ -194,13 +203,25 @@ public class ConsumerOptions
     public string[]? IgnoreCorrelationIdSuffixes { get; set; }
 
     /// <summary>
+    /// Claim-check threshold, in bytes, for the relayed schema payload (the JSON written to
+    /// <see cref="IIS.WMS.Common.Messaging.ServiceBusRelayEnvelope.ReflexSchema"/>) - a payload at or under this size
+    /// travels inline in the Service Bus message body as always; one over it is instead uploaded to the
+    /// hot-tier <see cref="IIS.WMS.Common.BlobStorage.BlobStorageOptions.LargePayloadContainerName"/> container, with
+    /// only its blob path carried in <see cref="IIS.WMS.Common.Messaging.ServiceBusRelayEnvelope.BlobPath"/> (
+    /// <c>ReflexSchema</c> left empty in that case). Event level falls back to Kafka level if unset (see
+    /// remarks), which itself bottoms out at <see cref="DefaultMaxServiceBusMessageSizeBytes"/>.
+    /// </summary>
+    public int? MaxServiceBusMessageSizeBytes { get; set; }
+
+    /// <summary>
     /// Fills <see cref="Enabled"/>, <see cref="BootstrapServers"/>, <see cref="SchemaRegistryUrl"/>,
     /// <see cref="SchemaRegistryApiKey"/>, <see cref="SchemaRegistryApiSecret"/>,
     /// <see cref="WorkerCount"/>, <see cref="ChannelCapacity"/>,
     /// <see cref="DeduplicationCheckEnabled"/>, <see cref="IgnoreCorrelationIdPrefixes"/>,
     /// <see cref="IgnoreCorrelationIdSuffixes"/>, <see cref="Protocol"/>,
     /// <see cref="AuthenticationMode"/>, <see cref="Username"/>, <see cref="Password"/>,
-    /// <see cref="EnableAutoCommit"/>, and <see cref="AutoOffsetReset"/> from
+    /// <see cref="EnableAutoCommit"/>, <see cref="AutoOffsetReset"/>, and
+    /// <see cref="MaxServiceBusMessageSizeBytes"/> from
     /// <paramref name="kafkaLevelOptions"/> wherever this (event-level) instance left them unset -
     /// event level wins whenever it's configured, Kafka level is only the fallback. Called once per
     /// event-level options type from an
@@ -228,6 +249,7 @@ public class ConsumerOptions
         Password ??= kafkaLevelOptions.Password;
         EnableAutoCommit ??= kafkaLevelOptions.EnableAutoCommit;
         AutoOffsetReset ??= kafkaLevelOptions.AutoOffsetReset;
+        MaxServiceBusMessageSizeBytes ??= kafkaLevelOptions.MaxServiceBusMessageSizeBytes;
     }
 
     /// <summary>

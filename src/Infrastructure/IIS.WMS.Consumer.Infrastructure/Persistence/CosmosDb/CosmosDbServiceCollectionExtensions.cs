@@ -102,8 +102,6 @@ public static class CosmosDbServiceCollectionExtensions
                 AllowBulkExecution = true,
                 MaxRetryAttemptsOnRateLimitedRequests = 9,
                 MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-                MaxRequestsPerTcpConnection = 30,
-                MaxTcpConnectionsPerEndpoint = 10,
                 SerializerOptions = new CosmosSerializationOptions
                 {
                     PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
@@ -113,14 +111,20 @@ public static class CosmosDbServiceCollectionExtensions
             if (env.IsDevelopment())
             {
                 // Same emulator cert-trust workaround as the default client above. Note
-                // MaxRequestsPerTcpConnection/MaxTcpConnectionsPerEndpoint above are Direct-mode-only
-                // settings - they become no-ops locally under Gateway mode, but stay fully effective
-                // in every non-dev environment, which never takes this branch.
+                // MaxRequestsPerTcpConnection/MaxTcpConnectionsPerEndpoint below are Direct-mode-only
+                // settings - the Cosmos SDK's CosmosClientOptions validation throws if they're set
+                // while ConnectionMode is Gateway, so they're only applied in the non-dev branch,
+                // which is the only place Direct mode is ever used.
                 options.ConnectionMode = ConnectionMode.Gateway;
                 options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
                 {
                     ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
                 });
+            }
+            else
+            {
+                options.MaxRequestsPerTcpConnection = 30;
+                options.MaxTcpConnectionsPerEndpoint = 10;
             }
 
             logger.LogInformation(

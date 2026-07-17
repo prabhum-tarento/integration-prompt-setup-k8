@@ -1,4 +1,6 @@
 using System.Text.Json;
+using IIS.WMS.Common.Logging;
+using IIS.WMS.Common.Messaging;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
@@ -9,6 +11,8 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// exactly one schema regardless of the Kafka <c>Type</c> header's value (registered under
 /// <see cref="DefaultEventType"/>), same as before this class supported registering more than one.
 /// </summary>
+[LogLevelCriteria(LogCriteria.High)]
+[Module("Inventory")]
 public sealed class KafkaConsumerHostedService : ConsumerHostedService
 {
     /// <summary>Builds the long-lived Kafka consumer (with a JSON value deserializer) and the Service Bus sender it relays onto.</summary>

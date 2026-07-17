@@ -107,10 +107,10 @@ public static class EventValidationTemplateExamples
             "Resolve services from DI - services",
             "'services' is this message's DI scope (IServiceProvider), injected per message. Resolve " +
             "anything registered in the container with services.GetRequiredService<T>() - the DI " +
-            "extension methods and the IIS.WMS.Consumer.Application.Common interfaces are already " +
-            "imported. Scoped services resolve to this message's own instances (ICorrelationContext " +
-            "below carries this message's correlation id), and templates can await async service " +
-            "calls - the whole template runs as async code.",
+            "extension methods and the IIS.WMS.Consumer.Application.Common/IIS.WMS.Common.Correlation " +
+            "interfaces are already imported. Scoped services resolve to this message's own instances " +
+            "(ICorrelationContext below carries this message's correlation id), and templates can " +
+            "await async service calls - the whole template runs as async code.",
             """
             // Scoped service: this message's own correlation context.
             var correlation = services.GetRequiredService<ICorrelationContext>();

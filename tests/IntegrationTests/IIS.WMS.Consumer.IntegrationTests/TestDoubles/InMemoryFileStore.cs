@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.BlobStorage;
 
 namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles;
 

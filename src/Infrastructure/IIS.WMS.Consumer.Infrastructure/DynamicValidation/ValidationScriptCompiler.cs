@@ -17,8 +17,8 @@ public sealed class ValidationScriptCompiler(ILogger<ValidationScriptCompiler> l
     /// <see cref="ValidationScriptGlobals"/>/<see cref="KafkaHeaderNames"/>), the C# runtime
     /// binder that <c>dynamic</c> member access on <c>x</c> compiles down to, and - for the
     /// <c>services</c> global - the DI extension methods (<c>GetRequiredService&lt;T&gt;()</c>) plus
-    /// the Application assembly so its service interfaces are nameable as type arguments. Imports
-    /// match: a template writes <c>KafkaHeaderNames.Type</c>, <c>_log.LogInformation(...)</c>, or
+    /// the Application and Common assemblies so their service interfaces are nameable as type
+    /// arguments. Imports match: a template writes <c>KafkaHeaderNames.Type</c>, <c>_log.LogInformation(...)</c>, or
     /// <c>services.GetRequiredService&lt;ICorrelationContext&gt;()</c> bare, without its own
     /// <c>using</c> lines.
     /// </summary>
@@ -30,6 +30,7 @@ public sealed class ValidationScriptCompiler(ILogger<ValidationScriptCompiler> l
             typeof(ILogger).Assembly,
             typeof(Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions).Assembly,
             typeof(Application.Common.IDeduplicationService).Assembly,
+            typeof(IIS.WMS.Common.Correlation.ICorrelationContext).Assembly,
             typeof(Confluent.Kafka.Headers).Assembly,
             typeof(ValidationScriptGlobals).Assembly)
         .WithImports(
@@ -41,6 +42,7 @@ public sealed class ValidationScriptCompiler(ILogger<ValidationScriptCompiler> l
             "Microsoft.Extensions.DependencyInjection",
             "Microsoft.Extensions.Logging",
             "Confluent.Kafka",
+            "IIS.WMS.Common.Correlation",
             "IIS.WMS.Consumer.Application.Common",
             "IIS.WMS.Consumer.Infrastructure.Messaging.Kafka");
 

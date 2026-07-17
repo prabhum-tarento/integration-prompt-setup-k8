@@ -22,6 +22,7 @@ internal static class OrderArchiveMapper
         Category = aggregate.Category,
         PartitionKey = aggregate.Category,
         OrderDetail = JObject.Parse(aggregate.OrderDetail.Json),
+        CorrelationId = aggregate.CorrelationId,
         Timestamp = aggregate.Timestamp,
         ETag = aggregate.ETag,
     };
@@ -37,7 +38,7 @@ internal static class OrderArchiveMapper
             ? null
             : OrderDetail.FromJson(document.OrderDetail.ToString(Formatting.None));
 
-        var aggregate = OrderArchive.Rehydrate(document.Id, document.Category, orderDetail, document.Timestamp);
+        var aggregate = OrderArchive.Rehydrate(document.Id, document.Category, orderDetail, document.CorrelationId, document.Timestamp);
         aggregate.ETag = document.ETag;
 
         return aggregate;

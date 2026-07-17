@@ -1,13 +1,16 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
+using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.Logging;
+using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.BulkInventoryImport.Dtos;
-using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Serilog.Context;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 
@@ -23,6 +26,8 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 /// read-modify-write <see cref="IInventoryEventService"/> uses, so there is no concurrency-conflict
 /// retry loop here either.
 /// </summary>
+[LogLevelCriteria(LogCriteria.Low)]
+[Module("BulkImport")]
 public sealed class BulkImportServiceBusConsumerHostedService : BackgroundService, IAsyncDisposable
 {
     private readonly ServiceBusClient client;
@@ -142,9 +147,14 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
             ? value?.ToString() ?? Guid.NewGuid().ToString()
             : Guid.NewGuid().ToString();
 
+        var (logLevel, module) = LogMetadataResolver.Resolve(GetType());
+
         using var scope = scopeFactory.CreateScope();
         var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
-        correlationContext.Set(correlationId);
+        correlationContext.Set(correlationId, string.Empty, [], logLevel, module);
+
+        using var logLevelLogContext = LogContext.PushProperty("LogLevel", logLevel);
+        using var moduleLogContext = LogContext.PushProperty("Module", module);
 
         var bulkInventoryImportService = scope.ServiceProvider.GetRequiredService<IBulkInventoryImportService>();
 

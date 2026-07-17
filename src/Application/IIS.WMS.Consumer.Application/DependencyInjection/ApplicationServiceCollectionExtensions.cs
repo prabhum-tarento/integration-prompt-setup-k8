@@ -1,5 +1,6 @@
 using System.Reflection;
 using FluentValidation;
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;

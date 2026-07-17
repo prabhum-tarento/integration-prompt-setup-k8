@@ -187,13 +187,36 @@ every hop, log line, and outbound call this flow makes.
   consumer's own idempotency check (§2) as the backstop; this consumer's
   dedup check is a latency/cost optimization on top of that, not the only
   defense against a redelivered message being applied twice.
-- **Per-message timing, logged individually on success**: `Deserialize`
-  duration, `ValidateAsync` duration, and total `ProcessMessageAsync`
-  duration are each measured with a `Stopwatch` and logged together as
-  `DeserializeDurationMs`/`ValidationDurationMs`/`TotalDurationMs` on the
-  structured "relayed" log line — not just a single combined number —
-  so a regression in one stage (e.g. validation getting slower after a new
-  rule is added) is visible without correlating separate log lines.
+- **Per-message timing, logged individually on success**: every stage of
+  `ProcessMessageAsync` is measured with its own `Stopwatch` and logged
+  together on the structured "relayed" log line — not just a single combined
+  number — so a regression in one stage (e.g. validation getting slower
+  after a new rule is added) is visible without correlating separate log
+  lines: `DeserializeDurationMs` (includes the Avro→DTO mapping step for a
+  schema registered via `CreateSchemaHandler<TAvro,TValue>` — mapping isn't
+  separately measurable, since it runs inside the same `ISchemaHandler.Deserialize`
+  call), `ColdAuditBlobWriteDurationMs`, `DeduplicationDurationMs` (measured
+  here regardless of outcome, including the fail-open path — the dedup
+  service's own implementation, e.g. `NexusDeduplicationService`, separately
+  logs its own per-call debug line, which this duration does not duplicate),
+  `SchemaValidationDurationMs`, `DynamicValidationDurationMs`,
+  `OrderArchiveDurationMs`, `BlobOffloadDurationMs` (zero unless the claim-check
+  step below actually offloaded), `ServiceBusPublishDurationMs`, and
+  `TotalDurationMs`.
+- **Claim-check offload for oversized payloads**: `ConsumerOptions.MaxServiceBusMessageSizeBytes`
+  (event-level-first/Kafka-level-fallback like every other per-topic setting
+  in this section, bottoming out at `ConsumerOptions.DefaultMaxServiceBusMessageSizeBytes`)
+  caps how large the schema's JSON payload can be before it's carried inline
+  in `ServiceBusRelayEnvelope.ReflexSchema`. A payload over that threshold is
+  uploaded instead to the hot-tier `BlobStorageOptions.LargePayloadContainerName`
+  container, `ReflexSchema` is left empty, and `ServiceBusRelayEnvelope.BlobPath`
+  carries the blob's path - keeping the outbound Service Bus message under
+  the broker's own per-message size limit regardless of source payload size.
+  A blob upload failure here is handled the same as every other non-fatal
+  failure mode above (logged `Critical`, JSON to hot storage, offset
+  committed forward). **Producer side only** - `ServiceBusConsumerHostedService`
+  does not yet rehydrate a `BlobPath`-offloaded payload back on the consume
+  side; see that class's own remarks for the open TODO.
 - Use the Kafka message key (or a stable field from the payload, e.g.
   `WarehouseId:Sku:EventId`) as the outbound Service Bus **message ID** —
   this is what makes the Service Bus consumer's dedupe check (§2) work.
@@ -508,7 +531,7 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 
 ## 5. Blob Storage
 
-Four containers now, grouped by tier — don't mix them. **Hot and cold tiers
+Five containers now, grouped by tier — don't mix them. **Hot and cold tiers
 are backed by separate Storage accounts**, each with its own connection
 info (`BlobStorageOptions.Hot`/`BlobStorageOptions.Cold`, each a
 `BlobStorageAccountOptions` with its own `AccountUri` — local dev instead
@@ -560,7 +583,26 @@ never assume the two containers share an account or a client.
   recognize is silently absent here - it never survives deserialization to
   be included. A message that fails to deserialize at all only ever gets a
   hot-tier raw-bytes record, never a cold-tier one.
-- All four go through Polly (§3) for transient fault handling — the Kafka
+- **Cold tier, Cosmos-mutation audit archive** (`audit-archive` container,
+  `BlobStorageOptions.AuditArchiveContainerName`): every Cosmos mutation
+  made through `CosmosRepository{TDomain,TDocument}` is captured as an
+  `AuditEntry` and enqueued onto a bounded channel
+  (`Persistence.CosmosDb.Audit.AuditTrailWriter`); `AuditBackgroundService`
+  drains that channel and fans each entry out to every registered
+  `IAuditSink`. Which sink(s) run is configured independently via
+  `Audit:CosmosDbEnabled` (persist to the Cosmos `AuditLog` container,
+  default `true`) and `Audit:ColdStorageEnabled` (also archive to this
+  container as JSON, default `false`) — when both are `true`, every entry
+  is persisted to both destinations, and at least one must be `true` or
+  `AddAuditTrail` throws at startup. Named `{yyyy}/{MM}/{dd}/{entryId}.json`,
+  same date-partitioned convention as the general request/response audit
+  above. A write failure here is non-fatal — logged and swallowed, same
+  "diagnostic aid, not the durability boundary" treatment as the rest of
+  this section — and independent of the Cosmos sink's own hot-tier
+  `audit-dead-letter` fallback (`BlobStorageOptions.AuditDeadLetterContainerName`),
+  which only fires when the Cosmos write itself fails, not as a cold-storage
+  archival path.
+- All five go through Polly (§3) for transient fault handling — the Kafka
   consumer's own audit writes (`ConsumerHostedService.WriteBlobAsync`)
   additionally treat a Blob Storage outage (after Polly's retries are
   exhausted) as non-fatal: logged and swallowed, so a Blob Storage outage

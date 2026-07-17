@@ -487,3 +487,6 @@ $RECYCLE.BIN/
 # the event-name/topic/subject mapping it discovers from registration/events/, re-derivable
 # any time from that folder.
 /scripts/local-kafka/registration/output/
+/.claude/settings.json
+/CoverageBaseline/report
+*.runsettings

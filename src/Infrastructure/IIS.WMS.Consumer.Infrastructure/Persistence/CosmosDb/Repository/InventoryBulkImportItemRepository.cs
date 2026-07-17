@@ -1,6 +1,8 @@
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -32,8 +34,10 @@ public class InventoryBulkImportItemRepository : CosmosRepository<InventoryBulkI
     /// </param>
     public InventoryBulkImportItemRepository(
         [FromKeyedServices(CosmosDbServiceCollectionExtensions.BulkCosmosClientKey)] ICosmosContainerFactory containerFactory,
-        ILogger<InventoryBulkImportItemRepository> logger)
-        : base(ContainerName, containerFactory, logger)
+        ILogger<InventoryBulkImportItemRepository> logger,
+        ICorrelationContext correlationContext,
+        IAuditTrailWriter auditTrailWriter)
+        : base(ContainerName, containerFactory, logger, correlationContext, auditTrailWriter)
     {
     }
 

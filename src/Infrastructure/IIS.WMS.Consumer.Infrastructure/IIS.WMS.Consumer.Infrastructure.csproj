@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\Application\IIS.WMS.Consumer.Application\IIS.WMS.Consumer.Application.csproj" />
+    <ProjectReference Include="..\..\Common\IIS.WMS.Common\IIS.WMS.Common.csproj" />
     <ProjectReference Include="..\..\Domain\IIS.WMS.Consumer.Domain\IIS.WMS.Consumer.Domain.csproj" />
   </ItemGroup>
 

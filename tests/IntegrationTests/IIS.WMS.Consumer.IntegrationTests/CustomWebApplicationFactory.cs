@@ -1,7 +1,7 @@
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using Azure.Storage.Blobs;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.IntegrationTests.TestDoubles;

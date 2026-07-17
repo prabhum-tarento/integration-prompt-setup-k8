@@ -6,6 +6,9 @@
   <Folder Name="/src/Application/">
     <Project Path="src/Application/IIS.WMS.Consumer.Application/IIS.WMS.Consumer.Application.csproj" />
   </Folder>
+  <Folder Name="/src/Common/">
+    <Project Path="src/Common/IIS.WMS.Common/IIS.WMS.Common.csproj" />
+  </Folder>
   <Folder Name="/src/Domain/">
     <Project Path="src/Domain/IIS.WMS.Consumer.Domain/IIS.WMS.Consumer.Domain.csproj" />
   </Folder>

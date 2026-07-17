@@ -2,4 +2,5 @@
 global using Microsoft.Extensions.Logging;
 global using Microsoft.Extensions.Options;
 
+global using IIS.WMS.Common.BlobStorage;
 global using IIS.WMS.Consumer.Application.Common;

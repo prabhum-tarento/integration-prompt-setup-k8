@@ -1,5 +1,6 @@
 using Azure.Messaging.ServiceBus;
 using Azure;
+using IIS.WMS.Common.Resilience;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
 

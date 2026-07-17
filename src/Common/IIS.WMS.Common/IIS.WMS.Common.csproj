@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Shared kernel referenced by both the Consumer (Kafka -> Service Bus -> Cosmos DB) and the
+    planned Producer project - no ProjectReference of its own, so either side can depend on it
+    without pulling in the other's layers (dotnet-architecture-good-practices.instructions.md).
+  -->
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Messaging.ServiceBus" />
+    <PackageReference Include="Azure.Storage.Blobs" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <PackageReference Include="Polly.Core" />
+  </ItemGroup>
+
+</Project>

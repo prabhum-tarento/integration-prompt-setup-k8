@@ -26,6 +26,9 @@ public sealed class OrderArchiveDocument : ICosmosDocument
     /// </summary>
     public JObject OrderDetail { get; init; } = default!;
 
+    /// <summary>Correlation id of the Kafka message this record was archived from.</summary>
+    public string CorrelationId { get; init; } = default!;
+
     /// <summary>UTC timestamp this record was archived.</summary>
     public DateTime Timestamp { get; init; }
 

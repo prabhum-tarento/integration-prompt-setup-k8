@@ -3,19 +3,21 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
-using Azure.Messaging.ServiceBus;
 using Confluent.Kafka;
 using Confluent.SchemaRegistry;
+using IIS.WMS.Common.BlobStorage;
+using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.Logging;
+using IIS.WMS.Common.Messaging;
+using IIS.WMS.Common.Resilience;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
-using IIS.WMS.Consumer.Infrastructure.Resilience;
+using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Polly.Registry;
 using Serilog.Context;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
@@ -30,9 +32,10 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// <see cref="DefaultEventType"/> instead of an exact value - see <see cref="ProcessMessageAsync"/>
 /// for the exact lookup order. Each schema publishes to its own <see cref="ISchemaHandler.ServiceBusQueueName"/>
 /// (falling back to <see cref="ConsumerOptions.ServiceBusQueueName"/> if unset), so multiple schemas on
-/// one consumer can land on different queues - <see cref="GetServiceBusSender"/> opens one
-/// <see cref="ServiceBusSender"/> per distinct queue actually used, not one per schema or one per
-/// consumer. Deserialization itself happens manually, after the dedup check below, not inside
+/// one consumer can land on different queues - the shared <c>IServiceBusRelayPublisher</c> this
+/// consumer relays through (see <see cref="RelayToServiceBusAsync"/>) opens one Service Bus sender per
+/// distinct queue actually used across every caller in this process, not one per schema, consumer, or
+/// Kafka consumer instance. Deserialization itself happens manually, after the dedup check below, not inside
 /// <see cref="IConsumer{TKey,TValue}.Consume(TimeSpan)"/> - see the class-level flow remarks.
 /// Everything past schema selection (poll loop, bounded-channel worker pool, cold/hot-tier audit
 /// logging, deduplication, non-fatal failure handling, ordered offset commit, resilience, correlation
@@ -95,8 +98,10 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Service Bus consumer dedupe (§2).
 /// </para>
 /// </remarks>
-public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposable, IServiceBusSenderCacheSource
+public abstract class ConsumerHostedService : BackgroundService
 {
+    #region Constants and shared static state
+
     /// <summary>
     /// The key a schema handler is registered under when a consumer doesn't distinguish by the Kafka
     /// <see cref="KafkaHeaderNames.Type"/> header - every consumer that (like each one today) handles
@@ -116,6 +121,10 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
     /// <c>Schema</c> property, which System.Text.Json would otherwise try (and fail) to serialize.
     /// </summary>
     protected static readonly JsonSerializerOptions RelayJsonOptions = new() { IgnoreReadOnlyProperties = true };
+
+    #endregion
+
+    #region Schema handler type-erasure and factories
 
     /// <summary>
     /// Type-erased per-schema entry - build one via <see cref="CreateSchemaHandler{TValue}"/>, never
@@ -362,21 +371,20 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         return (eventKey, eventKey);
     }
 
+    #endregion
+
+    #region Fields and properties
+
     private readonly IConsumer<string, byte[]> consumer;
     private readonly ISpecificRecordDeserializerFactory? specificRecordDeserializerFactory;
     private ISchemaRegistryClient? schemaRegistryClient;
     private IReadOnlyDictionary<string, ISchemaHandler> schemaHandlers = new Dictionary<string, ISchemaHandler>();
-    private readonly ServiceBusClient serviceBusClient;
-
-    // Keyed by queue name, not by schema/event type - two schemas that share a queue (the common
-    // case, ISchemaHandler.ServiceBusQueueName left null) reuse the same sender rather than each
-    // opening their own. Built lazily via GetServiceBusSender, not eagerly for every schema up front.
-    private readonly ConcurrentDictionary<string, ServiceBusSender> serviceBusSenders = new();
-    private readonly ResiliencePipelineProvider<string> pipelineProvider;
+    private readonly IServiceBusRelayPublisher relayPublisher;
     private readonly IFileStore hotFileStore;
     private readonly IFileStore coldFileStore;
     private readonly IDeduplicationService deduplicationService;
     private readonly IDynamicEventValidator dynamicEventValidator;
+    private readonly IOrderArchiveWriter orderArchiveWriter;
     private readonly IServiceScopeFactory scopeFactory;
     private readonly ApplicationOptions applicationOptions;
 
@@ -402,19 +410,23 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
 
     /// <summary>
     /// Display name used in log messages and the cold/hot-tier blob path - distinguishes this
-    /// consumer's log lines and audit records from other consumers sharing the same pod/process.
-    /// Public (not just <c>protected</c>) so it doubles as <see cref="IServiceBusSenderCacheSource.ConsumerName"/>
-    /// for the Service Bus sender cache admin endpoint.
+    /// consumer's log lines and audit records from other consumers sharing the same pod/process. Also
+    /// passed as <see cref="ServiceBusRelayMessage.SourceName"/> when relaying, since it's the same
+    /// identity used for this consumer's own dead-letter/audit blob naming.
     /// </summary>
     public string ConsumerName { get; }
 
-    /// <summary>Builds the Kafka consumer and the Service Bus sender it relays onto.</summary>
+    #endregion
+
+    #region Construction
+
+    /// <summary>Builds the Kafka consumer this instance polls.</summary>
     /// <param name="options">Topic, consumer group, enabled flag, worker/channel sizing, and Service Bus queue settings for this consumer.</param>
     /// <param name="infrastructure">
-    /// The six dependencies every consumer needs and which never vary between them (Service Bus
-    /// client, Polly pipeline provider, hot/cold file stores, Blob Storage options, dedup service) -
-    /// see <see cref="ConsumerRelayInfrastructure"/>'s own doc comment for why this is a single
-    /// facade parameter instead of six.
+    /// The six dependencies every consumer needs and which never vary between them (the shared Service
+    /// Bus relay publisher, hot/cold file stores, Blob Storage options, dedup service) - see
+    /// <see cref="ConsumerRelayInfrastructure"/>'s own doc comment for why this is a single facade
+    /// parameter instead of six.
     /// </param>
     /// <param name="logger">Logger for consume/relay/failure events.</param>
     /// <param name="specificRecordDeserializerFactory">
@@ -440,12 +452,13 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
     {
         Options = options;
         ConsumerName = DeriveConsumerName(GetType());
-        pipelineProvider = infrastructure.PipelineProvider;
+        relayPublisher = infrastructure.RelayPublisher;
         hotFileStore = infrastructure.HotFileStore;
         coldFileStore = infrastructure.ColdFileStore;
         blobStorageOptions = infrastructure.BlobStorageOptions.Value;
         deduplicationService = infrastructure.DeduplicationService;
         dynamicEventValidator = infrastructure.DynamicEventValidator;
+        orderArchiveWriter = infrastructure.OrderArchiveWriter;
         scopeFactory = infrastructure.ScopeFactory;
         applicationOptions = infrastructure.ApplicationOptions;
         this.logger = logger;
@@ -481,9 +494,12 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         // remarks for why this moved out of the consumer builder.
         consumer = new ConsumerBuilder<string, byte[]>(config).Build();
 
-        serviceBusClient = infrastructure.ServiceBusClient;
         offsetTracker = new PartitionOffsetCommitTracker(offsets => consumer.Commit(offsets));
     }
+
+    #endregion
+
+    #region Schema registration and health
 
     /// <summary>
     /// Registers this consumer's schema handlers, built via <see cref="CreateSchemaHandler{TValue}"/>/
@@ -525,13 +541,9 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         //return type.Name.EndsWith(Suffix, StringComparison.Ordinal) ? type.Name[..^Suffix.Length] : type.Name;
     }
 
-    /// <summary>
-    /// Resolves (creating and caching on first use) the <see cref="ServiceBusSender"/> for
-    /// <paramref name="queueName"/> - one sender per distinct queue name actually used across every
-    /// registered schema, not one per schema, so two schemas sharing a queue share a sender too.
-    /// </summary>
-    private ServiceBusSender GetServiceBusSender(string queueName) =>
-        serviceBusSenders.GetOrAdd(queueName, serviceBusClient.CreateSender);
+    #endregion
+
+    #region Execution loop
 
     /// <summary>
     /// Polls the subscribed topic in a loop until cancellation, handing each message to the worker
@@ -660,11 +672,18 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         }
     }
 
+    #endregion
+
+    #region Message processing
+
     /// <summary>
     /// Runs the full per-message flow: resolve the schema handler for this message's event type, log
     /// metadata, deserialize, write the cold-tier audit log, check deduplication, validate, map and
     /// publish to Service Bus, then report completion to the offset tracker. See the class-level
-    /// remarks for the exact step order and failure handling.
+    /// remarks for the exact step order and failure handling. This method is only the orchestration -
+    /// each step below is its own private method, and every step past schema resolution owns its own
+    /// failure handling (dead-letter write + offset completion) and signals "already handled, stop
+    /// here" back to this method with a <see langword="null"/> return.
     /// </summary>
     /// <param name="result">The consumed raw Kafka message, with its topic/partition/offset metadata.</param>
     /// <param name="cancellationToken">Token to cancel the publish.</param>
@@ -673,25 +692,16 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         var totalStopwatch = Stopwatch.StartNew();
 
         var headers = result.Message.Headers;
-        var rawCorrelationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId);
-        var correlationId = rawCorrelationId ?? $"-{Guid.NewGuid().ToString()}";
-        var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
-        var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
-
-        // Falls back to this service's own configured identity (ApplicationOptions.ApplicationId)
-        // when the producer didn't set an App-Id header, so a relayed event never carries a blank
-        // AppId downstream - see ApplicationOptions' own remarks.
-        var rawAppId = TryGetHeader(headers, KafkaHeaderNames.AppId);
-        var appId = string.IsNullOrEmpty(rawAppId) ? applicationOptions.AppId : rawAppId;
-
-        var eventKey = TryGetHeader(headers, KafkaHeaderNames.EventKey) ?? string.Empty;
+        var (rawCorrelationId, correlationId, deduplicationId, eventType, appId, eventKey) = ExtractMessageIdentifiers(headers);
 
         // Scoped for the lifetime of this one message, since the hosted service itself is a
         // singleton but ICorrelationContext is scoped - disposed automatically at every return
         // point below via the `using` declaration, same pattern as ServiceBusConsumerHostedService.
+        var (logLevel, module) = LogMetadataResolver.Resolve(GetType());
+
         using var scope = scopeFactory.CreateScope();
         var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
-        correlationContext.Set(correlationId, appId, [eventType, ConsumerName]);
+        correlationContext.Set(correlationId, appId, [eventType, ConsumerName], logLevel, module);
 
         // Pushed into Serilog's ambient LogContext (integration-resiliency.instructions.md §7),
         // same as CorrelationIdMiddleware does at the HTTP boundary - every log line for the rest of
@@ -701,6 +711,8 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
         using var appIdLogContext = LogContext.PushProperty("AppId", appId);
         using var eventTypeLogContext = LogContext.PushProperty("EventType", eventType);
         using var eventTypesLogContext = LogContext.PushProperty("Types", string.Join(", ", correlationContext.Types));
+        using var logLevelLogContext = LogContext.PushProperty("LogLevel", logLevel);
+        using var moduleLogContext = LogContext.PushProperty("Module", module);
 
         logger.LogInformation(
             "{ConsumerName}: consumed message from {Topic}:{Partition}:{Offset}. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
@@ -719,110 +731,31 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
             return;
         }
 
-        // Exact Type header value first, DefaultEventType as the fallback for a consumer that
-        // registers one schema regardless of that header - see the class-level remarks.
-        if (!schemaHandlers.TryGetValue(eventType, out var schemaHandler)
-            && !schemaHandlers.TryGetValue(DefaultEventType, out schemaHandler))
+        var schemaHandler = await ResolveSchemaHandlerAsync(result, eventType, correlationId, appId, cancellationToken);
+
+        if (schemaHandler is null)
         {
-            logger.LogCritical(
-                "{ConsumerName}: no registered schema for Type header '{EventType}' at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, AppId: {AppId}",
-                ConsumerName, eventType, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, appId);
-
-            await WriteBlobAsync(
-                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName,
-                string.IsNullOrEmpty(eventType) ? "UnknownEventType" : eventType, correlationId, "bin",
-                new MemoryStream(result.Message.Value ?? []), cancellationToken);
-
-            offsetTracker.Complete(result.TopicPartitionOffset);
             return;
         }
 
-        object value;
-        TimeSpan deserializeDuration;
+        var deserialized = await TryDeserializeAsync(schemaHandler, result, headers, correlationId, eventType, appId, cancellationToken);
 
-        try
+        if (deserialized is null)
         {
-            var deserializeStopwatch = Stopwatch.StartNew();
-            var rawValue = result.Message.Value;
-            value = schemaHandler.Deserialize(rawValue, new SerializationContext(MessageComponentType.Value, result.Topic, headers));
-            deserializeDuration = deserializeStopwatch.Elapsed;
-        }
-        catch (Exception ex)
-        {
-            logger.LogCritical(ex,
-                "{ConsumerName}: Deserialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
-
-            await WriteBlobAsync(
-                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
-                new MemoryStream(result.Message.Value ?? []), cancellationToken);
-
-            offsetTracker.Complete(result.TopicPartitionOffset);
             return;
         }
 
-        string json;
+        var (value, deserializeDuration) = deserialized.Value;
 
-        try
+        var json = await TrySerializeToJsonAsync(schemaHandler, value, result, correlationId, eventType, appId, cancellationToken);
+
+        if (json is null)
         {
-            json = schemaHandler.SerializeToJson(value);
-        }
-        catch (Exception ex)
-        {
-            // No JSON to fall back to here (that's the very thing that just failed) - raw bytes,
-            // same as a deserialize failure, so this message isn't lost outright.
-            logger.LogCritical(ex,
-                "{ConsumerName}: Serialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
-                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
-
-            await WriteBlobAsync(
-                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
-                new MemoryStream(result.Message.Value ?? []), cancellationToken);
-
-            offsetTracker.Complete(result.TopicPartitionOffset);
             return;
         }
 
-        await WriteBlobAsync(
-            coldFileStore, blobStorageOptions.RequestAuditContainerName, schemaHandler.SchemaName, correlationId, "json",
-            new MemoryStream(Encoding.UTF8.GetBytes(json)), cancellationToken);
-
-        bool isDuplicate;
-
-        if (Options.DeduplicationCheckEnabled == false)
-        {
-            // Explicitly turned off for this topic (event level or inherited from Kafka level) -
-            // not the same as the fail-open path below, which still attempts the check. The
-            // downstream Service Bus consumer's own idempotency check (§2) is still the correctness
-            // backstop either way; this flag only trades away the latency/cost optimization.
-            isDuplicate = false;
-        }
-        else
-        {
-            try
-            {
-                var deduplicationStopwatch = Stopwatch.StartNew();
-                isDuplicate = await deduplicationService.IsDuplicateAsync($"IIS_WMS_{eventType}", deduplicationId, correlationId, cancellationToken);
-
-                logger.LogDebug(
-                    "{ConsumerName}: deduplication check completed for message at {Topic}:{Partition}:{Offset} in {DeduplicationDurationMs}ms - IsDuplicate: {IsDuplicate}. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
-                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, deduplicationStopwatch.Elapsed.TotalMilliseconds, isDuplicate, correlationId, eventType, appId);
-            }
-            catch (Exception ex)
-            {
-                // Fail open, not closed: the dedup check is a best-effort layer backed by an external
-                // dependency (Nexus) that can itself be unavailable. Treating that as fatal would mean a
-                // Nexus outage dead-letters the entire topic; treating it as "duplicate" would silently
-                // drop every message while Nexus is down. Proceeding as "not a duplicate" instead relies
-                // on the downstream Service Bus consumer's own idempotency check (§2) as the backstop -
-                // this consumer's dedup check is a latency/cost optimization on top of that, not the only
-                // line of defense against a redelivered message being applied twice.
-                logger.LogWarning(ex,
-                    "{ConsumerName}: deduplication check failed for message at {Topic}:{Partition}:{Offset} - proceeding as not a duplicate. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
-                    ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
-                isDuplicate = false;
-            }
-        }
+        var coldAuditBlobWriteDuration = await WriteColdAuditLogAsync(schemaHandler.SchemaName, correlationId, json, cancellationToken);
+        var (isDuplicate, deduplicationDuration) = await CheckDeduplicationAsync(eventType, deduplicationId, correlationId, result, appId, cancellationToken);
 
         if (isDuplicate)
         {
@@ -834,34 +767,14 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
             return;
         }
 
-        TimeSpan validationDuration;
-        bool isValid;
+        var validated = await TryValidateAsync(schemaHandler, value, eventType, headers, scope, json, correlationId, appId, result, cancellationToken);
 
-        try
+        if (validated is null)
         {
-            var validationStopwatch = Stopwatch.StartNew();
-            isValid = await schemaHandler.ValidateAsync(value, cancellationToken);
-
-            // Second validation stage: the blob-stored {SchemaName}/{eventType}.cs template, when one
-            // exists (no template means the message passes this stage untouched). Same throw-vs-false
-            // contract as ValidateAsync itself - a throw lands in the catch below like any other
-            // validation failure - and only reached when the static handler already passed, so a
-            // template can tighten a schema's validation but never overrule a rejection. The message's
-            // own DI scope rides along as the template's `services` global, so a template resolves
-            // this message's scoped instances (e.g. ICorrelationContext), not fresh ones.
-            if (isValid)
-            {
-                isValid = await dynamicEventValidator.ValidateAsync(
-                    schemaHandler.SchemaName, eventType, value, headers, logger, scope.ServiceProvider, cancellationToken);
-            }
-
-            validationDuration = validationStopwatch.Elapsed;
-        }
-        catch (Exception ex)
-        {
-            await HandleNonFatalFailureAsync("Validation", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
             return;
         }
+
+        var (isValid, schemaValidationDuration, dynamicValidationDuration) = validated.Value;
 
         if (!isValid)
         {
@@ -875,68 +788,305 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
             return;
         }
 
+        var orderArchiveDuration = EnqueueOrderArchive(schemaHandler, value, json, correlationId, eventType, appId);
+
+        var durations = new ProcessingDurations(
+            deserializeDuration, coldAuditBlobWriteDuration, deduplicationDuration, schemaValidationDuration,
+            dynamicValidationDuration, orderArchiveDuration);
+
+        await RelayToServiceBusAsync(
+            schemaHandler, value, eventKey, json, correlationId, eventType, appId,
+            correlationContext, result, durations, totalStopwatch, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads this message's Kafka headers into the identifiers used throughout the rest of the flow -
+    /// correlation id (falling back to a synthetic <c>-{guid}</c> when the producer didn't set one),
+    /// deduplication id, event type, app id (falling back to this service's own configured identity,
+    /// <see cref="ApplicationOptions.AppId"/>, when the producer didn't set an App-Id header),
+    /// and the Kafka record's event key.
+    /// </summary>
+    /// <param name="headers">Headers on the consumed Kafka message, or <see langword="null"/> if none were sent.</param>
+    private (string? RawCorrelationId, string CorrelationId, string DeduplicationId, string EventType, string AppId, string EventKey) ExtractMessageIdentifiers(Headers? headers)
+    {
+        var rawCorrelationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId);
+        var correlationId = rawCorrelationId ?? $"-{Guid.NewGuid().ToString()}";
+        var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
+        var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
+
+        var rawAppId = TryGetHeader(headers, KafkaHeaderNames.AppId);
+        var appId = string.IsNullOrEmpty(rawAppId) ? applicationOptions.AppId : rawAppId;
+
+        var eventKey = TryGetHeader(headers, KafkaHeaderNames.EventKey) ?? string.Empty;
+
+        return (rawCorrelationId, correlationId, deduplicationId, eventType, appId, eventKey);
+    }
+
+    /// <summary>
+    /// Resolves this message's <see cref="ISchemaHandler"/> - the exact <paramref name="eventType"/>
+    /// Type header value first, falling back to <see cref="DefaultEventType"/> for a consumer that
+    /// registers one schema regardless of that header (see the class-level remarks). When neither
+    /// matches, dead-letters the raw message bytes to hot storage and completes the offset itself,
+    /// returning <see langword="null"/> to signal to the caller that this message is already fully handled.
+    /// </summary>
+    private async Task<ISchemaHandler?> ResolveSchemaHandlerAsync(
+        ConsumeResult<string, byte[]> result, string eventType, string correlationId, string appId, CancellationToken cancellationToken)
+    {
+        if (schemaHandlers.TryGetValue(eventType, out var schemaHandler)
+            || schemaHandlers.TryGetValue(DefaultEventType, out schemaHandler))
+        {
+            return schemaHandler;
+        }
+
+        logger.LogCritical(
+            "{ConsumerName}: no registered schema for Type header '{EventType}' at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, AppId: {AppId}",
+            ConsumerName, eventType, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, appId);
+
+        await WriteBlobAsync(
+            hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName,
+            string.IsNullOrEmpty(eventType) ? "UnknownEventType" : eventType, correlationId, "bin",
+            new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+        offsetTracker.Complete(result.TopicPartitionOffset);
+        return null;
+    }
+
+    /// <summary>
+    /// Deserializes this message's raw Kafka bytes via <paramref name="schemaHandler"/>. On failure,
+    /// dead-letters the raw bytes to hot storage and completes the offset itself, returning
+    /// <see langword="null"/> to signal to the caller that this message is already fully handled.
+    /// </summary>
+    private async Task<(object Value, TimeSpan Duration)?> TryDeserializeAsync(
+        ISchemaHandler schemaHandler, ConsumeResult<string, byte[]> result, Headers? headers,
+        string correlationId, string eventType, string appId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var deserializeStopwatch = Stopwatch.StartNew();
+            var rawValue = result.Message.Value;
+            var value = schemaHandler.Deserialize(rawValue, new SerializationContext(MessageComponentType.Value, result.Topic, headers));
+            return (value, deserializeStopwatch.Elapsed);
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex,
+                "{ConsumerName}: Deserialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
+
+            await WriteBlobAsync(
+                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
+                new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Serializes <paramref name="value"/> to JSON via <paramref name="schemaHandler"/>. On failure,
+    /// dead-letters the raw Kafka bytes (there is no JSON to fall back to - that's the very thing that
+    /// just failed) and completes the offset itself, returning <see langword="null"/> to signal to the
+    /// caller that this message is already fully handled.
+    /// </summary>
+    private async Task<string?> TrySerializeToJsonAsync(
+        ISchemaHandler schemaHandler, object value, ConsumeResult<string, byte[]> result,
+        string correlationId, string eventType, string appId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return schemaHandler.SerializeToJson(value);
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex,
+                "{ConsumerName}: Serialize failed for message at {Topic}:{Partition}:{Offset} - writing raw bytes to hot storage and committing. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
+
+            await WriteBlobAsync(
+                hotFileStore, blobStorageOptions.ConsumerDeadLetterContainerName, schemaHandler.SchemaName, correlationId, "bin",
+                new MemoryStream(result.Message.Value ?? []), cancellationToken);
+
+            offsetTracker.Complete(result.TopicPartitionOffset);
+            return null;
+        }
+    }
+
+    /// <summary>Writes <paramref name="json"/> to the cold-tier <see cref="BlobStorageOptions.RequestAuditContainerName"/> audit container - unconditional, not gated by <see cref="BlobStorageOptions.RequestAuditEnabled"/> (see the class-level remarks).</summary>
+    private async Task<TimeSpan> WriteColdAuditLogAsync(string schemaName, string correlationId, string json, CancellationToken cancellationToken)
+    {
+        var coldAuditBlobWriteStopwatch = Stopwatch.StartNew();
+
+        await WriteBlobAsync(
+            coldFileStore, blobStorageOptions.RequestAuditContainerName, schemaName, correlationId, "json",
+            new MemoryStream(Encoding.UTF8.GetBytes(json)), cancellationToken);
+
+        return coldAuditBlobWriteStopwatch.Elapsed;
+    }
+
+    /// <summary>
+    /// Checks <see cref="IDeduplicationService"/> for this message, unless
+    /// <see cref="ConsumerOptions.DeduplicationCheckEnabled"/> is explicitly off for this topic. Fails
+    /// open (returns "not a duplicate") if the check itself throws - the dedup check is a best-effort
+    /// layer backed by an external dependency (Nexus) that can itself be unavailable, and the downstream
+    /// Service Bus consumer's own idempotency check (§2) is the correctness backstop either way.
+    /// </summary>
+    private async Task<(bool IsDuplicate, TimeSpan Duration)> CheckDeduplicationAsync(
+        string eventType, string deduplicationId, string correlationId, ConsumeResult<string, byte[]> result, string appId, CancellationToken cancellationToken)
+    {
+        if (Options.DeduplicationCheckEnabled == false)
+        {
+            // Explicitly turned off for this topic (event level or inherited from Kafka level) -
+            // not the same as the fail-open path below, which still attempts the check. The
+            // downstream Service Bus consumer's own idempotency check (§2) is still the correctness
+            // backstop either way; this flag only trades away the latency/cost optimization.
+            return (false, TimeSpan.Zero);
+        }
+
+        var deduplicationStopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            var isDuplicate = await deduplicationService.IsDuplicateAsync($"IIS_WMS_{eventType}", deduplicationId, correlationId, cancellationToken);
+            return (isDuplicate, deduplicationStopwatch.Elapsed);
+        }
+        catch (Exception ex)
+        {
+            // Fail open, not closed: treating this as fatal would mean a Nexus outage dead-letters the
+            // entire topic; treating it as "duplicate" would silently drop every message while Nexus is
+            // down. Proceeding as "not a duplicate" instead relies on the downstream Service Bus
+            // consumer's own idempotency check (§2) as the backstop - this consumer's dedup check is a
+            // latency/cost optimization on top of that, not the only line of defense against a
+            // redelivered message being applied twice.
+            logger.LogWarning(ex,
+                "{ConsumerName}: deduplication check failed for message at {Topic}:{Partition}:{Offset} - proceeding as not a duplicate. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+                ConsumerName, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId);
+
+            return (false, deduplicationStopwatch.Elapsed);
+        }
+    }
+
+    /// <summary>
+    /// Runs both validation stages for <paramref name="value"/>: <paramref name="schemaHandler"/>'s own
+    /// <c>ValidateAsync</c>, then (only if that passed) the blob-stored dynamic template via
+    /// <see cref="IDynamicEventValidator"/>. On a thrown exception from either stage, delegates to
+    /// <see cref="HandleNonFatalFailureAsync"/> and returns <see langword="null"/> to signal to the
+    /// caller that this message is already fully handled.
+    /// </summary>
+    private async Task<(bool IsValid, TimeSpan SchemaValidationDuration, TimeSpan DynamicValidationDuration)?> TryValidateAsync(
+        ISchemaHandler schemaHandler, object value, string eventType, Headers? headers, IServiceScope scope, string json,
+        string correlationId, string appId, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var schemaValidationStopwatch = Stopwatch.StartNew();
+            var isValid = await schemaHandler.ValidateAsync(value, cancellationToken);
+            var schemaValidationDuration = schemaValidationStopwatch.Elapsed;
+            var dynamicValidationDuration = TimeSpan.Zero;
+
+            // Second validation stage: the blob-stored {SchemaName}/{eventType}.cs template, when one
+            // exists (no template means the message passes this stage untouched). Same throw-vs-false
+            // contract as ValidateAsync itself - a throw lands in the catch below like any other
+            // validation failure - and only reached when the static handler already passed, so a
+            // template can tighten a schema's validation but never overrule a rejection. The message's
+            // own DI scope rides along as the template's `services` global, so a template resolves
+            // this message's scoped instances (e.g. ICorrelationContext), not fresh ones.
+            if (isValid)
+            {
+                var dynamicValidationStopwatch = Stopwatch.StartNew();
+                isValid = await dynamicEventValidator.ValidateAsync(
+                    "Kafka", eventType, value, headers, logger, scope.ServiceProvider, cancellationToken);
+                dynamicValidationDuration = dynamicValidationStopwatch.Elapsed;
+            }
+
+            return (isValid, schemaValidationDuration, dynamicValidationDuration);
+        }
+        catch (Exception ex)
+        {
+            await HandleNonFatalFailureAsync("Validation", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Enqueues this message's <c>OrderArchive</c> record onto the background Cosmos-write pipeline
+    /// (<see cref="IOrderArchiveWriter"/>) when <paramref name="schemaHandler"/> computes a non-empty
+    /// archive key for <paramref name="value"/> - a no-op (returning <see cref="TimeSpan.Zero"/>) for a
+    /// schema that doesn't archive to Cosmos. Unlike the Cosmos upsert this replaced, enqueueing cannot
+    /// fail: <see cref="IOrderArchiveWriter.Enqueue"/> never throws, so Service Bus relay is no longer
+    /// gated on the archive write completing - see the "Decouple OrderArchive Cosmos writes" plan for
+    /// why this behavior change (proceed-regardless-of-archive-outcome) is safe for this write-once
+    /// audit record.
+    /// </summary>
+    private TimeSpan EnqueueOrderArchive(
+        ISchemaHandler schemaHandler, object value, string json, string correlationId, string eventType, string appId)
+    {
         // Opt-in per schema (CreateSchemaHandler's getOrderArchiveKey) - a schema that doesn't supply
         // one never computes this and every message skips straight to Service Bus, same as before this
         // archive step existed.
         var orderArchiveKey = schemaHandler.GetOrderArchiveKey(value);
-        var orderArchiveDuration = TimeSpan.Zero;
 
-        if (!string.IsNullOrEmpty(orderArchiveKey))
+        if (string.IsNullOrEmpty(orderArchiveKey))
         {
-            try
-            {
-                var orderArchiveStopwatch = Stopwatch.StartNew();
-
-                var orderArchive = OrderArchive.Create(
-                    $"{schemaHandler.SchemaName}_{correlationId}", orderArchiveKey, json, DateTime.UtcNow);
-
-                var orderArchiveRepository = scope.ServiceProvider.GetRequiredService<IOrderArchiveRepository>();
-                await orderArchiveRepository.UpsertAsync(orderArchive, cancellationToken);
-
-                orderArchiveDuration = orderArchiveStopwatch.Elapsed;
-
-                logger.LogInformation(
-                    "{ConsumerName}: OrderArchive upsert for {SchemaName}_{CorrelationId} took {OrderArchiveDurationMs}ms. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
-                    ConsumerName, schemaHandler.SchemaName, correlationId, orderArchiveDuration.TotalMilliseconds, correlationId, eventType, appId);
-            }
-            catch (Exception ex)
-            {
-                await HandleNonFatalFailureAsync("OrderArchiveUpsert", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
-                return;
-            }
+            return TimeSpan.Zero;
         }
 
+        var orderArchiveStopwatch = Stopwatch.StartNew();
+
+        var orderArchive = OrderArchive.Create(
+            $"{schemaHandler.SchemaName}_{correlationId}", orderArchiveKey, json, correlationId, DateTime.UtcNow);
+
+        orderArchiveWriter.Enqueue(orderArchive);
+
+        var orderArchiveDuration = orderArchiveStopwatch.Elapsed;
+
+        logger.LogInformation(
+            "{ConsumerName}: OrderArchive enqueued for {SchemaName}_{CorrelationId} in {OrderArchiveDurationMs}ms. CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}",
+            ConsumerName, schemaHandler.SchemaName, correlationId, orderArchiveDuration.TotalMilliseconds, correlationId, eventType, appId);
+
+        return orderArchiveDuration;
+    }
+
+    /// <summary>Per-stage duration breakdown for <see cref="ProcessMessageAsync"/>'s final "relayed" log line - bundled into one value passed to <see cref="RelayToServiceBusAsync"/> instead of six separate parameters. Claim-check/publish durations aren't here - they come back from <see cref="IServiceBusRelayPublisher.PublishAsync"/> itself.</summary>
+    private readonly record struct ProcessingDurations(
+        TimeSpan Deserialize,
+        TimeSpan ColdAuditBlobWrite,
+        TimeSpan Deduplication,
+        TimeSpan SchemaValidation,
+        TimeSpan DynamicValidation,
+        TimeSpan OrderArchive);
+
+    /// <summary>
+    /// Maps <paramref name="value"/> to Service Bus routing and relays it through the shared
+    /// <see cref="IServiceBusRelayPublisher"/> - envelope construction, the claim-check/blob-offload
+    /// decision, and the resilience-pipeline send all live there now (see its own remarks); this method
+    /// only supplies the routing/audit fields and reports the outcome. On a publish failure - even
+    /// after the pipeline's own retries are exhausted - delegates to
+    /// <see cref="HandleNonFatalFailureAsync"/> instead of leaving the message unacknowledged (see the
+    /// class-level remarks on why this is deliberately non-fatal).
+    /// </summary>
+    private async Task RelayToServiceBusAsync(
+        ISchemaHandler schemaHandler, object value, string eventKey, string json,
+        string correlationId, string eventType, string appId, ICorrelationContext correlationContext,
+        ConsumeResult<string, byte[]> result, ProcessingDurations durations, Stopwatch totalStopwatch, CancellationToken cancellationToken)
+    {
         try
         {
             var kafkaEventKey = string.IsNullOrWhiteSpace(result.Message.Key) ? eventKey : result.Message.Key;
             var (sessionId, messageId) = schemaHandler.GetServiceBusRouting(value, kafkaEventKey);
 
-            // Wraps the schema's own JSON with the full CorrelationContext this consumer built above -
-            // see ServiceBusRelayEnvelope's own remarks for why this travels in the body in addition to
-            // (not instead of) the ApplicationProperties property below.
-            using var payloadDocument = JsonDocument.Parse(json);
-            var envelope = new ServiceBusRelayEnvelope
-            {
-                CorrelationId = correlationId,
-                AppId = appId,
-                Types = correlationContext.Types,
-                Payload = payloadDocument.RootElement.Clone(),
-            };
+            var relayMessage = new ServiceBusRelayMessage(
+                QueueName: schemaHandler.ServiceBusQueueName ?? Options.ServiceBusQueueName,
+                SessionId: sessionId,
+                MessageId: messageId,
+                CorrelationId: correlationId,
+                AppId: appId,
+                Types: correlationContext.Types,
+                SourceName: ConsumerName,
+                PayloadName: schemaHandler.SchemaName,
+                Json: json,
+                MaxMessageSizeBytesOverride: Options.MaxServiceBusMessageSizeBytes ?? ConsumerOptions.DefaultMaxServiceBusMessageSizeBytes);
 
-            var message = new ServiceBusMessage(JsonSerializer.Serialize(envelope))
-            {
-                // Deterministic id from the event payload - this is what makes the Service Bus
-                // consumer's dedupe check on redelivery actually work.
-                MessageId = messageId,
-                SessionId = sessionId,
-            };
-            message.ApplicationProperties["CorrelationId"] = correlationId;
-
-            var serviceBusSender = GetServiceBusSender(schemaHandler.ServiceBusQueueName ?? Options.ServiceBusQueueName);
-            var pipeline = pipelineProvider.GetPipeline(ResiliencePipelines.ServiceBusPublish);
-
-            await pipeline.ExecuteAsync(
-                async ct => await serviceBusSender.SendMessageAsync(message, ct), cancellationToken);
+            var publishResult = await relayPublisher.PublishAsync(relayMessage, cancellationToken);
 
             // Reports completion to the tracker rather than committing this offset directly - with
             // multiple workers in flight, this message's offset is not necessarily the next one the
@@ -945,15 +1095,28 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
 
             logger.LogInformation(
                 "{ConsumerName}: relayed {MessageId} for session {SessionId} from {Topic}:{Partition}:{Offset} to Service Bus. " +
-                "CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}, DeserializeDurationMs: {DeserializeDurationMs}, ValidationDurationMs: {ValidationDurationMs}, OrderArchiveDurationMs: {OrderArchiveDurationMs}, TotalDurationMs: {TotalDurationMs}",
+                "CorrelationId: {CorrelationId}, EventType: {EventType}, AppId: {AppId}, " +
+                "DeserializeDurationMs: {DeserializeDurationMs}, ColdAuditBlobWriteDurationMs: {ColdAuditBlobWriteDurationMs}, " +
+                "DeduplicationDurationMs: {DeduplicationDurationMs}, SchemaValidationDurationMs: {SchemaValidationDurationMs}, " +
+                "DynamicValidationDurationMs: {DynamicValidationDurationMs}, OrderArchiveDurationMs: {OrderArchiveDurationMs}, " +
+                "BlobOffloadDurationMs: {BlobOffloadDurationMs}, ServiceBusPublishDurationMs: {ServiceBusPublishDurationMs}, " +
+                "TotalDurationMs: {TotalDurationMs}",
                 ConsumerName, messageId, sessionId, result.Topic, result.Partition.Value, result.Offset.Value, correlationId, eventType, appId,
-                deserializeDuration.TotalMilliseconds, validationDuration.TotalMilliseconds, orderArchiveDuration.TotalMilliseconds, totalStopwatch.Elapsed.TotalMilliseconds);
+                durations.Deserialize.TotalMilliseconds, durations.ColdAuditBlobWrite.TotalMilliseconds,
+                durations.Deduplication.TotalMilliseconds, durations.SchemaValidation.TotalMilliseconds,
+                durations.DynamicValidation.TotalMilliseconds, durations.OrderArchive.TotalMilliseconds,
+                publishResult.BlobOffloadDuration.TotalMilliseconds, publishResult.PublishDuration.TotalMilliseconds,
+                totalStopwatch.Elapsed.TotalMilliseconds);
         }
         catch (Exception ex)
         {
             await HandleNonFatalFailureAsync("ServiceBusPublish", ex, json, schemaHandler.SchemaName, correlationId, eventType, appId, result, cancellationToken);
         }
     }
+
+    #endregion
+
+    #region Failure handling and blob helpers
 
     /// <summary>
     /// Shared handling for a non-fatal per-message failure past the deserialize step (validation or
@@ -1015,94 +1178,33 @@ public abstract class ConsumerHostedService : BackgroundService, IAsyncDisposabl
             : null;
     }
 
+    #endregion
+
+    #region Disposal
+
     /// <summary>
     /// Closes the underlying Kafka consumer and disposes the Schema Registry client
-    /// <see cref="CreateSchemaHandler{TAvro,TValue}"/> built (if any) - shared by both
-    /// <see cref="Dispose()"/> and <see cref="DisposeAsync"/> so the cleanup isn't duplicated between
-    /// them. Guarded by <see cref="disposed"/> so a caller that disposes this instance more than once
-    /// (through either interface, or both) only closes the consumer once - the DI-driven shutdown path
-    /// never does this itself (see <see cref="DisposeAsync"/>'s remarks), but nothing stops a test or
-    /// other caller from calling <see cref="Dispose()"/>/<see cref="DisposeAsync"/> directly more than
-    /// once.
-    /// </summary>
-    private void DisposeKafkaResources()
-    {
-        if (disposed)
-        {
-            return;
-        }
-
-        consumer.Close();
-        consumer.Dispose();
-        schemaRegistryClient?.Dispose();
-
-        disposed = true;
-    }
-
-    /// <summary>
-    /// Synchronous fallback for a caller that disposes this instance directly (e.g. a <c>using</c> in
-    /// a unit test) rather than through the host's own shutdown. Cannot release the cached
-    /// <see cref="ServiceBusSender"/>s here - <see cref="ServiceBusSender"/> only exposes
-    /// <see cref="ServiceBusSender.DisposeAsync"/>, no synchronous <c>Dispose</c> - so those are left
-    /// for the GC/broker-side idle timeout to reclaim on this path. <see cref="DisposeAsync"/> is what
-    /// actually runs on a normal AKS shutdown (see its own remarks) and is the path that matters.
+    /// <see cref="CreateSchemaHandler{TAvro,TValue}"/> built (if any). Guarded by <see cref="disposed"/>
+    /// so a caller that disposes this instance more than once only closes the consumer once. Service
+    /// Bus sender disposal is no longer this class's concern - the shared <see cref="IServiceBusRelayPublisher"/>
+    /// (itself disposed independently by the DI container, see <c>ServiceBusRelayPublisher</c>'s own
+    /// remarks) owns that now, which is also why this class no longer implements <see cref="IAsyncDisposable"/>:
+    /// every remaining resource here disposes synchronously.
     /// </summary>
     public override void Dispose()
     {
-        DisposeKafkaResources();
-        base.Dispose();
-        GC.SuppressFinalize(this);
-    }
-
-    /// <summary>
-    /// Disposes every cached <see cref="ServiceBusSender"/> (see <see cref="serviceBusSenders"/>)
-    /// alongside the Kafka consumer/Schema Registry client - this is the path the host actually takes
-    /// on a graceful shutdown: this class implements <see cref="IAsyncDisposable"/> alongside
-    /// <see cref="IDisposable"/>, and the default <c>Microsoft.Extensions.DependencyInjection</c>
-    /// <c>ServiceProvider</c> prefers <see cref="IAsyncDisposable.DisposeAsync"/> over
-    /// <see cref="IDisposable.Dispose"/> when a singleton implements both, calling it once as the root
-    /// provider itself is disposed at the end of <c>IHost.StopAsync</c> - a Kubernetes-initiated pod
-    /// termination (redeploy, scale-down, `kubectl delete pod`) sends SIGTERM first and waits up to
-    /// `terminationGracePeriodSeconds` (kubernetes-deployment-best-practices.instructions.md) before
-    /// SIGKILL, which is exactly the window the generic host uses to run this. <b>A hard
-    /// crash/SIGKILL/OOM-kill runs no code at all</b> - no `Dispose`/`DisposeAsync` override on any
-    /// type can run in that case; the AMQP links these senders hold are instead reclaimed by Service
-    /// Bus's own idle-connection timeout on the broker side, and a fresh process/pod opens fresh
-    /// senders on restart via <see cref="GetServiceBusSender"/>. Also callable directly (e.g. the
-    /// admin endpoint that lists/clears cached senders) without disposing the rest of this instance -
-    /// see <see cref="ClearServiceBusSendersAsync"/>.
-    /// </summary>
-    public async ValueTask DisposeAsync()
-    {
-        DisposeKafkaResources();
-        await ClearServiceBusSendersAsync();
-        base.Dispose();
-        GC.SuppressFinalize(this);
-    }
-
-    /// <summary>
-    /// Queue names this consumer currently holds a cached <see cref="ServiceBusSender"/> for - read by
-    /// the admin endpoint that lists cached senders across every registered consumer.
-    /// </summary>
-    public IReadOnlyCollection<string> CachedServiceBusSenderQueueNames => [.. serviceBusSenders.Keys];
-
-    /// <summary>
-    /// Disposes and evicts every <see cref="ServiceBusSender"/> this consumer currently has cached -
-    /// the next publish re-opens a fresh sender for its queue via <see cref="GetServiceBusSender"/>.
-    /// Safe to call while the consumer is running: a publish already in flight holds its own reference
-    /// to the sender it fetched, so clearing the cache underneath it does not fault that in-flight
-    /// send - it only affects senders fetched after this call returns. Removes each entry before
-    /// awaiting its disposal, not after, so a concurrent <see cref="GetServiceBusSender"/> call never
-    /// observes (and reuses) a sender this method has already started disposing.
-    /// </summary>
-    public async Task ClearServiceBusSendersAsync()
-    {
-        foreach (var queueName in serviceBusSenders.Keys.ToArray())
+        if (!disposed)
         {
-            if (serviceBusSenders.TryRemove(queueName, out var sender))
-            {
-                await sender.DisposeAsync();
-            }
+            consumer.Close();
+            consumer.Dispose();
+            schemaRegistryClient?.Dispose();
+
+            disposed = true;
         }
+
+        base.Dispose();
+        GC.SuppressFinalize(this);
     }
+
+    #endregion
 }

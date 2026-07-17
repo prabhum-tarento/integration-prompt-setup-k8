@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
-using IIS.WMS.Consumer.Infrastructure.Resilience;
+using IIS.WMS.Common.Resilience;
 using IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;

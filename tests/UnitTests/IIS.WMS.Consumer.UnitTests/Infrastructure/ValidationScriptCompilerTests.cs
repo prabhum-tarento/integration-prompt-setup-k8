@@ -1,6 +1,6 @@
 using System.Text;
 using Confluent.Kafka;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.Exceptions;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.DependencyInjection;

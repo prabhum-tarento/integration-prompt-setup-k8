@@ -30,7 +30,7 @@ internal sealed class ExpandoObjectJsonConverter : JsonConverter<ExpandoObject>
         JsonValueKind.Object => ConvertObject(element),
         JsonValueKind.Array => element.EnumerateArray().Select(ConvertElement).ToList(),
         JsonValueKind.String => element.GetString(),
-        JsonValueKind.Number => element.TryGetInt64(out var longValue) ? longValue : element.GetDouble(),
+        JsonValueKind.Number => element.TryGetInt64(out var longValue) ? (object)longValue : element.GetDouble(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
         JsonValueKind.Null or JsonValueKind.Undefined => null,

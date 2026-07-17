@@ -7,12 +7,12 @@ using Microsoft.AspNetCore.Mvc;
 namespace IIS.WMS.Consumer.Api.Controllers;
 
 /// <summary>
-/// Admin endpoint over the cached <c>ServiceBusSender</c>s every Kafka relay consumer running in
-/// <b>this process</b> holds (integration-resiliency.instructions.md §1) - see
-/// <see cref="IServiceBusSenderCacheService"/>'s own remarks for the single-process scope this covers
-/// and why it needs to move once the Kafka consumer splits into its own Deployment/Pod. <see cref="Get"/>
-/// falls under the global <c>RequireAuthenticatedUser</c> fallback policy (Program.cs) like every other
-/// non-health endpoint - it's a read with no side effect. <see cref="ClearAsync"/> additionally requires
+/// Admin endpoint over the cached <c>ServiceBusSender</c>s held in <b>this process</b>
+/// (integration-resiliency.instructions.md §1) - see <see cref="IServiceBusSenderCacheService"/>'s own
+/// remarks for the single-process scope this covers and why it needs to move once the Kafka consumer
+/// splits into its own Deployment/Pod. <see cref="Get"/> falls under the global
+/// <c>RequireAuthenticatedUser</c> fallback policy (Program.cs) like every other non-health endpoint -
+/// it's a read with no side effect. <see cref="ClearAsync"/> additionally requires
 /// <see cref="AdminPolicyName"/> (see Program.cs) - clearing sender state is a privileged operation that
 /// shouldn't be reachable by every authenticated API consumer, only whichever principals are assigned
 /// <see cref="AdminRoleName"/>.
@@ -41,15 +41,15 @@ public sealed class ServiceBusSendersController(
     /// </summary>
     public const string AdminRoleName = "ServiceBusSenders.Admin";
 
-    /// <summary>Lists every registered consumer's currently-cached Service Bus sender queue names.</summary>
-    /// <returns><c>200 OK</c> with one entry per Kafka relay consumer running in this process.</returns>
+    /// <summary>Lists every registered source's currently-cached Service Bus sender queue names.</summary>
+    /// <returns><c>200 OK</c> with one entry per <c>IServiceBusSenderCacheSource</c> registered in this process.</returns>
     [HttpGet]
     [ProducesResponseType<IReadOnlyList<ServiceBusSenderCacheEntry>>(StatusCodes.Status200OK)]
     public ActionResult<IReadOnlyList<ServiceBusSenderCacheEntry>> Get()
     {
         var entries = cacheService.ListCachedSenders();
 
-        logger.LogDebug("GET cached Service Bus senders - {ConsumerCount} consumer(s).", entries.Count);
+        logger.LogDebug("GET cached Service Bus senders - {SourceCount} source(s).", entries.Count);
 
         return Ok(entries);
     }
@@ -73,7 +73,7 @@ public sealed class ServiceBusSendersController(
         await cacheService.ClearCachedSendersAsync(cancellationToken);
 
         logger.LogInformation(
-            "DELETE cleared cached Service Bus senders for {ConsumerCount} consumer(s).", cleared.Count);
+            "DELETE cleared cached Service Bus senders for {SourceCount} source(s).", cleared.Count);
 
         return Ok(cleared);
     }

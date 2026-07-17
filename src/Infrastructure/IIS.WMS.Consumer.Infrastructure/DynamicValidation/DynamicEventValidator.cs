@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using Confluent.Kafka;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;

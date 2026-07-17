@@ -1,6 +1,8 @@
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Extensions.Logging;
 
@@ -16,8 +18,12 @@ public sealed class OrderArchiveRepository : CosmosRepository<OrderArchive, Orde
     /// </summary>
     private const string ContainerName = "OrderArchive";
 
-    public OrderArchiveRepository(ICosmosContainerFactory containerFactory, ILogger<OrderArchiveRepository> logger)
-        : base(ContainerName, containerFactory, logger)
+    public OrderArchiveRepository(
+        ICosmosContainerFactory containerFactory,
+        ILogger<OrderArchiveRepository> logger,
+        ICorrelationContext correlationContext,
+        IAuditTrailWriter auditTrailWriter)
+        : base(ContainerName, containerFactory, logger, correlationContext, auditTrailWriter)
     {
     }
 

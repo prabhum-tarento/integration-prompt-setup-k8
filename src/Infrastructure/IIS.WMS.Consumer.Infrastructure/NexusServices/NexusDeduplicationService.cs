@@ -1,9 +1,10 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
+using IIS.WMS.Common.Resilience;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly.Registry;
@@ -38,10 +39,7 @@ public sealed class NexusDeduplicationService(
         }
 
         var compositeDeduplicationId = $"{applicationOptions.Value.AppId}_{consumerName}_{deduplicationId}_{correlationId}";
-
-        logger.LogDebug(
-            "Checking Nexus deduplication for {DeduplicationId}, correlation {CorrelationId}.",
-            compositeDeduplicationId, correlationId);
+        var stopwatch = Stopwatch.StartNew();
 
         var pipeline = pipelineProvider.GetPipeline<HttpResponseMessage>(ResiliencePipelines.OutboundHttp);
 
@@ -61,6 +59,7 @@ public sealed class NexusDeduplicationService(
             logger.LogInformation(
                 "Nexus reported {DeduplicationId} (correlation {CorrelationId}) as a duplicate.",
                 compositeDeduplicationId, correlationId);
+            LogCompleted(compositeDeduplicationId, correlationId, stopwatch.Elapsed, isDuplicate: true);
             return true;
         }
 
@@ -74,8 +73,19 @@ public sealed class NexusDeduplicationService(
                 response.StatusCode);
         }
 
+        LogCompleted(compositeDeduplicationId, correlationId, stopwatch.Elapsed, isDuplicate: false);
         return false;
     }
+
+    /// <summary>
+    /// Debug-level completion log for one <see cref="IsDuplicateAsync"/> call - owned here rather than
+    /// by <c>ConsumerHostedService</c>, which only needs the elapsed duration itself (folded into its
+    /// own per-message "relayed" summary log line), not a duplicate log line per call.
+    /// </summary>
+    private void LogCompleted(string compositeDeduplicationId, string correlationId, TimeSpan elapsed, bool isDuplicate) =>
+        logger.LogDebug(
+            "Nexus deduplication check completed for {DeduplicationId} (correlation {CorrelationId}) in {DeduplicationDurationMs}ms - IsDuplicate: {IsDuplicate}.",
+            compositeDeduplicationId, correlationId, elapsed.TotalMilliseconds, isDuplicate);
 
     private sealed record DeduplicationRequest([property: JsonPropertyName("dedupeId")] string DeduplicationId);
 }

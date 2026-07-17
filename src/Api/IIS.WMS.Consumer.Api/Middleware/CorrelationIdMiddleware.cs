@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Common.Correlation;
 using Microsoft.Extensions.Logging;
 using Serilog.Context;
 

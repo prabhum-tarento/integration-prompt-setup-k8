@@ -1,8 +1,9 @@
-using IIS.WMS.Consumer.Infrastructure.BlobStorage;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
+using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +24,16 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddResiliencePipelines();
         services.AddCosmosDb(configuration);
         services.AddBlobStorage(configuration);
+
+        // Depends on both AddCosmosDb (ICosmosContainerFactory, AuditRepository's own container) and
+        // AddBlobStorage (the hot-tier IFileStore the dead-letter fallback writes to) already being
+        // registered - registration order here doesn't matter for DI resolution, but the dependency is
+        // real, so this stays textually after both.
+        services.AddAuditTrail(configuration);
+
+        // Depends on AddCosmosDb for IOrderArchiveRepository, which OrderArchiveBackgroundService
+        // resolves per entry - same ordering rationale as AddAuditTrail above.
+        services.AddOrderArchiving(configuration);
         services.AddDynamicValidation(configuration);
         services.AddNexusDeduplicationService(configuration);
 
