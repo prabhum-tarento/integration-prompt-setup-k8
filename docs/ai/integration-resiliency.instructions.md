@@ -51,7 +51,7 @@ every hop, log line, and outbound call this flow makes.
   which type-erases each schema's own `IDeserializer<TValue>`,
   JSON-serializer, Service Bus router, and validator behind a common
   non-generic interface), keyed by the Kafka `Type` header value
-  (`KafkaHeaderNames.Type`) that schema corresponds to. A consumer that
+  (`WellKnownHeaderNames.Type`) that schema corresponds to. A consumer that
   handles exactly one schema regardless of that header's value registers
   its one handler under `ConsumerHostedService.DefaultEventType` instead of
   an exact value; the header's actual value is looked up first, falling
@@ -123,9 +123,11 @@ every hop, log line, and outbound call this flow makes.
   check entirely for a topic where Nexus coverage doesn't apply); run the
   resolved handler's `ValidateAsync` (always valid by default — a schema
   registers its own validator, e.g. a FluentValidation `IValidator<TValue>`,
-  via `CreateSchemaHandler`); route (`GetServiceBusRouting`) and publish to
+  via `CreateSchemaHandler`), then — only if that passed — the second,
+  **dynamic validation** stage; route (`GetServiceBusRouting`) and publish to
   the Service Bus queue — do not write to Cosmos DB directly from the Kafka
-  consumer. `ValidateAsync` returns a `bool`, not just throw-to-fail: a
+  consumer. Both `ValidateAsync` calls (schema and dynamic) share the same
+  contract: `bool`, not just throw-to-fail: a
   **throw** is a hard failure (malformed/invalid data, handled the same as
   every other failure mode below), while returning **`false`** means the
   message is valid but this consumer deliberately chooses not to relay it —
@@ -140,6 +142,28 @@ every hop, log line, and outbound call this flow makes.
   recognize is silently absent from the cold-tier audit trail, since it
   never survives the deserialize step — a raw-bytes record for the same
   message only exists if deserialization itself fails (see below).
+- **Dynamic validation** (the second `ValidateAsync` stage above): a
+  blob-stored, Roslyn-scripted per-`{Transport}/{Identifier}.cs` template via
+  `IIS.WMS.Common.DynamicValidation.IDynamicEventValidator` — for this Kafka
+  consumer, transport is the fixed folder `Kafka` and identifier is the
+  message's Kafka `Type` header value, e.g. `Kafka/inventory.InventoryStateChanged.cs`
+  (no template stored for a given identifier means the message passes this
+  stage untouched). This runtime (compiler, cache, script-globals contract) lives
+  in the shared kernel `IIS.WMS.Common`, not in this Infrastructure project,
+  because it's shared across transports — the Kafka consumer here, the
+  session-enabled `ServiceBusConsumerHostedService` (§2), and eventually a
+  Producer project's own Service Bus hosted service. Each transport adapts
+  its own native header type into the transport-neutral
+  `IIS.WMS.Common.Messaging.HeaderLookup` before calling `ValidateAsync` — a
+  stored template reads headers through `HeaderLookup`/`TryGetHeader`, never
+  a transport SDK type directly. A template that needs to resolve a
+  Consumer-specific service (e.g. `IDeduplicationService`) can, because
+  `ValidationScriptCompiler`'s `ScriptOptions` are extended per-transport via
+  `IValidationScriptReferenceProvider` (each transport registers its own
+  implementation supplying the assemblies/imports its templates need) rather
+  than the compiler hardcoding a Consumer assembly reference — this is what
+  keeps `IIS.WMS.Common` at zero `ProjectReference`s despite hosting the
+  compiler.
 - **No single message's failure stops the consumer or blocks any other
   message** — every failure mode below is handled uniformly, and this is a
   deliberate design choice, not just a poison-message backstop: multiple
@@ -337,6 +361,25 @@ var processor = client.CreateSessionProcessor(queueName, new ServiceBusSessionPr
   Sessions give you ordering, not exactly-once delivery — redelivery after
   a lock timeout or a crash before `CompleteMessageAsync` is still a normal
   case this code must handle correctly.
+- **Dynamic validation**: right after the inbound envelope is deserialized,
+  `ServiceBusConsumerHostedService.HandleMessageAsync` calls the same shared
+  `IIS.WMS.Common.DynamicValidation.IDynamicEventValidator` described in §1,
+  using the fixed transport folder `ServiceBus` together with the consumer's
+  own `ServiceBusConsumerOptions.QueueName` as the identifier — one template
+  per queue, not per event type, since this consumer has no per-message
+  "schema handler" concept the way the Kafka side does (blob path e.g.
+  `ServiceBus/inventory-state-changed.cs`). The message's
+  `ApplicationProperties` (`IReadOnlyDictionary<string, object>`) are adapted
+  to the transport-neutral `HeaderLookup` via a local `ToHeaderLookup`
+  helper before the call. This runs in its own `try`/`catch`, separate from
+  the dispatch `try`/`catch` below, because the two failure modes map to
+  different outcomes: a **throw** dead-letters the message
+  (`DeadLetterMessageAsync` with reason `"DynamicValidationFailed"`) rather
+  than being abandoned for redelivery, since a template exception is not a
+  transient infrastructure fault; returning **`false`** completes the
+  message without dispatching (logged at `Information`, same "valid but
+  deliberately not relayed" semantics as §1); returning **`true`** dispatches
+  normally, unaffected by this stage.
 - **Concurrency conflict retry (the re-read-and-reapply loop)**: this is
   the one piece of logic every cross-reference to "the concurrency retry
   pattern" in this doc set points to — it lives here, not in Polly (§3),
@@ -348,11 +391,11 @@ const int maxAttempts = 3;
 
 for (var attempt = 1; attempt <= maxAttempts; attempt++)
 {
-    var current = await repository.GetAsync(id, partitionKey, cancellationToken);
+    var current = await repository.GetAsync(id, category, cancellationToken);
 
     try
     {
-        await repository.PatchAsync(id, partitionKey, current!.ETag!, operations, cancellationToken);
+        await repository.PatchAsync(id, category, current!.ETag!, operations, cancellationToken);
         break;
     }
     catch (ConcurrencyException) when (attempt < maxAttempts)
@@ -495,10 +538,12 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 - **HTTP inbound**: generated/read by `CorrelationIdMiddleware` — see
   [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md).
 - **Kafka inbound**: if the message carries a `Correlation-Id` header
-  (`KafkaHeaderNames.CorrelationId` — matching the header name the upstream
-  Nexus/WMS producers already use, not this repo's own invention), use it;
-  otherwise generate a new GUID at the point of consumption. The same
-  `KafkaHeaderNames` class also names the `Deduplication-Id`, `App-Id`, and
+  (`WellKnownHeaderNames.CorrelationId` — matching the header name the
+  upstream Nexus/WMS producers already use, not this repo's own invention),
+  use it; otherwise generate a new GUID at the point of consumption. The
+  same `WellKnownHeaderNames` class (`IIS.WMS.Common.Messaging`, shared
+  across transports the same way `HeaderLookup` is — see §1) also names the
+  `Deduplication-Id`, `App-Id`, and
   `Type` headers read for the dedup check and structured logging in §1. If
   `App-Id` is missing or empty, `ConsumerHostedService` falls back to this
   service's own identity (`ApplicationOptions.ApplicationId`, bound from the
@@ -584,24 +629,57 @@ never assume the two containers share an account or a client.
   be included. A message that fails to deserialize at all only ever gets a
   hot-tier raw-bytes record, never a cold-tier one.
 - **Cold tier, Cosmos-mutation audit archive** (`audit-archive` container,
-  `BlobStorageOptions.AuditArchiveContainerName`): every Cosmos mutation
-  made through `CosmosRepository{TDomain,TDocument}` is captured as an
-  `AuditEntry` and enqueued onto a bounded channel
+  `BlobStorageOptions.AuditArchiveContainerName`, **plus** a second copy in
+  the `request-audit` container, `BlobStorageOptions.RequestAuditContainerName`):
+  every Cosmos mutation made through `CosmosRepository{TDomain,TDocument}` is
+  captured as an `AuditEntry` and enqueued onto a bounded channel
   (`Persistence.CosmosDb.Audit.AuditTrailWriter`); `AuditBackgroundService`
   drains that channel and fans each entry out to every registered
   `IAuditSink`. Which sink(s) run is configured independently via
   `Audit:CosmosDbEnabled` (persist to the Cosmos `AuditLog` container,
-  default `true`) and `Audit:ColdStorageEnabled` (also archive to this
-  container as JSON, default `false`) — when both are `true`, every entry
-  is persisted to both destinations, and at least one must be `true` or
-  `AddAuditTrail` throws at startup. Named `{yyyy}/{MM}/{dd}/{entryId}.json`,
-  same date-partitioned convention as the general request/response audit
-  above. A write failure here is non-fatal — logged and swallowed, same
+  default `true`) and `Audit:ColdStorageEnabled` (also archive to Blob
+  Storage, default `false`) — when both are `true`, every entry is persisted
+  to both destinations, and at least one must be `true` or `AddAuditTrail`
+  throws at startup. When `ColdStorageEnabled` is `true`, `ColdBlobAuditSink`
+  writes **two** blobs per entry, independently of each other (a failure
+  writing one never blocks the other — each upload has its own
+  `try`/`catch`, logged and swallowed on its own):
+  - `audit-archive`, named
+    `{ContainerName}/{TimestampUtc:yyyyMMddHHmmssffffff}_{CorrelationId}_{Schema}_{EntityId}__{EntityPartitionKey}_{Operation}_{Guid}.json`
+    — a different convention from the general request/response audit's
+    date-partitioned `{yyyy}/{MM}/{dd}/...` shape above, chosen so every
+    field needed to identify an entry is visible directly in the blob name
+    rather than requiring a download.
+  - `request-audit` (the same container the Kafka consumer's own audit
+    blobs above live in), named
+    `{CorrelationId}/Entity/{ContainerName}/{same file name as the audit-archive blob above}.json`
+    — the fixed `Entity` folder segment is what keeps this copy from
+    colliding with the Kafka consumer's own
+    `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/...` blobs
+    already in this container; reusing the identical file name (including
+    the same `Guid`) as the `audit-archive` copy lets both copies of one
+    logical write be cross-referenced by name alone. This container now
+    holds three distinct folder shapes — the general request/response audit's
+    `{yyyy}/{MM}/{dd}/...`, the Kafka consumer's
+    `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/...`, and this
+    `{CorrelationId}/Entity/{ContainerName}/...` one — don't assume every
+    blob under `request-audit` follows any single one of them.
+
+  `EntityPartitionKey` can be a composite key containing `:`
+  (cosmos-db.instructions.md §4) — replaced with `-` in the blob name since a
+  raw colon breaks filesystem-mapping tools (blobfuse, Storage Explorer
+  download) even though Blob Storage itself permits it. The trailing `Guid`
+  is a fresh `Guid.NewGuid()` generated at write time, independent of
+  `AuditEntry.Id`. Both writes are non-fatal — logged and swallowed, same
   "diagnostic aid, not the durability boundary" treatment as the rest of
   this section — and independent of the Cosmos sink's own hot-tier
   `audit-dead-letter` fallback (`BlobStorageOptions.AuditDeadLetterContainerName`),
   which only fires when the Cosmos write itself fails, not as a cold-storage
-  archival path.
+  archival path. `Audit:ExcludedContainers` (string array, empty by default)
+  names containers to skip audit capture for entirely -
+  `AuditTrailWriter.Enqueue` drops a matching entry (matched case-insensitively
+  against `AuditEntry.ContainerName`) before it ever reaches the channel, so
+  neither sink ever sees it.
 - All five go through Polly (§3) for transient fault handling — the Kafka
   consumer's own audit writes (`ConsumerHostedService.WriteBlobAsync`)
   additionally treat a Blob Storage outage (after Polly's retries are
@@ -631,7 +709,7 @@ var tasks = items.Select(async item =>
     await semaphore.WaitAsync(cancellationToken);
     try
     {
-        await repository.PatchAsync(item.Id, item.PartitionKey, item.ETag, item.Operations, cancellationToken);
+        await repository.PatchAsync(item.Id, item.Category, item.ETag, item.Operations, cancellationToken);
     }
     finally
     {

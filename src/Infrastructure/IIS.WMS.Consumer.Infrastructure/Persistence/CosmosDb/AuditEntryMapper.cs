@@ -18,7 +18,6 @@ internal static class AuditEntryMapper
     {
         Id = aggregate.Id,
         Category = aggregate.Category,
-        PartitionKey = aggregate.Category,
         ContainerName = aggregate.ContainerName,
         EntityId = aggregate.EntityId,
         EntityPartitionKey = aggregate.EntityPartitionKey,

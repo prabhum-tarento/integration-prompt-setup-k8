@@ -17,7 +17,7 @@ public sealed class CosmosDbOptions
     /// Container names themselves are declared per-repository, not here - see
     /// <see cref="CosmosContainerFactory"/> and cosmos-db.instructions.md §1.
     /// </summary>
-    public string PartitionKeyPath { get; init; } = "/partitionKey";
+    public string PartitionKeyPath { get; init; } = "/category";
 
     /// <summary>Local development only - the Cosmos DB Emulator's well-known fixed key, read from user-secrets, never appsettings.json.</summary>
     public string? EmulatorKey { get; init; }

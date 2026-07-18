@@ -10,7 +10,7 @@ public interface ICosmosDocument
     string Id { get; }
 
     /// <summary>Cosmos partition key value.</summary>
-    string PartitionKey { get; }
+    string Category { get; }
 
     /// <summary>Cosmos's system-managed optimistic-concurrency token.</summary>
     string? ETag { get; }

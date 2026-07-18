@@ -13,11 +13,8 @@ public sealed class OrderArchiveDocument : ICosmosDocument
     /// <summary>Deterministic item id - <c>{SchemaName}_{CorrelationId}</c>.</summary>
     public string Id { get; init; } = default!;
 
-    /// <summary>Caller-supplied category this record was archived under.</summary>
+    /// <summary>Caller-supplied category this record was archived under - also this entity's Cosmos partition key.</summary>
     public string Category { get; init; } = default!;
-
-    /// <summary>Cosmos partition key value - identical to <see cref="Category"/> for this entity.</summary>
-    public string PartitionKey { get; init; } = default!;
 
     /// <summary>
     /// The relayed event's JSON body (the mapped <c>EventMapper</c> result object), as archived at the

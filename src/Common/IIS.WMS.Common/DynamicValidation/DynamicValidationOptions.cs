@@ -1,4 +1,4 @@
-namespace IIS.WMS.Consumer.Infrastructure.DynamicValidation;
+namespace IIS.WMS.Common.DynamicValidation;
 
 /// <summary>Bound from the <c>DynamicValidation</c> configuration section - all defaults are usable without any configuration present.</summary>
 public sealed class DynamicValidationOptions
@@ -7,9 +7,9 @@ public sealed class DynamicValidationOptions
     public const string SectionName = "DynamicValidation";
 
     /// <summary>
-    /// Master switch for the Kafka consumer's dynamic-validation step. When off, every message skips
-    /// the template lookup entirely (as if no template existed) - the template CRUD API stays
-    /// available either way, so templates can be staged before being turned on.
+    /// Master switch for a consumer's dynamic-validation step. When off, every message skips the
+    /// template lookup entirely (as if no template existed) - the template CRUD API stays available
+    /// either way, so templates can be staged before being turned on.
     /// </summary>
     public bool Enabled { get; init; } = true;
 

@@ -17,7 +17,7 @@ public sealed class BulkInventoryImportService(
         await repository.UpsertAsync(item, cancellationToken);
 
         logger.LogInformation(
-            "Imported bulk on-hand quantity {Quantity} for {PartitionKey} from {SourceSystem}.",
-            request.Quantity, item.PartitionKey, request.SourceSystem);
+            "Imported bulk on-hand quantity {Quantity} for {Category} from {SourceSystem}.",
+            request.Quantity, item.Category, request.SourceSystem);
     }
 }

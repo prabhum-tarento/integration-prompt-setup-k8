@@ -1,9 +1,9 @@
 using FluentValidation;
 using IIS.WMS.Common.BlobStorage;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.Messaging;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.Resilience;

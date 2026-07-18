@@ -265,7 +265,7 @@ field, e.g. `"Unrecognized field \"channel\" ... 6 known properties: \"value\",
    the REST Proxy's own endpoint - the REST Proxy never reads them and never copies them
    onto the Kafka record. The only place to set actual Kafka record headers is the request
    **body's** `headers` array (below) - and the names must match
-   [KafkaHeaderNames.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaHeaderNames.cs)
+   [WellKnownHeaderNames.cs](../../src/Common/IIS.WMS.Common/Messaging/WellKnownHeaderNames.cs)
    exactly: `Correlation-Id`, `Deduplication-Id`, `Type`, `App-Id` - not `correlationId`/
    `dedupId`/`type`/`appId`.
 2. Posting the event payload as the **top-level** request body (e.g. `{"channel": ...,
@@ -459,7 +459,7 @@ subject's name via `type` to produce a different event/topic, same as
 always-on HTTP endpoint instead of a one-shot script.
 
 Putting the two fixes above together - all four headers
-[KafkaHeaderNames.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaHeaderNames.cs)
+[WellKnownHeaderNames.cs](../../src/Common/IIS.WMS.Common/Messaging/WellKnownHeaderNames.cs)
 reads, moved into the `headers` array, and the event payload nested under `value.data`:
 
 ```powershell

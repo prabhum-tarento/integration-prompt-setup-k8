@@ -16,7 +16,7 @@ public class QueryOptionsTests
         Assert.Null(options.OrderBy);
         Assert.Equal(20, options.PageSize);
         Assert.Null(options.ContinuationToken);
-        Assert.Null(options.PartitionKey);
+        Assert.Null(options.Category);
         Assert.False(options.AllowCrossPartitionScan);
     }
 
@@ -31,7 +31,7 @@ public class QueryOptionsTests
             OrderBy = orderBy,
             PageSize = 50,
             ContinuationToken = "token-1",
-            PartitionKey = "WH1:SKU1",
+            Category = "WH1:SKU1",
             AllowCrossPartitionScan = true,
         };
 
@@ -39,7 +39,7 @@ public class QueryOptionsTests
         Assert.Same(orderBy, options.OrderBy);
         Assert.Equal(50, options.PageSize);
         Assert.Equal("token-1", options.ContinuationToken);
-        Assert.Equal("WH1:SKU1", options.PartitionKey);
+        Assert.Equal("WH1:SKU1", options.Category);
         Assert.True(options.AllowCrossPartitionScan);
     }
 
@@ -55,7 +55,7 @@ public class QueryOptionsTests
         Assert.Null(options.OrderBy);
         Assert.Equal(20, options.PageSize);
         Assert.Null(options.ContinuationToken);
-        Assert.Null(options.PartitionKey);
+        Assert.Null(options.Category);
         Assert.False(options.AllowCrossPartitionScan);
     }
 
@@ -71,7 +71,7 @@ public class QueryOptionsTests
             OrderBy = orderBy,
             PageSize = 10,
             ContinuationToken = "token-2",
-            PartitionKey = "WH2:SKU2",
+            Category = "WH2:SKU2",
             AllowCrossPartitionScan = true,
         };
 
@@ -80,7 +80,7 @@ public class QueryOptionsTests
         Assert.Same(orderBy, options.OrderBy);
         Assert.Equal(10, options.PageSize);
         Assert.Equal("token-2", options.ContinuationToken);
-        Assert.Equal("WH2:SKU2", options.PartitionKey);
+        Assert.Equal("WH2:SKU2", options.Category);
         Assert.True(options.AllowCrossPartitionScan);
     }
 }

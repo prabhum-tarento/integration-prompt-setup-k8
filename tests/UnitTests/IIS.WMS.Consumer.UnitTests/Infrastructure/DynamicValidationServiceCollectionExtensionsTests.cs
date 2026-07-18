@@ -1,4 +1,5 @@
 using IIS.WMS.Common.BlobStorage;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Application.EventValidationTemplates;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.Configuration;
@@ -50,6 +51,9 @@ public class DynamicValidationServiceCollectionExtensionsTests
         var templateService2 = provider.GetRequiredService<IEventValidationTemplateService>();
         Assert.IsType<EventValidationTemplateService>(templateService1);
         Assert.Same(templateService1, templateService2);
+
+        var referenceProvider = provider.GetRequiredService<IValidationScriptReferenceProvider>();
+        Assert.IsType<ConsumerValidationScriptReferenceProvider>(referenceProvider);
     }
 
     [Fact(DisplayName = "AddDynamicValidation binds DynamicValidationOptions from the DynamicValidation section")]

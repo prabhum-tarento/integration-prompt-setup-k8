@@ -3,9 +3,10 @@ using System.Text;
 using Confluent.Kafka;
 using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.DynamicValidation;
+using IIS.WMS.Common.Messaging;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using Microsoft.Extensions.DependencyInjection;
@@ -64,7 +65,7 @@ internal static class KafkaConsumerTestSupport
 
         var dynamicEventValidator = Substitute.For<IDynamicEventValidator>();
         dynamicEventValidator
-            .ValidateAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<Headers?>(), Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .ValidateAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(), Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
         var orderArchiveRepository = Substitute.For<IOrderArchiveRepository>();
@@ -110,22 +111,22 @@ internal static class KafkaConsumerTestSupport
 
         if (correlationId is not null)
         {
-            headers.Add(KafkaHeaderNames.CorrelationId, Encoding.UTF8.GetBytes(correlationId));
+            headers.Add(WellKnownHeaderNames.CorrelationId, Encoding.UTF8.GetBytes(correlationId));
         }
 
         if (deduplicationId is not null)
         {
-            headers.Add(KafkaHeaderNames.DeduplicationId, Encoding.UTF8.GetBytes(deduplicationId));
+            headers.Add(WellKnownHeaderNames.DeduplicationId, Encoding.UTF8.GetBytes(deduplicationId));
         }
 
         if (eventType is not null)
         {
-            headers.Add(KafkaHeaderNames.Type, Encoding.UTF8.GetBytes(eventType));
+            headers.Add(WellKnownHeaderNames.Type, Encoding.UTF8.GetBytes(eventType));
         }
 
         if (appId is not null)
         {
-            headers.Add(KafkaHeaderNames.AppId, Encoding.UTF8.GetBytes(appId));
+            headers.Add(WellKnownHeaderNames.AppId, Encoding.UTF8.GetBytes(appId));
         }
 
         return new ConsumeResult<string, byte[]>
@@ -159,7 +160,7 @@ internal static class KafkaConsumerTestSupport
         ?? throw new InvalidOperationException("ConsumerHostedService.schemaHandlers not found by reflection - has its signature changed?");
 
     /// <summary>
-    /// Fetches one registered schema handler by its <see cref="KafkaHeaderNames.Type"/> key, as a
+    /// Fetches one registered schema handler by its <see cref="WellKnownHeaderNames.Type"/> key, as a
     /// loosely-typed <see cref="object"/> since the handler's own runtime type
     /// (<c>ConsumerHostedService.SchemaHandler{T}</c>/<c>MappedSchemaHandler{TAvro,TValue}</c>) is a
     /// private nested class - callers invoke its members via the reflection helpers below instead of a

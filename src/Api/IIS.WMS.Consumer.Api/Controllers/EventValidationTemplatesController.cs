@@ -7,9 +7,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace IIS.WMS.Consumer.Api.Controllers;
 
 /// <summary>
-/// CRUD over the event validation templates - the <c>{schemaName}/{eventType}.cs</c> C# script blobs
-/// in the hot-tier validation-template container that the Kafka consumer compiles and executes
-/// against each message right after the schema handler's own <c>ValidateAsync</c>. Reads fall under
+/// CRUD over the event validation templates - the <c>{transport}/{identifier}.cs</c> C# script blobs
+/// in the hot-tier validation-template container that each transport's consumer compiles and executes
+/// against every matching message right after its own <c>ValidateAsync</c>. Reads fall under
 /// the global <c>RequireAuthenticatedUser</c> fallback policy (Program.cs); every write additionally
 /// requires <see cref="AdminPolicyName"/> - a stored template is code this service executes, so
 /// writing one is privileged in the same way clearing sender state is on
@@ -38,18 +38,18 @@ public sealed class EventValidationTemplatesController(
     /// </summary>
     public const string AdminRoleName = "EventValidationTemplates.Admin";
 
-    /// <summary>Lists every stored template's identity, optionally narrowed to one schema.</summary>
-    /// <param name="schemaName">Schema to filter on, or omit for every template.</param>
+    /// <summary>Lists every stored template's identity, optionally narrowed to one transport.</summary>
+    /// <param name="transport">Transport to filter on (<c>Kafka</c> or <c>ServiceBus</c>), or omit for every template.</param>
     /// <param name="cancellationToken">Request abort token.</param>
     /// <returns><c>200 OK</c> with the matching templates - empty if none are stored.</returns>
     [HttpGet]
     [ProducesResponseType<IReadOnlyList<EventValidationTemplateSummary>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<EventValidationTemplateSummary>>> ListAsync(
-        [FromQuery] string? schemaName, CancellationToken cancellationToken)
+        [FromQuery] string? transport, CancellationToken cancellationToken)
     {
-        logger.LogDebug("GET validation templates, schema filter '{SchemaName}'.", schemaName);
+        logger.LogDebug("GET validation templates, transport filter '{Transport}'.", transport);
 
-        var templates = await service.ListAsync(schemaName, cancellationToken);
+        var templates = await service.ListAsync(transport, cancellationToken);
 
         return Ok(templates);
     }
@@ -57,8 +57,8 @@ public sealed class EventValidationTemplatesController(
     /// <summary>
     /// Returns worked, compile-verified examples of the script contract - one per authoring pattern,
     /// each showing how to use the objects injected into every script run (<c>x</c> the deserialized
-    /// message, <c>header</c> the Kafka headers, <c>_log</c> the consumer's logger, plus the
-    /// <c>TryGetHeader</c>/<c>KafkaHeaderNames</c> helpers) and how each outcome (return
+    /// message, <c>header</c> the transport-neutral <c>HeaderLookup</c>, <c>_log</c> the consumer's
+    /// logger, plus the <c>TryGetHeader</c>/<c>WellKnownHeaderNames</c> helpers) and how each outcome (return
     /// <c>true</c>/<c>false</c>, throw) is handled. Static documentation - the route is a literal
     /// segment, so it never collides with <see cref="GetAsync"/>'s two-segment template identity.
     /// </summary>
@@ -73,19 +73,19 @@ public sealed class EventValidationTemplatesController(
     }
 
     /// <summary>Returns one template, including its C# code.</summary>
-    /// <param name="schemaName">Schema the template applies to.</param>
-    /// <param name="eventType">Kafka <c>Type</c> header value the template applies to (e.g. <c>inventory.InventoryStateChanged</c>).</param>
+    /// <param name="transport">Transport the template applies to (<c>Kafka</c> or <c>ServiceBus</c>).</param>
+    /// <param name="identifier">Transport-specific lookup key the template applies to (Kafka <c>Type</c> header value, e.g. <c>inventory.InventoryStateChanged</c>, or Service Bus queue name).</param>
     /// <param name="cancellationToken">Request abort token.</param>
     /// <returns><c>200 OK</c> with the template, or <c>404 Not Found</c> if none is stored under that identity.</returns>
-    [HttpGet("{schemaName}/{eventType}")]
+    [HttpGet("{transport}/{identifier}")]
     [ProducesResponseType<EventValidationTemplateResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<EventValidationTemplateResponse>> GetAsync(
-        string schemaName, string eventType, CancellationToken cancellationToken)
+        string transport, string identifier, CancellationToken cancellationToken)
     {
-        logger.LogDebug("GET validation template {SchemaName}/{EventType}.", schemaName, eventType);
+        logger.LogDebug("GET validation template {Transport}/{Identifier}.", transport, identifier);
 
-        var template = await service.GetAsync(schemaName, eventType, cancellationToken);
+        var template = await service.GetAsync(transport, identifier, cancellationToken);
 
         return template is null ? NotFound() : Ok(template);
     }
@@ -104,8 +104,8 @@ public sealed class EventValidationTemplatesController(
         CreateEventValidationTemplateRequest request, CancellationToken cancellationToken)
     {
         logger.LogDebug(
-            "POST create validation template {SchemaName}/{EventType} ({CodeLength} chars).",
-            request.SchemaName, request.EventType, request.Code.Length);
+            "POST create validation template {Transport}/{Identifier} ({CodeLength} chars).",
+            request.Transport, request.Identifier, request.Code.Length);
 
         var created = await service.CreateAsync(request, cancellationToken);
 
@@ -113,51 +113,51 @@ public sealed class EventValidationTemplatesController(
         // the Asp.Versioning + CreatedAtAction link-generation friction this sidesteps.
         var version = RouteData.Values["version"];
         var location = $"{Request.PathBase}/api/v{version}/event-validation-templates/" +
-                       $"{Uri.EscapeDataString(created.SchemaName)}/{Uri.EscapeDataString(created.EventType)}";
+                       $"{Uri.EscapeDataString(created.Transport)}/{Uri.EscapeDataString(created.Identifier)}";
 
         return Created(location, created);
     }
 
     /// <summary>Compiles and stores a replacement for an existing template's code.</summary>
-    /// <param name="schemaName">Schema the template applies to.</param>
-    /// <param name="eventType">Kafka <c>Type</c> header value the template applies to.</param>
+    /// <param name="transport">Transport the template applies to.</param>
+    /// <param name="identifier">Transport-specific lookup key the template applies to.</param>
     /// <param name="request">The replacement C# code.</param>
     /// <param name="cancellationToken">Request abort token.</param>
     /// <returns><c>200 OK</c> with the stored template, <c>400 Bad Request</c> if the code doesn't compile, or <c>404 Not Found</c> if no template exists under that identity.</returns>
-    [HttpPut("{schemaName}/{eventType}")]
+    [HttpPut("{transport}/{identifier}")]
     [Authorize(Policy = AdminPolicyName)]
     [ProducesResponseType<EventValidationTemplateResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<EventValidationTemplateResponse>> UpdateAsync(
-        string schemaName, string eventType, UpdateEventValidationTemplateRequest request, CancellationToken cancellationToken)
+        string transport, string identifier, UpdateEventValidationTemplateRequest request, CancellationToken cancellationToken)
     {
         logger.LogDebug(
-            "PUT update validation template {SchemaName}/{EventType} ({CodeLength} chars).",
-            schemaName, eventType, request.Code.Length);
+            "PUT update validation template {Transport}/{Identifier} ({CodeLength} chars).",
+            transport, identifier, request.Code.Length);
 
-        var updated = await service.UpdateAsync(schemaName, eventType, request, cancellationToken);
+        var updated = await service.UpdateAsync(transport, identifier, request, cancellationToken);
 
         return Ok(updated);
     }
 
     /// <summary>Deletes one template - the consumer stops applying it once its cached lookup expires.</summary>
-    /// <param name="schemaName">Schema the template applies to.</param>
-    /// <param name="eventType">Kafka <c>Type</c> header value the template applies to.</param>
+    /// <param name="transport">Transport the template applies to.</param>
+    /// <param name="identifier">Transport-specific lookup key the template applies to.</param>
     /// <param name="cancellationToken">Request abort token.</param>
     /// <returns><c>204 No Content</c> once deleted, or <c>404 Not Found</c> if no template exists under that identity.</returns>
-    [HttpDelete("{schemaName}/{eventType}")]
+    [HttpDelete("{transport}/{identifier}")]
     [Authorize(Policy = AdminPolicyName)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> DeleteAsync(
-        string schemaName, string eventType, CancellationToken cancellationToken)
+        string transport, string identifier, CancellationToken cancellationToken)
     {
-        logger.LogDebug("DELETE validation template {SchemaName}/{EventType}.", schemaName, eventType);
+        logger.LogDebug("DELETE validation template {Transport}/{Identifier}.", transport, identifier);
 
-        var deleted = await service.DeleteAsync(schemaName, eventType, cancellationToken);
+        var deleted = await service.DeleteAsync(transport, identifier, cancellationToken);
 
         return deleted ? NoContent() : NotFound();
     }

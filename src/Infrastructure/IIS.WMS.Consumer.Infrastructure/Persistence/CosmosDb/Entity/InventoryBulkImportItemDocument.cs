@@ -20,7 +20,7 @@ public sealed class InventoryBulkImportItemDocument : ICosmosDocument
     public string Sku { get; init; } = default!;
 
     /// <summary>Cosmos partition key value - identical to <see cref="Id"/> for this entity.</summary>
-    public string PartitionKey { get; init; } = default!;
+    public string Category { get; init; } = default!;
 
     /// <summary>On-hand quantity as reported by the upstream system.</summary>
     public int Quantity { get; set; }

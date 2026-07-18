@@ -21,7 +21,7 @@ public sealed class InventoryEventDocument : ICosmosDocument
     // Composite partition key per §4 - kept as its own property (not derived at query time) so
     // every write and query uses the identical value.
     /// <summary>Cosmos partition key value - identical to <see cref="Id"/> for this entity.</summary>
-    public string PartitionKey { get; init; } = default!;
+    public string Category { get; init; } = default!;
 
     /// <summary>Current on-hand quantity, net of active reservations.</summary>
     public int OnHandQuantity { get; set; }

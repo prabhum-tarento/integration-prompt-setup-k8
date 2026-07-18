@@ -12,6 +12,9 @@ public sealed class BlobStorageOptions
     /// gated by <see cref="RequestAuditEnabled"/>, which covers a separate, still-optional
     /// request/response audit use. Configurable per environment; defaults to the container name this
     /// was hardcoded to before this became a setting. Lives in the <see cref="Cold"/> storage account.
+    /// Also written to by <c>Persistence.CosmosDb.Audit.ColdBlobAuditSink</c>, alongside (not instead
+    /// of) <see cref="AuditArchiveContainerName"/> - see that class's remarks for its own folder
+    /// convention within this container, distinct from the Kafka consumer's.
     /// </summary>
     public string RequestAuditContainerName { get; init; } = "request-audit";
 
@@ -46,11 +49,11 @@ public sealed class BlobStorageOptions
     public string AuditArchiveContainerName { get; init; } = "audit-archive";
 
     /// <summary>
-    /// Hot-tier container holding the event validation templates - one <c>{SchemaName}/{EventType}.cs</c>
-    /// C# script blob per schema/event type, managed through the event-validation-templates API and
-    /// compiled/executed by the Kafka consumer's dynamic-validation step right after each schema
-    /// handler's own <c>ValidateAsync</c>. Configurable per environment. Lives in the <see cref="Hot"/>
-    /// storage account - templates are read on the consume hot path.
+    /// Hot-tier container holding the event validation templates - one <c>{Transport}/{Identifier}.cs</c>
+    /// C# script blob per transport identity (Kafka <c>Type</c> header value, or Service Bus queue name),
+    /// managed through the event-validation-templates API and compiled/executed by each transport's
+    /// consumer right after its own <c>ValidateAsync</c>. Configurable per environment. Lives in the
+    /// <see cref="Hot"/> storage account - templates are read on the consume hot path.
     /// </summary>
     public string ValidationTemplateContainerName { get; init; } = "validation-templates";
 

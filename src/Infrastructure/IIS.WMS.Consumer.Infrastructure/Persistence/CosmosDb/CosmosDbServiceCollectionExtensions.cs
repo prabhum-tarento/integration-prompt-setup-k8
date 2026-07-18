@@ -41,31 +41,7 @@ public static class CosmosDbServiceCollectionExtensions
             var env = sp.GetRequiredService<IHostEnvironment>();
             var logger = sp.GetRequiredService<ILogger<CosmosClient>>();
 
-            var options = new CosmosClientOptions
-            {
-                ConsistencyLevel = ConsistencyLevel.Session,
-                MaxRetryAttemptsOnRateLimitedRequests = 9,
-                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-                SerializerOptions = new CosmosSerializationOptions
-                {
-                    PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
-                },
-            };
-
-            if (env.IsDevelopment())
-            {
-                // Local Cosmos DB Emulator (Podman Linux vNext, scripts/local-emulators) serves a
-                // self-signed cert that isn't chained to a trusted root, and
-                // setup-podman-emulators.bat recreates the container - with a fresh cert - on
-                // every run, so trusting it via the OS cert store would go stale immediately.
-                // HttpClientFactory/the custom validation callback is only honored under Gateway
-                // mode, not Direct.
-                options.ConnectionMode = ConnectionMode.Gateway;
-                options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
-                {
-                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
-                });
-            }
+            var options = BuildCosmosClientOptions(env, allowBulkExecution: false);
 
             logger.LogInformation(
                 "Configuring Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
@@ -96,42 +72,12 @@ public static class CosmosDbServiceCollectionExtensions
             var env = sp.GetRequiredService<IHostEnvironment>();
             var logger = sp.GetRequiredService<ILogger<CosmosClient>>();
 
-            var options = new CosmosClientOptions
-            {
-                ConsistencyLevel = ConsistencyLevel.Session,
-                AllowBulkExecution = true,
-                MaxRetryAttemptsOnRateLimitedRequests = 9,
-                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-                SerializerOptions = new CosmosSerializationOptions
-                {
-                    PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
-                },
-            };
-
-            if (env.IsDevelopment())
-            {
-                // Same emulator cert-trust workaround as the default client above. Note
-                // MaxRequestsPerTcpConnection/MaxTcpConnectionsPerEndpoint below are Direct-mode-only
-                // settings - the Cosmos SDK's CosmosClientOptions validation throws if they're set
-                // while ConnectionMode is Gateway, so they're only applied in the non-dev branch,
-                // which is the only place Direct mode is ever used.
-                options.ConnectionMode = ConnectionMode.Gateway;
-                options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
-                {
-                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
-                });
-            }
-            else
-            {
-                options.MaxRequestsPerTcpConnection = 30;
-                options.MaxTcpConnectionsPerEndpoint = 10;
-            }
+            var options = BuildCosmosClientOptions(env, allowBulkExecution: true);
 
             logger.LogInformation(
                 "Configuring bulk-import Cosmos client for {AccountEndpoint} using the local emulator key.", config.AccountEndpoint);
 
             return new CosmosClient(config.AccountEndpoint, config.EmulatorKey, options);
-
         });
 
         services.AddKeyedSingleton<ICosmosContainerFactory>(BulkCosmosClientKey, (sp, key) =>
@@ -141,5 +87,52 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddScoped<IBulkInventoryImportRepository, InventoryBulkImportItemRepository>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Builds the <see cref="CosmosClientOptions"/> shared by the default and bulk-import clients,
+    /// differing only in <see cref="CosmosClientOptions.AllowBulkExecution"/> and - for a non-dev bulk
+    /// client only - the Direct-mode TCP tuning below (Microsoft's documented bulk-executor guidance).
+    /// </summary>
+    /// <param name="env">Used to select the dev-emulator cert-bypass branch below.</param>
+    /// <param name="allowBulkExecution">Whether this is the bulk-import client.</param>
+    private static CosmosClientOptions BuildCosmosClientOptions(IHostEnvironment env, bool allowBulkExecution)
+    {
+        var options = new CosmosClientOptions
+        {
+            ConsistencyLevel = ConsistencyLevel.Session,
+            AllowBulkExecution = allowBulkExecution,
+            MaxRetryAttemptsOnRateLimitedRequests = 9,
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
+            SerializerOptions = new CosmosSerializationOptions
+            {
+                PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+            },
+        };
+
+        if (env.IsDevelopment())
+        {
+            // Local Cosmos DB Emulator (Podman Linux vNext, scripts/local-emulators) serves a
+            // self-signed cert that isn't chained to a trusted root, and setup-podman-emulators.bat
+            // recreates the container - with a fresh cert - on every run, so trusting it via the OS
+            // cert store would go stale immediately. HttpClientFactory/the custom validation callback
+            // is only honored under Gateway mode, not Direct.
+            options.ConnectionMode = ConnectionMode.Gateway;
+            options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
+            });
+        }
+        else if (allowBulkExecution)
+        {
+            // MaxRequestsPerTcpConnection/MaxTcpConnectionsPerEndpoint are Direct-mode-only settings -
+            // the Cosmos SDK's CosmosClientOptions validation throws if they're set while
+            // ConnectionMode is Gateway, so they're only applied in this non-dev, bulk-only branch,
+            // which is the only place Direct mode is ever used.
+            options.MaxRequestsPerTcpConnection = 30;
+            options.MaxTcpConnectionsPerEndpoint = 10;
+        }
+
+        return options;
     }
 }

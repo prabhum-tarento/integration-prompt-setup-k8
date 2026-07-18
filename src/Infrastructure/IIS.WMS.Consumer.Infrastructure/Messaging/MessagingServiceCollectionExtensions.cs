@@ -54,6 +54,37 @@ public static class MessagingServiceCollectionExtensions
     /// <returns>The same <paramref name="services"/> instance, for chaining.</returns>
     public static IServiceCollection AddMessaging(this IServiceCollection services, IConfiguration configuration)
     {
+        // Shared publisher every Kafka consumer (and, per integration-resiliency.instructions.md,
+        // any future Service Bus-side handler/service) relays through - registered once as a singleton
+        // rather than per consumer, so its ServiceBusSender cache is truly one sender per queue across
+        // the whole process, not one per caller. See ServiceBusRelayPublisher's own remarks. Shared
+        // between the Kafka and Service Bus ingestion paths below, so it lives here rather than in
+        // either one.
+        services.AddSingleton<ServiceBusRelayPublisher>();
+        services.AddSingleton<IServiceBusRelayPublisher>(sp => sp.GetRequiredService<ServiceBusRelayPublisher>());
+
+        // Fans out to every IServiceBusSenderCacheSource registered below - just the shared publisher
+        // above now, since it owns every cached ServiceBusSender in this process. Backs the admin
+        // endpoint that lists/clears them. Single-process scope only - see
+        // IServiceBusSenderCacheService's own remarks.
+        services.AddSingleton<IServiceBusSenderCacheService, ServiceBusSenderCacheService>();
+        services.AddSingleton<IServiceBusSenderCacheSource>(sp => sp.GetRequiredService<ServiceBusRelayPublisher>());
+
+        // Service Bus consumers first, Kafka consumers second - matches the original single-method
+        // registration order (service-bus/service-bus-bulk-import health checks before the Kafka ones),
+        // which MessagingServiceCollectionExtensionsTests asserts via exact-order HealthCheckNames checks.
+        services.AddServiceBusConsumers(configuration);
+        services.AddKafkaConsumers(configuration);
+
+        return services;
+    }
+
+    /// <summary>Registers the three Kafka consumers (options, deserializer factory, relay facade, hosted services, and health checks).</summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>Kafka</c> and <c>Kafka:InventoryStateChanged</c> sections.</param>
+    /// <returns>The same <paramref name="services"/> instance, for chaining.</returns>
+    public static IServiceCollection AddKafkaConsumers(this IServiceCollection services, IConfiguration configuration)
+    {
         services.Configure<KafkaConsumerOptions>(configuration.GetSection(KafkaConsumerOptions.SectionName));
 
         // No parent above Kafka level to fall back to, so this is the one place "unset" resolves to
@@ -99,50 +130,7 @@ public static class MessagingServiceCollectionExtensions
         // would (see BlobStorageServiceCollectionExtensions's comment on the same issue).
         services.AddSingleton<IValidator<BulkInventoryImportEvent>, BulkInventoryImportEventValidator>();
 
-        // Shared Service Bus consuming base setup (client/admin client, options binding,
-        // ICorrelationContext) - common to every project that consumes off a Service Bus queue, see
-        // ServiceBusServiceCollectionExtensions's own remarks.
-        services.AddServiceBusConsumerInfrastructure(configuration);
-
-        // Keyed, not a single shared singleton - the bulk-import consumer below gets its own
-        // ServiceBusHealthState instance, and a plain (unkeyed) second AddSingleton<ServiceBusHealthState>()
-        // would silently collide (last registration wins for unkeyed resolution).
-        if (false)
-        {
-            services.AddKeyedSingleton<ServiceBusHealthState>(InventoryEventsServiceBusKey);
-            services.AddHostedService<ServiceBusConsumerHostedService>();
-
-            services.AddKeyedSingleton<ServiceBusHealthState>(BulkInventoryImportServiceBusKey);
-            services.AddHostedService<BulkImportServiceBusConsumerHostedService>();
-        }
-
-        // ServiceBusHealthCheck takes a queue name directly (not IOptions<ServiceBusConsumerOptions>)
-        // so both queues can share the one check type - see its own doc comment. Registered here,
-        // where `configuration` is in scope, rather than InfrastructureServiceCollectionExtensions,
-        // mirroring how each Kafka consumer's health check is registered alongside its hosted service.
-        var serviceBusQueueName = configuration.GetSection(ServiceBusConsumerOptions.SectionName).Get<ServiceBusConsumerOptions>()?.QueueName
-            ?? throw new InvalidOperationException($"Missing '{ServiceBusConsumerOptions.SectionName}:{nameof(ServiceBusConsumerOptions.QueueName)}'.");
-        var bulkImportQueueName = configuration.GetSection(BulkImportServiceBusConsumerOptions.SectionName).Get<BulkImportServiceBusConsumerOptions>()?.QueueName
-            ?? new BulkImportServiceBusConsumerOptions().QueueName;
-
-        services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
-        services.AddServiceBusQueueHealthCheck("service-bus-bulk-import", bulkImportQueueName, "service-bus-consumer");
-
         services.AddSingleton<ISpecificRecordDeserializerFactory, SpecificRecordDeserializerFactory>();
-
-        // Shared publisher every Kafka consumer (and, per integration-resiliency.instructions.md,
-        // any future Service Bus-side handler/service) relays through - registered once as a singleton
-        // rather than per consumer, so its ServiceBusSender cache is truly one sender per queue across
-        // the whole process, not one per caller. See ServiceBusRelayPublisher's own remarks.
-        services.AddSingleton<ServiceBusRelayPublisher>();
-        services.AddSingleton<IServiceBusRelayPublisher>(sp => sp.GetRequiredService<ServiceBusRelayPublisher>());
-
-        // Fans out to every IServiceBusSenderCacheSource registered below - just the shared publisher
-        // above now, since it owns every cached ServiceBusSender in this process. Backs the admin
-        // endpoint that lists/clears them. Single-process scope only - see
-        // IServiceBusSenderCacheService's own remarks.
-        services.AddSingleton<IServiceBusSenderCacheService, ServiceBusSenderCacheService>();
-        services.AddSingleton<IServiceBusSenderCacheSource>(sp => sp.GetRequiredService<ServiceBusRelayPublisher>());
 
         // Facade bundling the six dependencies every Kafka consumer needs and which never vary
         // between them - see ConsumerRelayInfrastructure's own doc comment for why this exists and
@@ -153,50 +141,155 @@ public static class MessagingServiceCollectionExtensions
         // not a per-request setting, so it doesn't need the options pattern's change-tracking.
         var functionsFilter = configuration.GetSection(KafkaConsumerOptions.SectionName).Get<KafkaConsumerOptions>()?.KafkaEventFunctions;
         var allowAll = (functionsFilter?.Length ?? 0) == 0;
+
+        RegisterInventoryEventsConsumer(services, functionsFilter, allowAll);
+        RegisterInventoryStateChangedConsumer(services, functionsFilter, allowAll);
+        RegisterBulkImportConsumer(services, functionsFilter, allowAll);
+
+        return services;
+    }
+
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInventoryEventsConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
         if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryEventsConsumerKey))
         {
             AddKafkaConsumer<KafkaConsumerHostedService>(
                 services,
                 (ConsumerHostedService.DefaultEventType, "kafka-consumer", "InventoryEvents Kafka consumer health"));
         }
+    }
 
-        // Gated by InventoryStateChangedEventType alone, even though this consumer also relays
-        // InventoryAdjusted off the same topic/consumer group - see
-        // InventoryStateChangedConsumerHostedService's own remarks on why one poll loop covers both
-        // event types. Both still get their own entry below, matching the two keys that consumer's
-        // own RegisterSchemaHandlers call registers, so each gets its own ConsumerHealthCheck.
-        if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType)
-            || IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
+    /// <summary>
+    /// Gated by InventoryStateChangedEventType alone, even though this consumer also relays
+    /// InventoryAdjusted off the same topic/consumer group - see
+    /// InventoryStateChangedConsumerHostedService's own remarks on why one poll loop covers both
+    /// event types. Both still get their own entry below, matching the two keys that consumer's own
+    /// RegisterSchemaHandlers call registers, so each gets its own ConsumerHealthCheck.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInventoryStateChangedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType)
+            && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
         {
-            var healthChecks = new List<(string EventType, string HealthCheckName, string DisplayName)>();
-            if (IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType))
-            {
-                healthChecks.Add((KafkaEvents.InventoryStateChangedEventType, "inventory-state-changed-consumer", "InventoryStateChanged Kafka consumer health"));
-            }
-
-            if (IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
-            {
-                healthChecks.Add((KafkaEvents.InventoryAdjustedEventType, "inventory-adjusted-consumer", "InventoryAdjusted Kafka consumer health"));
-            }
-
-            AddKafkaConsumer<InventoryStateChangedConsumerHostedService>(
-                services,
-                healthChecks.ToArray());
+            return;
         }
 
+        var healthChecks = new List<(string EventType, string HealthCheckName, string DisplayName)>();
+        if (IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType))
+        {
+            healthChecks.Add((KafkaEvents.InventoryStateChangedEventType, "inventory-state-changed-consumer", "InventoryStateChanged Kafka consumer health"));
+        }
+
+        if (IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
+        {
+            healthChecks.Add((KafkaEvents.InventoryAdjustedEventType, "inventory-adjusted-consumer", "InventoryAdjusted Kafka consumer health"));
+        }
+
+        AddKafkaConsumer<InventoryStateChangedConsumerHostedService>(
+            services,
+            healthChecks.ToArray());
+    }
+
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterBulkImportConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
         if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.BulkInventoryImportConsumerKey))
         {
             AddKafkaConsumer<BulkInventoryImportConsumerHostedService>(
                 services,
                 (ConsumerHostedService.DefaultEventType, "bulk-import-consumer", "BulkInventoryImport Kafka consumer health"));
         }
+    }
+
+    /// <summary>Registers the Service Bus consuming infrastructure, both hosted services, and their queue health checks.</summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus</c> section.</param>
+    /// <returns>The same <paramref name="services"/> instance, for chaining.</returns>
+    public static IServiceCollection AddServiceBusConsumers(this IServiceCollection services, IConfiguration configuration)
+    {
+        // Shared Service Bus consuming base setup (client/admin client, options binding,
+        // ICorrelationContext) - common to every project that consumes off a Service Bus queue, see
+        // ServiceBusServiceCollectionExtensions's own remarks.
+        services.AddServiceBusConsumerInfrastructure(configuration);
+
+        // Read once, directly off configuration - mirrors AddKafkaConsumers' own functionsFilter read
+        // below, same "gates registration, independent of any per-consumer enable flag" semantics, just
+        // for the two Service Bus consumers instead of the three Kafka ones.
+        var functionsFilter = configuration.GetSection(ServiceBusConsumerOptions.SectionName).Get<ServiceBusConsumerOptions>()?.ServiceBusEventFunctions;
+        var allowAll = (functionsFilter?.Length ?? 0) == 0;
+
+        RegisterInventoryEventsServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterBulkImportServiceBusConsumer(services, configuration, functionsFilter, allowAll);
 
         return services;
     }
 
-    /// <summary>Whether <paramref name="consumerKey"/> should start, per <see cref="KafkaConsumerOptions.KafkaEventFunctions"/>'s allow-list semantics.</summary>
+    /// <summary>
+    /// Keyed, not a single shared singleton - the bulk-import consumer registered by
+    /// <see cref="RegisterBulkImportServiceBusConsumer"/> gets its own <see cref="ServiceBusHealthState"/>
+    /// instance, and a plain (unkeyed) second <c>AddSingleton&lt;ServiceBusHealthState&gt;()</c> would
+    /// silently collide (last registration wins for unkeyed resolution).
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInventoryEventsServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, InventoryEventsServiceBusKey))
+        {
+            return;
+        }
+
+        services.AddKeyedSingleton<ServiceBusHealthState>(InventoryEventsServiceBusKey);
+        services.AddHostedService<ServiceBusConsumerHostedService>();
+
+        // ServiceBusHealthCheck takes a queue name directly (not IOptions<ServiceBusConsumerOptions>)
+        // so both queues can share the one check type - see its own doc comment. Registered here,
+        // where `configuration` is in scope, rather than InfrastructureServiceCollectionExtensions,
+        // mirroring how each Kafka consumer's health check is registered alongside its hosted service.
+        var serviceBusQueueName = configuration.GetSection(ServiceBusConsumerOptions.SectionName).Get<ServiceBusConsumerOptions>()?.QueueName
+            ?? throw new InvalidOperationException($"Missing '{ServiceBusConsumerOptions.SectionName}:{nameof(ServiceBusConsumerOptions.QueueName)}'.");
+        services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterBulkImportServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, BulkInventoryImportServiceBusKey))
+        {
+            return;
+        }
+
+        services.AddKeyedSingleton<ServiceBusHealthState>(BulkInventoryImportServiceBusKey);
+        services.AddHostedService<BulkImportServiceBusConsumerHostedService>();
+
+        var bulkImportQueueName = configuration.GetSection(BulkImportServiceBusConsumerOptions.SectionName).Get<BulkImportServiceBusConsumerOptions>()?.QueueName
+            ?? new BulkImportServiceBusConsumerOptions().QueueName;
+        services.AddServiceBusQueueHealthCheck("service-bus-bulk-import", bulkImportQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>Whether <paramref name="consumerKey"/> should start, per an allow-list's "run only the named ones" semantics - shared by <see cref="Kafka.KafkaConsumerOptions.KafkaEventFunctions"/> and <see cref="ServiceBusConsumerOptions.ServiceBusEventFunctions"/>.</summary>
     /// <param name="functionsFilter">The configured allow-list, or <see langword="null"/>/empty for "no filter."</param>
-    /// <param name="consumerKey">The candidate consumer's <c>Kafka:Functions</c> allow-list key (<see cref="KafkaEvents.InventoryEventsConsumerKey"/>, <see cref="KafkaEvents.InventoryStateChangedEventType"/>, or <see cref="KafkaEvents.BulkInventoryImportConsumerKey"/>).</param>
+    /// <param name="consumerKey">
+    /// The candidate consumer's allow-list key - one of <see cref="KafkaEvents.InventoryEventsConsumerKey"/>,
+    /// <see cref="KafkaEvents.InventoryStateChangedEventType"/>, or <see cref="KafkaEvents.BulkInventoryImportConsumerKey"/>
+    /// for <c>Kafka:KafkaEventFunctions</c>; or <see cref="InventoryEventsServiceBusKey"/>/<see cref="BulkInventoryImportServiceBusKey"/>
+    /// for <c>ServiceBus:ServiceBusEventFunctions</c>.
+    /// </param>
     public static bool IsFunctionEnabled(IReadOnlyCollection<string>? functionsFilter, string consumerKey) =>
         functionsFilter is null || functionsFilter.Count == 0
             || functionsFilter.Contains(consumerKey, StringComparer.OrdinalIgnoreCase);

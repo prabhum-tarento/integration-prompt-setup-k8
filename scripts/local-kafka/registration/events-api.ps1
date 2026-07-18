@@ -20,7 +20,7 @@ for what that looks like without this wrapper).
 - Query param "type" is an EVENT NAME - the same name as its
   events\<topic>\<event-name>\ folder (e.g. "inventory.InventoryStateChanged",
   "inventory.InventoryAdjusted", "inventory.OrderToInventoryAllocated"), and conventionally
-  also the value producers set as the Kafka "Type" header (KafkaHeaderNames.cs) - though
+  also the value producers set as the Kafka "Type" header (WellKnownHeaderNames.cs) - though
   this query param and that header are resolved independently; set the header yourself if
   you want one (see below). On every request, this looks the event name up in an event-name
   -> {topic, Schema Registry subject} map, resolved one of two ways:
@@ -46,7 +46,7 @@ for what that looks like without this wrapper).
 - Every request HEADER you send (other than the usual HTTP/framework ones - Content-Type,
   Content-Length, Host, Connection, Accept*, User-Agent, Cache-Control) is forwarded as a
   Kafka record header, base64-encoded automatically. Set Correlation-Id/Deduplication-Id/
-  Id/App-Id/Type (see KafkaHeaderNames.cs) as plain HTTP headers in Postman/curl - no manual
+  Id/App-Id/Type (see WellKnownHeaderNames.cs) as plain HTTP headers in Postman/curl - no manual
   base64 encoding needed, unlike calling Kafka REST Proxy's v3 API directly. Four of those
   are defaulted when you don't set them yourself, so you don't have to invent one for every
   test call: Correlation-Id and Deduplication-Id each default to a fresh GUID, Id defaults
@@ -539,13 +539,13 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
             return
         }
 
-        # KafkaHeaderNames.cs's contract: Correlation-Id/Deduplication-Id/Id/App-Id are
+        # WellKnownHeaderNames.cs's contract: Correlation-Id/Deduplication-Id/Id/App-Id are
         # defaulted here ONLY when the caller didn't already send one (so a caller testing a
         # specific correlation/dedup/app scenario can still set their own), but Type always
         # gets overwritten with the schema name this "type" query param actually resolved to
         # above - never the caller-supplied value - so the record header can't disagree with
         # the schema/subject Kafka REST Proxy is told to validate against below. Header names
-        # are canonicalized to KafkaHeaderNames.cs's exact casing regardless of how the caller
+        # are canonicalized to WellKnownHeaderNames.cs's exact casing regardless of how the caller
         # sent them - HTTP headers are case-insensitive, but Confluent.Kafka's Headers lookup
         # on the consumer side (ConsumerHostedService.TryGetHeader) is an exact byte-string
         # match, so a caller-sent "correlation-id" would otherwise silently fail to match

@@ -254,15 +254,13 @@ Emulator to accept a different key for some reason. Precedence is explicit `-Key
 `emulatorKey` > a built-in fallback to that same well-known value, for a bare invocation with no
 config file wired up at all - same precedence `-DatabaseName`/`-PartitionKey` already use.
 
-**`partitionKey`'s default of `/category` is a known, deliberate tradeoff, not a bug**: only
-`OrderArchiveDocument` actually has a `category` property. `InventoryEventDocument` and
-`InventoryBulkImportItemDocument` have none - cosmos-db.instructions.md §4 documents their real
-partitioning as the composite `WarehouseId:Sku` on a `PartitionKey` property, not `Category` - so
-under this default, `InventoryEvents`/`BulkInventoryImports` seed documents all land in the single
-Undefined partition instead of being distributed by `WarehouseId:Sku`. This was chosen explicitly
-(one shared `partitionKey` value for all containers, over a per-container override) for simplicity of
-this local seed setup; pass `-PartitionKey` or edit `cosmos-db-config.json` if you need those two
-containers' local data to actually exercise `WarehouseId:Sku` partitioning.
+**`partitionKey`'s default of `/category` matches every document's actual shape**:
+`OrderArchiveDocument`, `AuditEntryDocument`, `InventoryEventDocument`, and
+`InventoryBulkImportItemDocument` all carry a `Category` property (cosmos-db.instructions.md §4), so
+one shared `partitionKey` value works for every container in `cosmos-db-config.json`, not just
+`OrderArchive`. For `InventoryEvents`/`BulkInventoryImports`, the seed data's `category` value is
+still the composite `WarehouseId:Sku` (see `data/InventoryEvents.json`), not a low-cardinality
+category string - only the property name is shared across entities, not the value's shape (§4).
 
 It talks directly to the Cosmos DB REST API (signed with `emulatorKey` above, well-known by default),
 not the `Microsoft.Azure.Cosmos` SDK, so it stays a standalone script with no new project/NuGet

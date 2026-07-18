@@ -1,6 +1,6 @@
 using IIS.WMS.Common.BlobStorage;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Application.Common;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;

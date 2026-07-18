@@ -185,12 +185,12 @@ the project-wide compiler/tooling configuration:
   `Testcontainers` (Cosmos DB emulator, Kafka, Service Bus emulator where
   available) — see
   [integration-resiliency.instructions.md](integration-resiliency.instructions.md).
-* **Coverage:** minimum **85% line coverage on the Domain and Application
+* **Coverage:** minimum **98% line coverage on the Domain and Application
   layers**, enforced in CI before merge to the default branch. This is the
   one number every sibling doc must match; if you see a different
   percentage or a different layer scope anywhere else, that other doc is
   wrong and should be corrected to match this line.
-* **Infrastructure layer coverage:** minimum **70%**, measured across unit
+* **Infrastructure layer coverage:** minimum **95%**, measured across unit
   *and* integration tests combined — not unit tests alone. Infrastructure
   (the Cosmos repository, the Kafka/Service Bus consumers, Blob Storage
   adapters) is exactly the part of this service where mocking every Azure

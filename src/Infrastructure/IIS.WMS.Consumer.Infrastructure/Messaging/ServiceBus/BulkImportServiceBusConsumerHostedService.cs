@@ -78,7 +78,6 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
         processor.ProcessErrorAsync += ProcessErrorAsync;
 
         await processor.StartProcessingAsync(stoppingToken);
-        await processor.StartProcessingAsync(stoppingToken);
 
         try
         {
@@ -129,18 +128,11 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
     {
         healthState.LastSuccessfulReceiveUtc = DateTimeOffset.UtcNow;
 
-        BulkInventoryImportEvent inbound;
+        var inbound = TryDeserializeEvent(message, out var deadLetterOutcome);
 
-        try
+        if (inbound is null)
         {
-            inbound = JsonSerializer.Deserialize<BulkInventoryImportEvent>(message.Body.ToString())
-                ?? throw new JsonException("Deserialized payload was null.");
-        }
-        catch (JsonException ex)
-        {
-            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
-
-            return ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
+            return deadLetterOutcome!;
         }
 
         var correlationId = message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
@@ -158,6 +150,40 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
 
         var bulkInventoryImportService = scope.ServiceProvider.GetRequiredService<IBulkInventoryImportService>();
 
+        return await ImportEventAsync(bulkInventoryImportService, inbound, message, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deserializes the bulk-import event payload. On a poison message (malformed JSON, or a
+    /// <see langword="null"/> result) returns <see langword="null"/> and sets
+    /// <paramref name="deadLetterOutcome"/> to the outcome the caller should return immediately.
+    /// </summary>
+    /// <param name="message">The received Service Bus message.</param>
+    /// <param name="deadLetterOutcome">Set when this message is poison and must be dead-lettered by the caller.</param>
+    private BulkInventoryImportEvent? TryDeserializeEvent(ServiceBusReceivedMessage message, out ServiceBusMessageOutcome? deadLetterOutcome)
+    {
+        try
+        {
+            var inbound = JsonSerializer.Deserialize<BulkInventoryImportEvent>(message.Body.ToString())
+                ?? throw new JsonException("Deserialized payload was null.");
+
+            deadLetterOutcome = null;
+            return inbound;
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
+
+            deadLetterOutcome = ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Upserts <paramref name="inbound"/> via <see cref="IBulkInventoryImportService"/>.</summary>
+    private async Task<ServiceBusMessageOutcome> ImportEventAsync(
+        IBulkInventoryImportService bulkInventoryImportService, BulkInventoryImportEvent inbound,
+        ServiceBusReceivedMessage message, CancellationToken cancellationToken)
+    {
         try
         {
             var request = new ImportBulkInventoryItemRequest(

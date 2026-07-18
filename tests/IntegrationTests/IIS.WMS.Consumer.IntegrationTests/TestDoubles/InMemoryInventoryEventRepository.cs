@@ -19,7 +19,7 @@ public sealed class InMemoryInventoryEventRepository : IInventoryEventRepository
     private readonly ConcurrentDictionary<string, InventoryEvent> items = new();
     private int etagCounter;
 
-    public Task<InventoryEvent?> GetAsync(string id, string partitionKey, CancellationToken cancellationToken = default) =>
+    public Task<InventoryEvent?> GetAsync(string id, string category, CancellationToken cancellationToken = default) =>
         Task.FromResult(items.TryGetValue(id, out var item) ? Clone(item) : null);
 
     public Task<InventoryEvent> CreateAsync(InventoryEvent entity, CancellationToken cancellationToken = default)
@@ -45,11 +45,11 @@ public sealed class InMemoryInventoryEventRepository : IInventoryEventRepository
     }
 
     public Task<InventoryEvent> PatchAsync(
-        string id, string partitionKey, string expectedETag,
+        string id, string category, string expectedETag,
         IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Not exercised by the Api-level integration tests - see cosmos-db.instructions.md §13 for Patch coverage via Testcontainers.");
 
-    public Task DeleteAsync(string id, string partitionKey, CancellationToken cancellationToken = default)
+    public Task DeleteAsync(string id, string category, CancellationToken cancellationToken = default)
     {
         items.TryRemove(id, out _);
 

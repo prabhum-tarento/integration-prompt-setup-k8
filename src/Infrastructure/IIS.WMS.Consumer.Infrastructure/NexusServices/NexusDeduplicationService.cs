@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
+using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Resilience;
 using IIS.WMS.Consumer.Application.Common;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly.Registry;
@@ -34,7 +34,7 @@ public sealed class NexusDeduplicationService(
         {
             logger.LogWarning(
                 "{ConsumerName}: message for correlation {CorrelationId} had no {DeduplicationIdHeader} header - skipping deduplication check for it.",
-                consumerName, correlationId, KafkaHeaderNames.DeduplicationId);
+                consumerName, correlationId, WellKnownHeaderNames.DeduplicationId);
             return false;
         }
 
@@ -49,7 +49,7 @@ public sealed class NexusDeduplicationService(
             {
                 Content = JsonContent.Create(new DeduplicationRequest(compositeDeduplicationId)),
             };
-            request.Headers.Add(KafkaHeaderNames.CorrelationId, correlationId);
+            request.Headers.Add(WellKnownHeaderNames.CorrelationId, correlationId);
 
             return await httpClient.SendAsync(request, ct);
         }, cancellationToken);

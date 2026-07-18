@@ -114,4 +114,12 @@ public class InventoryEventTests
         Assert.Equal(2, aggregate.ActiveReservations["reservation-1"]);
         Assert.Empty(aggregate.DomainEvents);
     }
+
+    [Fact(DisplayName = "Category combines warehouse id and SKU as the Cosmos partition key")]
+    public void Category_ReturnsWarehouseIdAndSkuJoinedByColon()
+    {
+        var aggregate = InventoryEvent.Create("WH1:SKU1", "WH1", "SKU1", initialQuantity: 10, Now);
+
+        Assert.Equal("WH1:SKU1", aggregate.Category);
+    }
 }

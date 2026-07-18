@@ -1,15 +1,15 @@
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+namespace IIS.WMS.Common.Messaging;
 
 /// <summary>
-/// Kafka message header names this consumer reads from/writes to the upstream producer's contract -
+/// Well-known message header names shared across every transport this repo consumes/produces -
 /// matching the header names the same upstream Nexus/WMS event producers already use elsewhere (see
 /// <c>ApplicationHeaders</c> in the sibling iis-reflex-wms-facade repo), not this repo's own
-/// invention. <see cref="CorrelationId"/> replaces the previous ad hoc <c>"correlationId"</c> header
-/// name <see cref="ConsumerHostedService"/> read before this change - that name didn't match
-/// what the producer actually sends, so the correlation id fallback (a fresh GUID) was silently
-/// firing on every message.
+/// invention. Originally Kafka-only (<c>KafkaHeaderNames</c>), moved here and renamed because these
+/// names are already read/written outside any Kafka context - e.g. <c>NexusDeduplicationService</c>
+/// sends <see cref="AppId"/> as an outbound HTTP header - and because the dynamic-validation script
+/// contract (<c>IIS.WMS.Common.DynamicValidation</c>) needs them nameable without a Kafka reference.
 /// </summary>
-public static class KafkaHeaderNames
+public static class WellKnownHeaderNames
 {
     /// <summary>Correlation id carried end to end across Kafka → Service Bus (integration-resiliency.instructions.md §4).</summary>
     public const string CorrelationId = "Correlation-Id";
@@ -19,7 +19,7 @@ public static class KafkaHeaderNames
 
     /// <summary>Identifies the upstream application/facade that produced the message.</summary>
     public const string AppId = "App-Id";
-    
+
     public const string EventKey = "Id";
 
     /// <summary>Discriminates the event's type/schema.</summary>

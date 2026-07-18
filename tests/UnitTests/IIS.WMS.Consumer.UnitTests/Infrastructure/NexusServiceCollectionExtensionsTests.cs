@@ -1,6 +1,6 @@
+using IIS.WMS.Common.Messaging;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Configuration;
@@ -71,7 +71,7 @@ public class NexusServiceCollectionExtensionsTests
         var client = httpClientFactory.CreateClient(nameof(IDeduplicationService));
 
         Assert.Equal(new Uri("https://nexus.example.com/nexus/deduper/api/dedupe"), client.BaseAddress);
-        Assert.Equal("wms-consumer", client.DefaultRequestHeaders.GetValues(KafkaHeaderNames.AppId).Single());
+        Assert.Equal("wms-consumer", client.DefaultRequestHeaders.GetValues(WellKnownHeaderNames.AppId).Single());
     }
 
     [Fact(DisplayName = "Resolving the typed client throws when Nexus:Deduplication:BaseUrl is missing")]

@@ -20,7 +20,6 @@ internal static class OrderArchiveMapper
     {
         Id = aggregate.Id,
         Category = aggregate.Category,
-        PartitionKey = aggregate.Category,
         OrderDetail = JObject.Parse(aggregate.OrderDetail.Json),
         CorrelationId = aggregate.CorrelationId,
         Timestamp = aggregate.Timestamp,

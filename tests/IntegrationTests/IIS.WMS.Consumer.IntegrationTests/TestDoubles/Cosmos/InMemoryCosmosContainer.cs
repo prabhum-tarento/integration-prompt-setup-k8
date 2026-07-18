@@ -85,7 +85,7 @@ public sealed class InMemoryCosmosContainer : Container
         T item, PartitionKey? partitionKey = null, ItemRequestOptions? requestOptions = null, CancellationToken cancellationToken = default)
     {
         var doc = RequireDocument(item);
-        var key = Key(partitionKey ?? new PartitionKey(doc.PartitionKey), doc.Id);
+        var key = Key(partitionKey ?? new PartitionKey(doc.Category), doc.Id);
         var jobject = Serialize(item, NextETag());
 
         if (!store.TryAdd(key, jobject))
@@ -101,7 +101,7 @@ public sealed class InMemoryCosmosContainer : Container
     {
         // No ETag check - last write wins, matching CosmosRepository.UpsertAsync's documented contract.
         var doc = RequireDocument(item);
-        var key = Key(partitionKey ?? new PartitionKey(doc.PartitionKey), doc.Id);
+        var key = Key(partitionKey ?? new PartitionKey(doc.Category), doc.Id);
         var jobject = Serialize(item, NextETag());
         store[key] = jobject;
 
@@ -112,7 +112,7 @@ public sealed class InMemoryCosmosContainer : Container
         T item, string id, PartitionKey? partitionKey = null, ItemRequestOptions? requestOptions = null, CancellationToken cancellationToken = default)
     {
         var doc = RequireDocument(item);
-        var key = Key(partitionKey ?? new PartitionKey(doc.PartitionKey), id);
+        var key = Key(partitionKey ?? new PartitionKey(doc.Category), id);
 
         if (!store.TryGetValue(key, out var existing))
         {

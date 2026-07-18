@@ -5,6 +5,7 @@
   "containers": [
     "InventoryEvents",
     "OrderArchive",
-    "BulkInventoryImports"
+    "BulkInventoryImports",
+    "AuditLog"
   ]
 }

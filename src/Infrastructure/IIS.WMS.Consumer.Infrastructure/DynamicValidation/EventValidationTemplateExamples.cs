@@ -1,3 +1,4 @@
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Application.EventValidationTemplates.Dtos;
 
 namespace IIS.WMS.Consumer.Infrastructure.DynamicValidation;
@@ -48,11 +49,11 @@ public static class EventValidationTemplateExamples
             "Returning false means 'valid, but deliberately not relayed' - logged at Information, " +
             "offset committed, no dead-letter write. Use it to filter traffic, e.g. by producer. " +
             "'header' is the message's Kafka headers object, injected per message; read individual " +
-            "values with the TryGetHeader helper and the KafkaHeaderNames constants, both available " +
+            "values with the TryGetHeader helper and the WellKnownHeaderNames constants, both available " +
             "without any using directives.",
             """
             // Skip (don't relay) everything from a producer we intentionally ignore.
-            if (TryGetHeader(header, KafkaHeaderNames.AppId) == "legacy-producer")
+            if (TryGetHeader(header, WellKnownHeaderNames.AppId) == "legacy-producer")
             {
                 return false;
             }
@@ -63,11 +64,11 @@ public static class EventValidationTemplateExamples
         new(
             "Validate against Kafka headers",
             "Any header can participate in the verdict. TryGetHeader returns null for an absent " +
-            "header, so null-check before trusting a value. KafkaHeaderNames exposes the well-known " +
+            "header, so null-check before trusting a value. WellKnownHeaderNames exposes the well-known " +
             "names: Type, CorrelationId, DeduplicationId, AppId, EventKey.",
             """
-            var eventType = TryGetHeader(header, KafkaHeaderNames.Type);
-            var correlationId = TryGetHeader(header, KafkaHeaderNames.CorrelationId);
+            var eventType = TryGetHeader(header, WellKnownHeaderNames.Type);
+            var correlationId = TryGetHeader(header, WellKnownHeaderNames.CorrelationId);
 
             // Require both a recognized event type and a correlation id.
             return eventType == "inventory.InventoryStateChanged" && !string.IsNullOrEmpty(correlationId);
@@ -87,7 +88,7 @@ public static class EventValidationTemplateExamples
                 return false;
             }
 
-            _log.LogInformation("Validated {Reference} from {AppId}.", (string)x.Reference, TryGetHeader(header, KafkaHeaderNames.AppId));
+            _log.LogInformation("Validated {Reference} from {AppId}.", (string)x.Reference, TryGetHeader(header, WellKnownHeaderNames.AppId));
             return true;
             """),
 
@@ -145,7 +146,7 @@ public static class EventValidationTemplateExamples
             }
             else
             {
-                _log.LogInformation("Valid request from {EventType}.", TryGetHeader(header, KafkaHeaderNames.Type));
+                _log.LogInformation("Valid request from {EventType}.", TryGetHeader(header, WellKnownHeaderNames.Type));
                 return true;
             }
             """),

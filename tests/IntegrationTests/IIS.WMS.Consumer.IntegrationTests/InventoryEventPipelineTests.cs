@@ -198,7 +198,7 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
     {
         const string warehouseId = "WH1";
         const string sku = "SKU1";
-        var partitionKey = $"{warehouseId}:{sku}";
+        var category = $"{warehouseId}:{sku}";
 
         using var repositoryScope = provider.CreateScope();
         var repository = repositoryScope.ServiceProvider.GetRequiredService<IInventoryEventRepository>();
@@ -206,7 +206,7 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
         // --- Happy path: a Create event lands in Cosmos DB ---
         await ProduceAsync(new { EventId = "evt-create-1", WarehouseId = warehouseId, Sku = sku, Quantity = 10, EventType = "Create" });
 
-        var created = await WaitForAsync(() => repository.GetAsync(partitionKey, partitionKey));
+        var created = await WaitForAsync(() => repository.GetAsync(category, category));
         Assert.NotNull(created);
         Assert.Equal(10, created!.OnHandQuantity);
 
@@ -216,7 +216,7 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
         await ProduceAsync(new { EventId = "evt-create-1", WarehouseId = warehouseId, Sku = sku, Quantity = 10, EventType = "Create" });
         await Task.Delay(TimeSpan.FromSeconds(2)); // let the redelivered message flow through; no new item to wait on
 
-        var afterDuplicate = await repository.GetAsync(partitionKey, partitionKey);
+        var afterDuplicate = await repository.GetAsync(category, category);
         Assert.Equal(10, afterDuplicate!.OnHandQuantity);
 
         // --- Forced Cosmos 412 PreconditionFailed on the first Reserve write - proves
@@ -229,14 +229,14 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
         {
             var container = cosmosFactory!.GetInMemoryContainer(CosmosContainerName)
                 ?? throw new InvalidOperationException($"{CosmosContainerName} container was never resolved.");
-            container.ForceNextConflict(partitionKey);
+            container.ForceNextConflict(category);
         }
 
         await ProduceAsync(new { EventId = "evt-reserve-1", WarehouseId = warehouseId, Sku = sku, Quantity = 3, EventType = "Reserve" });
 
         var afterReserve = await WaitForAsync(async () =>
         {
-            var current = await repository.GetAsync(partitionKey, partitionKey);
+            var current = await repository.GetAsync(category, category);
             return current?.OnHandQuantity == 7 ? current : null;
         });
         Assert.NotNull(afterReserve);

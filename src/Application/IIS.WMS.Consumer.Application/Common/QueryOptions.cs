@@ -4,7 +4,7 @@ namespace IIS.WMS.Consumer.Application.Common;
 
 /// <summary>
 /// Filtering/paging options for a repository query. The implementation must throw if
-/// <see cref="PartitionKey"/> is null and <see cref="AllowCrossPartitionScan"/> is false
+/// <see cref="Category"/> is null and <see cref="AllowCrossPartitionScan"/> is false
 /// (cosmos-db.instructions.md §6) - this is what makes "minimize cross-partition queries" a real
 /// guardrail instead of an aspiration.
 /// </summary>
@@ -27,9 +27,9 @@ public class QueryOptions<T>
     public string? ContinuationToken { get; set; }
 
     /// <summary>Partition key to scope the query to. Required unless <see cref="AllowCrossPartitionScan"/> is explicitly set.</summary>
-    public string? PartitionKey { get; set; }
+    public string? Category { get; set; }
 
-    /// <summary>Explicit opt-in to a cross-partition scan when <see cref="PartitionKey"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
+    /// <summary>Explicit opt-in to a cross-partition scan when <see cref="Category"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
     public bool AllowCrossPartitionScan { get; set; }
 }
 
@@ -56,8 +56,8 @@ public class QueryOptions<T, TResult>
     public string? ContinuationToken { get; set; }
 
     /// <summary>Partition key to scope the query to. Required unless <see cref="AllowCrossPartitionScan"/> is explicitly set.</summary>
-    public string? PartitionKey { get; set; }
+    public string? Category { get; set; }
 
-    /// <summary>Explicit opt-in to a cross-partition scan when <see cref="PartitionKey"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
+    /// <summary>Explicit opt-in to a cross-partition scan when <see cref="Category"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
     public bool AllowCrossPartitionScan { get; set; }
 }

@@ -1,20 +1,19 @@
 using System.Text;
 using IIS.WMS.Common.BlobStorage;
-using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
+using IIS.WMS.Common.DynamicValidation;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 
-namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
+namespace IIS.WMS.Consumer.UnitTests.Common;
 
 /// <summary>Template lookup/compile/execute/cache tests for <see cref="DynamicEventValidator"/>, with <see cref="IFileStore"/> mocked and the real compiler.</summary>
 public class DynamicEventValidatorTests
 {
     private const string ContainerName = "validation-templates";
-    private const string SchemaName = "InventoryStateChangedEvent";
-    private const string EventType = "inventory.InventoryStateChanged";
-    private const string BlobName = $"{SchemaName}/{EventType}.cs";
+    private const string Transport = "Kafka";
+    private const string Identifier = "inventory.InventoryStateChanged";
+    private const string BlobName = $"{Transport}/{Identifier}.cs";
 
     private readonly IFileStore fileStore = Substitute.For<IFileStore>();
     private readonly TestTimeProvider timeProvider = new();
@@ -26,7 +25,7 @@ public class DynamicEventValidatorTests
         fileStore,
         Options.Create(new BlobStorageOptions()),
         Options.Create(options),
-        new ValidationScriptCompiler(Substitute.For<ILogger<ValidationScriptCompiler>>()),
+        new ValidationScriptCompiler([], Substitute.For<ILogger<ValidationScriptCompiler>>()),
         timeProvider,
         Substitute.For<ILogger<DynamicEventValidator>>());
 
@@ -43,8 +42,8 @@ public class DynamicEventValidatorTests
         fileStore.ExistsAsync(ContainerName, BlobName, Arg.Any<CancellationToken>()).Returns(false);
         var sut = CreateSut();
 
-        var first = await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
-        var second = await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var first = await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var second = await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
 
         Assert.True(first);
         Assert.True(second);
@@ -57,8 +56,8 @@ public class DynamicEventValidatorTests
         SetStoredTemplate("return !string.IsNullOrEmpty(x.Reference);");
         var sut = CreateSut();
 
-        var valid = await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
-        var invalid = await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent(null, "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var valid = await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var invalid = await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent(null, "1"), null, messageLogger, scopedServices, CancellationToken.None);
 
         Assert.True(valid);
         Assert.False(invalid);
@@ -72,7 +71,7 @@ public class DynamicEventValidatorTests
         var sut = CreateSut();
 
         var exception = await Assert.ThrowsAsync<ApplicationException>(() =>
-            sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
+            sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
 
         Assert.Equal("Invalid Request", exception.Message);
     }
@@ -84,9 +83,9 @@ public class DynamicEventValidatorTests
         var sut = CreateSut();
 
         await Assert.ThrowsAsync<TemplateCompilationException>(() =>
-            sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
+            sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
         await Assert.ThrowsAsync<TemplateCompilationException>(() =>
-            sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
+            sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None));
 
         await fileStore.Received(1).DownloadAsync(ContainerName, BlobName, Arg.Any<CancellationToken>());
     }
@@ -97,9 +96,9 @@ public class DynamicEventValidatorTests
         fileStore.ExistsAsync(ContainerName, BlobName, Arg.Any<CancellationToken>()).Returns(false);
         var sut = CreateSut();
 
-        await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
         timeProvider.UtcNow += options.CacheDuration + TimeSpan.FromSeconds(1);
-        await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
 
         await fileStore.Received(2).ExistsAsync(ContainerName, BlobName, Arg.Any<CancellationToken>());
     }
@@ -109,7 +108,7 @@ public class DynamicEventValidatorTests
     {
         var sut = CreateSut();
 
-        var result = await sut.ValidateAsync(SchemaName, string.Empty, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var result = await sut.ValidateAsync(Transport, string.Empty, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
 
         Assert.True(result);
         await fileStore.DidNotReceiveWithAnyArgs().ExistsAsync(default!, default!);
@@ -122,11 +121,11 @@ public class DynamicEventValidatorTests
             fileStore,
             Options.Create(new BlobStorageOptions()),
             Options.Create(new DynamicValidationOptions { Enabled = false }),
-            new ValidationScriptCompiler(Substitute.For<ILogger<ValidationScriptCompiler>>()),
+            new ValidationScriptCompiler([], Substitute.For<ILogger<ValidationScriptCompiler>>()),
             timeProvider,
             Substitute.For<ILogger<DynamicEventValidator>>());
 
-        var result = await sut.ValidateAsync(SchemaName, EventType, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
+        var result = await sut.ValidateAsync(Transport, Identifier, new ScriptTestEvent("R1", "1"), null, messageLogger, scopedServices, CancellationToken.None);
 
         Assert.True(result);
         await fileStore.DidNotReceiveWithAnyArgs().ExistsAsync(default!, default!);

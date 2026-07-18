@@ -2,18 +2,18 @@ using IIS.WMS.Consumer.Domain.Aggregates;
 
 namespace IIS.WMS.Consumer.UnitTests.Domain;
 
-/// <summary>Business-rule tests for the <see cref="InventoryBulkImportItem"/> aggregate - required-field validation, the deterministic id/partition key, and the non-negative quantity guard.</summary>
+/// <summary>Business-rule tests for the <see cref="InventoryBulkImportItem"/> aggregate - required-field validation, the deterministic id/category, and the non-negative quantity guard.</summary>
 public class InventoryBulkImportItemTests
 {
     private static readonly DateTime Now = new(2026, 7, 16, 12, 0, 0, DateTimeKind.Utc);
 
-    [Fact(DisplayName = "Create derives Id and PartitionKey from warehouse and SKU and sets every property")]
-    public void Create_ValidInputs_DerivesIdAndPartitionKeyAndSetsProperties()
+    [Fact(DisplayName = "Create derives Id and Category from warehouse and SKU and sets every property")]
+    public void Create_ValidInputs_DerivesIdAndCategoryAndSetsProperties()
     {
         var item = InventoryBulkImportItem.Create("WH1", "SKU1", quantity: 25, sourceSystem: "WMS-Legacy", Now);
 
         Assert.Equal("WH1:SKU1", item.Id);
-        Assert.Equal("WH1:SKU1", item.PartitionKey);
+        Assert.Equal("WH1:SKU1", item.Category);
         Assert.Equal("WH1", item.WarehouseId);
         Assert.Equal("SKU1", item.Sku);
         Assert.Equal(25, item.Quantity);
@@ -70,7 +70,7 @@ public class InventoryBulkImportItemTests
         var item = InventoryBulkImportItem.Rehydrate("WH1:SKU1", "WH1", "SKU1", 40, "WMS-Legacy", Now);
 
         Assert.Equal("WH1:SKU1", item.Id);
-        Assert.Equal("WH1:SKU1", item.PartitionKey);
+        Assert.Equal("WH1:SKU1", item.Category);
         Assert.Equal(40, item.Quantity);
         Assert.Equal("WMS-Legacy", item.SourceSystem);
         Assert.Equal(Now, item.SourceLastUpdatedUtc);

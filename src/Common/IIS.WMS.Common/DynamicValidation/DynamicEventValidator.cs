@@ -1,13 +1,12 @@
 using System.Collections.Concurrent;
-using Confluent.Kafka;
-using IIS.WMS.Consumer.Application.Common;
-using IIS.WMS.Consumer.Application.Exceptions;
+using IIS.WMS.Common.BlobStorage;
+using IIS.WMS.Common.Messaging;
 using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace IIS.WMS.Consumer.Infrastructure.DynamicValidation;
+namespace IIS.WMS.Common.DynamicValidation;
 
 /// <summary>
 /// <inheritdoc cref="IDynamicEventValidator"/>
@@ -41,16 +40,16 @@ public sealed class DynamicEventValidator(
 
     /// <inheritdoc />
     public async Task<bool> ValidateAsync(
-        string schemaName, string eventType, object message, Headers? headers, ILogger messageLogger, IServiceProvider scopedServices, CancellationToken cancellationToken)
+        string transport, string identifier, object message, HeaderLookup? headers, ILogger messageLogger, IServiceProvider scopedServices, CancellationToken cancellationToken)
     {
-        // No Type header means no {schemaName}/{eventType}.cs path to look up - not a failure, the
+        // No identifier means no {transport}/{identifier}.cs path to look up - not a failure, the
         // message just has no dynamic rule to run, same as a missing template.
-        if (!options.Value.Enabled || string.IsNullOrEmpty(schemaName) || string.IsNullOrEmpty(eventType))
+        if (!options.Value.Enabled || string.IsNullOrEmpty(transport) || string.IsNullOrEmpty(identifier))
         {
             return true;
         }
 
-        var blobName = $"{schemaName}/{eventType}.cs";
+        var blobName = $"{transport}/{identifier}.cs";
 
         if (!cache.TryGetValue(blobName, out var cached) || cached.ExpiresAtUtc <= timeProvider.GetUtcNow())
         {

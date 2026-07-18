@@ -119,13 +119,7 @@ public sealed class ServiceBusRelayPublisher(
         var sender = GetSender(queueName);
         var pipeline = pipelineProvider.GetPipeline(ResiliencePipelines.ServiceBusPublish);
 
-        var built = new (ServiceBusMessage ServiceBusMessage, ServiceBusRelayPublishResult Result, int Index)[items.Count];
-
-        for (var i = 0; i < items.Count; i++)
-        {
-            var (serviceBusMessage, result) = await BuildMessageAsync(items[i].Message, cancellationToken);
-            built[i] = (serviceBusMessage, result, items[i].Index);
-        }
+        var built = await BuildMessagesAsync(items, cancellationToken);
 
         var position = 0;
 
@@ -160,6 +154,21 @@ public sealed class ServiceBusRelayPublisher(
         }
     }
 
+    /// <summary>Builds every message for one queue's batch up front (running the claim-check for each), before any batch is packed.</summary>
+    private async Task<(ServiceBusMessage ServiceBusMessage, ServiceBusRelayPublishResult Result, int Index)[]> BuildMessagesAsync(
+        IReadOnlyList<(ServiceBusRelayMessage Message, int Index)> items, CancellationToken cancellationToken)
+    {
+        var built = new (ServiceBusMessage ServiceBusMessage, ServiceBusRelayPublishResult Result, int Index)[items.Count];
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            var (serviceBusMessage, result) = await BuildMessageAsync(items[i].Message, cancellationToken);
+            built[i] = (serviceBusMessage, result, items[i].Index);
+        }
+
+        return built;
+    }
+
     /// <summary>
     /// Builds the <see cref="ServiceBusMessage"/> for one <see cref="ServiceBusRelayMessage"/>: claim-check
     /// (inline vs. blob-offloaded payload), <see cref="ServiceBusRelayEnvelope"/> construction, and the
@@ -169,37 +178,7 @@ public sealed class ServiceBusRelayPublisher(
     private async Task<(ServiceBusMessage ServiceBusMessage, ServiceBusRelayPublishResult Result)> BuildMessageAsync(
         ServiceBusRelayMessage message, CancellationToken cancellationToken)
     {
-        var payloadSizeBytes = Encoding.UTF8.GetByteCount(message.Json);
-        var maxMessageSizeBytes = message.MaxMessageSizeBytesOverride ?? DefaultMaxMessageSizeBytes;
-
-        JsonElement reflexSchema;
-        var blobPath = string.Empty;
-        var blobOffloadDuration = TimeSpan.Zero;
-        var wasOffloaded = false;
-
-        if (payloadSizeBytes <= maxMessageSizeBytes)
-        {
-            using var payloadDocument = JsonDocument.Parse(message.Json);
-            reflexSchema = payloadDocument.RootElement.Clone();
-        }
-        else
-        {
-            var blobOffloadStopwatch = Stopwatch.StartNew();
-
-            using var payloadStream = new MemoryStream(Encoding.UTF8.GetBytes(message.Json));
-            blobPath = await hotFileStore.UploadAsync(
-                blobStorageOptions.LargePayloadContainerName,
-                $"{message.CorrelationId}/{message.PayloadName}/{message.SourceName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.json",
-                payloadStream, cancellationToken);
-
-            blobOffloadDuration = blobOffloadStopwatch.Elapsed;
-            wasOffloaded = true;
-            reflexSchema = EmptyReflexSchema;
-
-            logger.LogInformation(
-                "Payload for {MessageId} was {PayloadSizeBytes} bytes (limit {MaxMessageSizeBytes}) - offloaded to blob {BlobPath} in {BlobOffloadDurationMs}ms. CorrelationId: {CorrelationId}",
-                message.MessageId, payloadSizeBytes, maxMessageSizeBytes, blobPath, blobOffloadDuration.TotalMilliseconds, message.CorrelationId);
-        }
+        var (reflexSchema, blobPath, blobOffloadDuration, wasOffloaded) = await ResolveReflexSchemaAsync(message, cancellationToken);
 
         var envelope = new ServiceBusRelayEnvelope
         {
@@ -222,6 +201,40 @@ public sealed class ServiceBusRelayPublisher(
         serviceBusMessage.ApplicationProperties["CorrelationId"] = message.CorrelationId;
 
         return (serviceBusMessage, new ServiceBusRelayPublishResult(wasOffloaded, blobPath, blobOffloadDuration, TimeSpan.Zero));
+    }
+
+    /// <summary>
+    /// The claim-check decision for one message's payload: inline as a parsed <see cref="JsonElement"/>
+    /// when it fits under the size limit, or uploaded to blob storage (returning <see cref="EmptyReflexSchema"/>
+    /// plus the blob path) when it doesn't.
+    /// </summary>
+    private async Task<(JsonElement ReflexSchema, string BlobPath, TimeSpan BlobOffloadDuration, bool WasOffloaded)> ResolveReflexSchemaAsync(
+        ServiceBusRelayMessage message, CancellationToken cancellationToken)
+    {
+        var payloadSizeBytes = Encoding.UTF8.GetByteCount(message.Json);
+        var maxMessageSizeBytes = message.MaxMessageSizeBytesOverride ?? DefaultMaxMessageSizeBytes;
+
+        if (payloadSizeBytes <= maxMessageSizeBytes)
+        {
+            using var payloadDocument = JsonDocument.Parse(message.Json);
+            return (payloadDocument.RootElement.Clone(), string.Empty, TimeSpan.Zero, false);
+        }
+
+        var blobOffloadStopwatch = Stopwatch.StartNew();
+
+        using var payloadStream = new MemoryStream(Encoding.UTF8.GetBytes(message.Json));
+        var blobPath = await hotFileStore.UploadAsync(
+            blobStorageOptions.LargePayloadContainerName,
+            $"{message.CorrelationId}/{message.PayloadName}/{message.SourceName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.json",
+            payloadStream, cancellationToken);
+
+        var blobOffloadDuration = blobOffloadStopwatch.Elapsed;
+
+        logger.LogInformation(
+            "Payload for {MessageId} was {PayloadSizeBytes} bytes (limit {MaxMessageSizeBytes}) - offloaded to blob {BlobPath} in {BlobOffloadDurationMs}ms. CorrelationId: {CorrelationId}",
+            message.MessageId, payloadSizeBytes, maxMessageSizeBytes, blobPath, blobOffloadDuration.TotalMilliseconds, message.CorrelationId);
+
+        return (EmptyReflexSchema, blobPath, blobOffloadDuration, true);
     }
 
     /// <summary>Resolves (creating and caching on first use) the <see cref="ServiceBusSender"/> for <paramref name="queueName"/> - one sender per distinct queue name actually used across every caller, not one per caller.</summary>

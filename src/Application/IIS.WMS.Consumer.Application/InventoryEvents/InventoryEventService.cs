@@ -20,14 +20,14 @@ public sealed class InventoryEventService(
     public async Task<InventoryEventResponse?> GetAsync(
         string warehouseId, string sku, CancellationToken cancellationToken = default)
     {
-        var partitionKey = $"{warehouseId}:{sku}";
-        logger.LogDebug("Looking up inventory event {PartitionKey}.", partitionKey);
+        var category = $"{warehouseId}:{sku}";
+        logger.LogDebug("Looking up inventory event {Category}.", category);
 
-        var aggregate = await repository.GetAsync(partitionKey, partitionKey, cancellationToken);
+        var aggregate = await repository.GetAsync(category, category, cancellationToken);
 
         if (aggregate is null)
         {
-            logger.LogDebug("No inventory event found for {PartitionKey}.", partitionKey);
+            logger.LogDebug("No inventory event found for {Category}.", category);
 
             return null;
         }
@@ -62,7 +62,7 @@ public sealed class InventoryEventService(
     public async Task<InventoryEventResponse> ReserveStockAsync(
         string warehouseId, string sku, ReserveStockRequest request, CancellationToken cancellationToken = default)
     {
-        var partitionKey = $"{warehouseId}:{sku}";
+        var category = $"{warehouseId}:{sku}";
 
         // Re-read-and-reapply loop: a 412 PreconditionFailed means another writer updated this
         // aggregate between our read and our write. Re-fetch and reapply against the fresh ETag
@@ -71,8 +71,8 @@ public sealed class InventoryEventService(
         // session-scoped ordering (§2 of that doc) is what makes true races rare.
         for (var attempt = 1; attempt <= MaxConcurrencyRetryAttempts; attempt++)
         {
-            var aggregate = await repository.GetAsync(partitionKey, partitionKey, cancellationToken)
-                ?? throw new NotFoundException(nameof(InventoryEvent), partitionKey);
+            var aggregate = await repository.GetAsync(category, category, cancellationToken)
+                ?? throw new NotFoundException(nameof(InventoryEvent), category);
 
             aggregate.Reserve(request.ReservationId, request.Quantity, timeProvider.GetUtcNow().UtcDateTime);
 
@@ -82,20 +82,20 @@ public sealed class InventoryEventService(
                 await domainEventDispatcher.DispatchAsync(aggregate.DomainEvents, cancellationToken);
 
                 logger.LogInformation(
-                    "Reserved {Quantity} unit(s) of {PartitionKey} under reservation {ReservationId}.",
-                    request.Quantity, partitionKey, request.ReservationId);
+                    "Reserved {Quantity} unit(s) of {Category} under reservation {ReservationId}.",
+                    request.Quantity, category, request.ReservationId);
 
                 return ToResponse(replaced);
             }
             catch (ConcurrencyException) when (attempt < MaxConcurrencyRetryAttempts)
             {
                 logger.LogWarning(
-                    "Concurrency conflict reserving stock for {PartitionKey}, attempt {Attempt}/{MaxAttempts} - retrying.",
-                    partitionKey, attempt, MaxConcurrencyRetryAttempts);
+                    "Concurrency conflict reserving stock for {Category}, attempt {Attempt}/{MaxAttempts} - retrying.",
+                    category, attempt, MaxConcurrencyRetryAttempts);
             }
         }
 
-        throw new ConcurrencyException(partitionKey, "unknown");
+        throw new ConcurrencyException(category, "unknown");
     }
 
     /// <summary>Maps the Domain aggregate to the Application-facing DTO.</summary>

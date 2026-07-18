@@ -19,16 +19,12 @@ real environments (same section); this script is the local-only equivalent, the 
 config/service-bus-config.json already plays for the Service Bus emulator next to it.
 
 Every container shares one partition key path, declared as "partitionKey" in cosmos-db-config.json
-(default "/category", matching appsettings.Development.json's CosmosDb:PartitionKeyPath) - a
-deliberate choice for this script, made knowing it only reflects real document shape for
-OrderArchive (whose OrderArchiveDocument has a Category property). InventoryEventDocument and
-InventoryBulkImportItemDocument have no category property at all - cosmos-db.instructions.md Sec4
-documents their actual partitioning as the composite WarehouseId:Sku on a PartitionKey property, not
-Category - so seeded InventoryEvents/BulkInventoryImports documents land in Cosmos's "Undefined"
-partition under this default rather than being distributed by WarehouseId:Sku. That's a known,
-accepted divergence from Sec4 for this local seed data, not a bug - change cosmos-db-config.json's
-partitionKey (or pass -PartitionKey) if you need those two containers' seed data to actually
-exercise WarehouseId:Sku partitioning.
+(default "/category", matching appsettings.Development.json's CosmosDb:PartitionKeyPath) - this
+matches every document's actual shape: OrderArchiveDocument, AuditEntryDocument,
+InventoryEventDocument, and InventoryBulkImportItemDocument all carry a Category property
+(cosmos-db.instructions.md Sec4). For InventoryEvents/BulkInventoryImports, the value stored in
+Category is still the composite WarehouseId:Sku, not a low-cardinality category string - only the
+property name is shared, not the value's shape (Sec4).
 
 Safe to re-run: database/container creation tolerates an existing resource (409), and every
 document upserts (x-ms-documentdb-is-upsert), so re-running after editing a .\data\*.json file

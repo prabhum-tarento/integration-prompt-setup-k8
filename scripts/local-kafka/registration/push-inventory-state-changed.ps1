@@ -1,7 +1,7 @@
 <#
 Produces one Avro-encoded event onto a Kafka topic through Kafka REST Proxy's v3 Produce
 API (via Schema Registry), with the four Kafka headers ConsumerHostedService.cs reads (see
-KafkaHeaderNames.cs): Correlation-Id, Deduplication-Id, Type, App-Id.
+WellKnownHeaderNames.cs): Correlation-Id, Deduplication-Id, Type, App-Id.
 
 Generic over the event itself - pass -Body (a raw JSON string, spliced into the request
 verbatim, not re-parsed/re-serialized) and -SchemaName (the Schema Registry subject to
@@ -27,7 +27,7 @@ param(
     # passed here reaches Kafka REST Proxy exactly as written (any valid JSON, pretty-
     # printed or compact). Defaults to the InventoryStateChanged sample below if omitted.
     [string]$Body,
-    # Kafka "Type" header value (KafkaHeaderNames.Type) - paired with -SchemaName since
+    # Kafka "Type" header value (WellKnownHeaderNames.Type) - paired with -SchemaName since
     # each schema this script produces for typically corresponds to one event type.
     [string]$EventType = 'inventory.InventoryStateChanged',
     [string]$EventId = [Guid]::NewGuid().ToString(),

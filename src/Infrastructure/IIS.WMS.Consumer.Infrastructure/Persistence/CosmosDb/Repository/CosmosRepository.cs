@@ -88,20 +88,20 @@ public abstract class CosmosRepository<TDomain, TDocument>
     protected abstract TDomain ToDomain(TDocument document);
 
     /// <summary>Reads a single item by id, or <see langword="null"/> if it doesn't exist.</summary>
-    public async Task<TDomain?> GetAsync(string id, string partitionKey, CancellationToken cancellationToken = default)
+    public async Task<TDomain?> GetAsync(string id, string category, CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug("Reading item {Id} from partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+        _logger.LogDebug("Reading item {Id} from partition {Category} in {Container}.", id, category, _container.Id);
 
         try
         {
             var response = await _container.ReadItemAsync<TDocument>(
-                id, new PartitionKey(partitionKey), cancellationToken: cancellationToken);
+                id, new PartitionKey(category), cancellationToken: cancellationToken);
 
             return ToDomain(response.Resource);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
-            _logger.LogDebug("Item {Id} not found in partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+            _logger.LogDebug("Item {Id} not found in partition {Category} in {Container}.", id, category, _container.Id);
 
             return default;
         }
@@ -111,18 +111,18 @@ public abstract class CosmosRepository<TDomain, TDocument>
     public async Task<TDomain> CreateAsync(TDomain entity, CancellationToken cancellationToken = default)
     {
         var document = ToDocument(entity);
-        _logger.LogDebug("Creating item {Id} in partition {PartitionKey} in {Container}.", document.Id, document.PartitionKey, _container.Id);
+        _logger.LogDebug("Creating item {Id} in partition {Category} in {Container}.", document.Id, document.Category, _container.Id);
 
         try
         {
             var response = await _container.CreateItemAsync(
-                document, new PartitionKey(document.PartitionKey), cancellationToken: cancellationToken);
+                document, new PartitionKey(document.Category), cancellationToken: cancellationToken);
 
             _logger.LogInformation(
-                "Created item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
-                document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
+                "Created item {Id} in partition {Category} in {Container}, request charge {RequestCharge} RU.",
+                document.Id, document.Category, _container.Id, response.RequestCharge);
 
-            EnqueueAudit(AuditOperation.Create, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+            EnqueueAudit(AuditOperation.Create, response.Resource.Id, response.Resource.Category, response.Resource);
 
             return ToDomain(response.Resource);
         }
@@ -134,7 +134,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
                 "Create for {Id} in {Container} conflicted with an existing item - treating as an already-applied redelivery.",
                 document.Id, _container.Id);
 
-            return await GetAsync(document.Id, document.PartitionKey, cancellationToken)
+            return await GetAsync(document.Id, document.Category, cancellationToken)
                 ?? throw new InvalidOperationException(
                     $"Create conflicted on id {document.Id} but the item could not be re-read.");
         }
@@ -150,16 +150,16 @@ public abstract class CosmosRepository<TDomain, TDocument>
     public async Task<TDomain> UpsertAsync(TDomain entity, CancellationToken cancellationToken = default)
     {
         var document = ToDocument(entity);
-        _logger.LogDebug("Upserting item {Id} in partition {PartitionKey} in {Container}.", document.Id, document.PartitionKey, _container.Id);
+        _logger.LogDebug("Upserting item {Id} in partition {Category} in {Container}.", document.Id, document.Category, _container.Id);
 
         var response = await _container.UpsertItemAsync(
-            document, new PartitionKey(document.PartitionKey), cancellationToken: cancellationToken);
+            document, new PartitionKey(document.Category), cancellationToken: cancellationToken);
 
         _logger.LogInformation(
-            "Upserted item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
-            document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
+            "Upserted item {Id} in partition {Category} in {Container}, request charge {RequestCharge} RU.",
+            document.Id, document.Category, _container.Id, response.RequestCharge);
 
-        EnqueueAudit(AuditOperation.Upsert, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+        EnqueueAudit(AuditOperation.Upsert, response.Resource.Id, response.Resource.Category, response.Resource);
 
         return ToDomain(response.Resource);
     }
@@ -169,20 +169,20 @@ public abstract class CosmosRepository<TDomain, TDocument>
     {
         var document = ToDocument(entity);
         _logger.LogDebug(
-            "Replacing item {Id} in partition {PartitionKey} in {Container}, expected ETag {ExpectedETag}.",
-            document.Id, document.PartitionKey, _container.Id, expectedETag);
+            "Replacing item {Id} in partition {Category} in {Container}, expected ETag {ExpectedETag}.",
+            document.Id, document.Category, _container.Id, expectedETag);
 
         try
         {
             var response = await _container.ReplaceItemAsync(
-                document, document.Id, new PartitionKey(document.PartitionKey),
+                document, document.Id, new PartitionKey(document.Category),
                 new ItemRequestOptions { IfMatchEtag = expectedETag }, cancellationToken);
 
             _logger.LogInformation(
-                "Replaced item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
-                document.Id, document.PartitionKey, _container.Id, response.RequestCharge);
+                "Replaced item {Id} in partition {Category} in {Container}, request charge {RequestCharge} RU.",
+                document.Id, document.Category, _container.Id, response.RequestCharge);
 
-            EnqueueAudit(AuditOperation.Replace, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+            EnqueueAudit(AuditOperation.Replace, response.Resource.Id, response.Resource.Category, response.Resource);
 
             return ToDomain(response.Resource);
         }
@@ -198,7 +198,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
 
     /// <summary>Applies a partial update via the Cosmos Patch API, guarded by an ETag match. At most 10 operations per call.</summary>
     public async Task<TDomain> PatchAsync(
-        string id, string partitionKey, string expectedETag,
+        string id, string category, string expectedETag,
         IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default)
     {
         if (operations.Count > 10)
@@ -208,20 +208,20 @@ public abstract class CosmosRepository<TDomain, TDocument>
         }
 
         _logger.LogDebug(
-            "Patching item {Id} in partition {PartitionKey} in {Container} with {OperationCount} operation(s), expected ETag {ExpectedETag}.",
-            id, partitionKey, _container.Id, operations.Count, expectedETag);
+            "Patching item {Id} in partition {Category} in {Container} with {OperationCount} operation(s), expected ETag {ExpectedETag}.",
+            id, category, _container.Id, operations.Count, expectedETag);
 
         try
         {
             var response = await _container.PatchItemAsync<TDocument>(
-                id, new PartitionKey(partitionKey), operations,
+                id, new PartitionKey(category), operations,
                 new PatchItemRequestOptions { IfMatchEtag = expectedETag }, cancellationToken);
 
             _logger.LogInformation(
-                "Patched item {Id} in partition {PartitionKey} in {Container}, request charge {RequestCharge} RU.",
-                id, partitionKey, _container.Id, response.RequestCharge);
+                "Patched item {Id} in partition {Category} in {Container}, request charge {RequestCharge} RU.",
+                id, category, _container.Id, response.RequestCharge);
 
-            EnqueueAudit(AuditOperation.Patch, response.Resource.Id, response.Resource.PartitionKey, response.Resource);
+            EnqueueAudit(AuditOperation.Patch, response.Resource.Id, response.Resource.Category, response.Resource);
 
             return ToDomain(response.Resource);
         }
@@ -236,23 +236,23 @@ public abstract class CosmosRepository<TDomain, TDocument>
     }
 
     /// <summary>Deletes an item. Idempotent - deleting an item that no longer exists is not an error.</summary>
-    public async Task DeleteAsync(string id, string partitionKey, CancellationToken cancellationToken = default)
+    public async Task DeleteAsync(string id, string category, CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug("Deleting item {Id} from partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+        _logger.LogDebug("Deleting item {Id} from partition {Category} in {Container}.", id, category, _container.Id);
 
         try
         {
             await _container.DeleteItemAsync<TDocument>(
-                id, new PartitionKey(partitionKey), cancellationToken: cancellationToken);
+                id, new PartitionKey(category), cancellationToken: cancellationToken);
 
-            _logger.LogInformation("Deleted item {Id} from partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+            _logger.LogInformation("Deleted item {Id} from partition {Category} in {Container}.", id, category, _container.Id);
 
-            EnqueueAudit(AuditOperation.Delete, id, partitionKey, document: null);
+            EnqueueAudit(AuditOperation.Delete, id, category, document: null);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
             // Already gone - delete is idempotent.
-            _logger.LogDebug("Item {Id} was already deleted from partition {PartitionKey} in {Container}.", id, partitionKey, _container.Id);
+            _logger.LogDebug("Item {Id} was already deleted from partition {Category} in {Container}.", id, category, _container.Id);
         }
     }
 
@@ -260,19 +260,14 @@ public abstract class CosmosRepository<TDomain, TDocument>
     public async Task<PagedResult<TDomain>> GetPagedAsync(
         QueryOptions<TDomain> options, CancellationToken cancellationToken = default)
     {
-        ValidatePartitionScope(options.PartitionKey, options.AllowCrossPartitionScan);
+        ValidatePartitionScope(options.Category, options.AllowCrossPartitionScan);
+
+        var queryable = BuildFilteredQueryable(
+            options.Category, options.PageSize, options.ContinuationToken, options.Predicate, options.OrderBy);
+
         _logger.LogDebug(
-            "Querying items in {Container}, partition {PartitionKey}, page size {PageSize}.",
-            _container.Id, options.PartitionKey, options.PageSize);
-
-        var queryable = CreateBaseQueryable(options.PartitionKey, options.PageSize, options.ContinuationToken);
-
-        if (options.Predicate is not null)
-        {
-            queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(options.Predicate));
-        }
-
-        queryable = ApplyOrdering(queryable, options.OrderBy);
+            "Querying items in {Container}, partition {Category}, page size {PageSize}. Query: {Query}",
+            _container.Id, options.Category, options.PageSize, queryable);
 
         var page = await ReadNextPageAsync(queryable, cancellationToken);
 
@@ -292,22 +287,17 @@ public abstract class CosmosRepository<TDomain, TDocument>
     public async Task<PagedResult<TResult>> QueryAsync<TResult>(
         QueryOptions<TDomain, TResult> options, CancellationToken cancellationToken = default)
     {
-        ValidatePartitionScope(options.PartitionKey, options.AllowCrossPartitionScan);
-        _logger.LogDebug(
-            "Running projected query on {Container}, partition {PartitionKey}, page size {PageSize}.",
-            _container.Id, options.PartitionKey, options.PageSize);
+        ValidatePartitionScope(options.Category, options.AllowCrossPartitionScan);
 
-        var queryable = CreateBaseQueryable(options.PartitionKey, options.PageSize, options.ContinuationToken);
-
-        if (options.Predicate is not null)
-        {
-            queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(options.Predicate));
-        }
-
-        queryable = ApplyOrdering(queryable, options.OrderBy);
+        var queryable = BuildFilteredQueryable(
+            options.Category, options.PageSize, options.ContinuationToken, options.Predicate, options.OrderBy);
 
         var selector = ExpressionRetargeter.Retarget<TDomain, TDocument, TResult>(options.Selector);
         var projected = queryable.Select(selector);
+
+        _logger.LogDebug(
+            "Running projected query on {Container}, partition {Category}, page size {PageSize}. Query: {Query}",
+            _container.Id, options.Category, options.PageSize, projected);
 
         var page = await ReadNextPageAsync(projected, cancellationToken);
 
@@ -335,7 +325,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
     /// is no cross-partition option here, since every call site this method exists for already knows its
     /// partition key.
     /// </summary>
-    /// <param name="partitionKey">Partition to scope the query to.</param>
+    /// <param name="category">Partition to scope the query to.</param>
     /// <param name="select">
     /// Properties to fetch, e.g. <c>[x => x.Id, x => x.Category]</c> - omit (or pass <see langword="null"/>/empty)
     /// to fetch every property, same as <see cref="GetPagedAsync"/>. Each selector must be a single simple
@@ -347,7 +337,7 @@ public abstract class CosmosRepository<TDomain, TDocument>
     /// <param name="continuationToken">Continuation token from a previous page's <see cref="PagedResult{T}"/>, or <see langword="null"/> to start from the beginning.</param>
     /// <param name="cancellationToken">Token to cancel the query.</param>
     public async Task<PagedResult<TDomain>> GetAsync(
-        string partitionKey,
+        string category,
         IReadOnlyList<Expression<Func<TDomain, object>>>? select = null,
         Expression<Func<TDomain, bool>>? where = null,
         IReadOnlyList<OrderByClause<TDomain>>? orderBy = null,
@@ -355,22 +345,15 @@ public abstract class CosmosRepository<TDomain, TDocument>
         string? continuationToken = null,
         CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug(
-            "Querying selective columns in {Container}, partition {PartitionKey}, page size {PageSize}.",
-            _container.Id, partitionKey, pageSize);
-
-        var queryable = CreateBaseQueryable(partitionKey, pageSize, continuationToken);
-
-        if (where is not null)
-        {
-            queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(where));
-        }
-
-        queryable = ApplyOrdering(queryable, orderBy);
+        var queryable = BuildFilteredQueryable(category, pageSize, continuationToken, where, orderBy);
 
         var projected = select is { Count: > 0 }
             ? queryable.Select(BuildPartialDocumentSelector(select))
             : queryable;
+
+        _logger.LogDebug(
+            "Querying selective columns in {Container}, partition {Category}, page size {PageSize}. Query: {Query}",
+            _container.Id, category, pageSize, projected);
 
         var page = await ReadNextPageAsync(projected, cancellationToken);
 
@@ -402,12 +385,34 @@ public abstract class CosmosRepository<TDomain, TDocument>
         return await iterator.ReadNextAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Builds the base queryable for a page, then applies <paramref name="predicate"/> (if any) and
+    /// <paramref name="orderBy"/> - the shared "build + filter + order" prefix behind
+    /// <see cref="GetPagedAsync"/>, <see cref="QueryAsync{TResult}"/>, and the selective-column
+    /// <c>GetAsync(category, select, where, orderBy, ...)</c> overload. Callers that need
+    /// <see cref="ValidatePartitionScope"/> run it before calling this - the selective-column overload
+    /// always requires a partition and so never calls it.
+    /// </summary>
+    private IQueryable<TDocument> BuildFilteredQueryable(
+        string? category, int pageSize, string? continuationToken,
+        Expression<Func<TDomain, bool>>? predicate, IReadOnlyList<OrderByClause<TDomain>>? orderBy)
+    {
+        var queryable = CreateBaseQueryable(category, pageSize, continuationToken);
+
+        if (predicate is not null)
+        {
+            queryable = queryable.Where(ExpressionRetargeter.Retarget<TDomain, TDocument, bool>(predicate));
+        }
+
+        return ApplyOrdering(queryable, orderBy);
+    }
+
     /// <summary>Builds the base Cosmos LINQ queryable for a page, scoped to a partition key when one is supplied.</summary>
-    private IQueryable<TDocument> CreateBaseQueryable(string? partitionKey, int pageSize, string? continuationToken)
+    private IQueryable<TDocument> CreateBaseQueryable(string? category, int pageSize, string? continuationToken)
     {
         var requestOptions = new QueryRequestOptions
         {
-            PartitionKey = partitionKey is null ? null : new PartitionKey(partitionKey),
+            PartitionKey = category is null ? null : new PartitionKey(category),
             MaxItemCount = pageSize,
         };
 
@@ -494,12 +499,12 @@ public abstract class CosmosRepository<TDomain, TDocument>
     }
 
     /// <summary>Throws if a query would scan across partitions without the caller explicitly allowing it (cosmos-db.instructions.md §6).</summary>
-    private static void ValidatePartitionScope(string? partitionKey, bool allowCrossPartitionScan)
+    private static void ValidatePartitionScope(string? category, bool allowCrossPartitionScan)
     {
-        if (partitionKey is null && !allowCrossPartitionScan)
+        if (category is null && !allowCrossPartitionScan)
         {
             throw new ArgumentException(
-                "PartitionKey is required unless AllowCrossPartitionScan is explicitly set to true.");
+                "Category is required unless AllowCrossPartitionScan is explicitly set to true.");
         }
     }
 

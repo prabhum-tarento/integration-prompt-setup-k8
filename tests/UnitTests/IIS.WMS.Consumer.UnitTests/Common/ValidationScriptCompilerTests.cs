@@ -1,13 +1,11 @@
-using System.Text;
-using Confluent.Kafka;
 using IIS.WMS.Common.Correlation;
-using IIS.WMS.Consumer.Application.Exceptions;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
+using IIS.WMS.Common.DynamicValidation;
+using IIS.WMS.Common.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 
-namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
+namespace IIS.WMS.Consumer.UnitTests.Common;
 
 /// <summary>
 /// One message shape for the script-execution tests. Public and top-level, not nested in the test
@@ -22,7 +20,7 @@ public sealed record ScriptTestEvent(string? Reference, string? Id);
 /// <summary>Compile/execute tests for <see cref="ValidationScriptCompiler"/> against the <c>x</c>/<c>header</c>/<c>_log</c> script contract.</summary>
 public class ValidationScriptCompilerTests
 {
-    private readonly ValidationScriptCompiler sut = new(Substitute.For<ILogger<ValidationScriptCompiler>>());
+    private readonly ValidationScriptCompiler sut = new([], Substitute.For<ILogger<ValidationScriptCompiler>>());
 
     [Fact(DisplayName = "Compile returns a runner that evaluates the message via the x global")]
     public async Task Compile_ScriptReadingMessage_RunnerReturnsVerdictPerMessage()
@@ -38,15 +36,15 @@ public class ValidationScriptCompilerTests
         Assert.False(withoutReference);
     }
 
-    [Fact(DisplayName = "Compile supports the full contract: header + TryGetHeader + KafkaHeaderNames + _log, and a template throw propagates")]
+    [Fact(DisplayName = "Compile supports the full contract: header + TryGetHeader + WellKnownHeaderNames + _log, and a template throw propagates")]
     public async Task Compile_ExampleTemplate_UsesHeadersLoggerAndThrowsForInvalidMessage()
     {
         const string Code = """
             if (string.IsNullOrEmpty(x.Reference)) { return true; }
             else if (x.Id == null) { throw new ApplicationException("Invalid Request"); }
-            else { _log.LogInformation($"Valid request from {TryGetHeader(header, KafkaHeaderNames.Type)}"); return true; }
+            else { _log.LogInformation($"Valid request from {TryGetHeader(header, WellKnownHeaderNames.Type)}"); return true; }
             """;
-        var headers = new Headers { { "Type", Encoding.UTF8.GetBytes("inventory.InventoryStateChanged") } };
+        var headers = new HeaderLookup(new Dictionary<string, string> { ["Type"] = "inventory.InventoryStateChanged" });
         var runner = sut.Compile("Schema/event.type", Code);
 
         var emptyReference = await runner(

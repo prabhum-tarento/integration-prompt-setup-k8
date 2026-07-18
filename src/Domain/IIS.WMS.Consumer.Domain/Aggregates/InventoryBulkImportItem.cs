@@ -21,7 +21,7 @@ public sealed class InventoryBulkImportItem : AggregateRoot
     public string Sku { get; private init; } = default!;
 
     /// <summary>The composite <c>WarehouseId:Sku</c> key - matches the Cosmos partition key.</summary>
-    public string PartitionKey => $"{WarehouseId}:{Sku}";
+    public string Category => $"{WarehouseId}:{Sku}";
 
     /// <summary>On-hand quantity as reported by the upstream system. Never negative.</summary>
     public int Quantity { get; private set; }

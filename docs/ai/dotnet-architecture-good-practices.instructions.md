@@ -121,6 +121,11 @@ Before implementing, state:
    are affected, how the change aligns with ubiquitous language.
 2. **Design check** — does it respect aggregate boundaries and SRP; are
    domain rules encapsulated in the aggregate, not the application service.
+   For SRP specifically: name every reason the class/service being
+   added-to or changed would need to change in the future. If that list has
+   more than one item, split before implementing — don't implement first
+   and note the split as a follow-up. A second reason surfacing mid-review
+   is a stop-and-split signal, not a "note it for later."
 3. **Plan** — which aggregates/entities change, what domain events fire,
    what tests are needed (naming per §4).
 
@@ -131,6 +136,10 @@ the single post-implementation checklist for this file (nothing later in
 this doc restates it):
 
 * Aggregate boundaries and invariants are respected.
+* SRP: state the one reason the changed class/service has to change now. If
+  a second, unrelated reason exists (e.g. a business-rule change bundled
+  with a logging/audit-format change), it was split out — name what it was
+  split into, don't assert SRP without naming the split.
 * Tests follow `MethodName_Condition_ExpectedResult()` (§4) and cover the
   oversell/idempotency edge case (§5) if the change touches quantity.
 * Domain events are published for business-significant state changes.

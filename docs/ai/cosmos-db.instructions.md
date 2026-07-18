@@ -50,7 +50,7 @@ Cosmos settings are never stored in source code.
     "AccountEndpoint": "",
     "DatabaseName": "InventoryDb",
     "ContainerName": "InventoryEvents",
-    "PartitionKeyPath": "/partitionKey"
+    "PartitionKeyPath": "/category"
   }
 }
 ```
@@ -108,10 +108,10 @@ builder.Services.AddSingleton(sp =>
   quantity it just wrote (e.g., a reservation confirmation).
 * **`SerializerOptions.PropertyNamingPolicy = CamelCase` is required, not
   optional.** Every entity in §3 is declared with PascalCase C# properties
-  (`PartitionKey`, `WarehouseId`, …), but §1's config declares
-  `PartitionKeyPath: "/partitionKey"` — lowercase. The Cosmos SDK's default
+  (`Category`, `WarehouseId`, …), but §1's config declares
+  `PartitionKeyPath: "/category"` — lowercase. The Cosmos SDK's default
   serializer writes the property name exactly as declared unless this
-  option is set; without it, `PartitionKey` would serialize as `"PartitionKey"`
+  option is set; without it, `Category` would serialize as `"Category"`
   in the stored JSON and silently miss the container's actual partition key
   path. Setting this once here, on the single registered `CosmosClient`,
   makes every entity's camelCase JSON shape consistent with §1's config
@@ -183,7 +183,7 @@ public sealed class InventoryEvent
     // Composite partition key per §4 — kept as its own property (not
     // derived at query time) so every write and query uses the identical
     // value. Populate as $"{WarehouseId}:{Sku}" when constructing the entity.
-    public string PartitionKey { get; init; } = default!;
+    public string Category { get; init; } = default!;
 
     public int OnHandQuantity { get; set; }
     public DateTime CreatedUtc { get; init; }
@@ -202,17 +202,25 @@ deterministic.
 Partition keys must distribute data evenly, support the service's common
 query pattern (lookup by SKU/warehouse), and avoid hot partitions.
 
-* **This service's partition key is the composite `WarehouseId:Sku`**,
-  stored on `InventoryEvent.PartitionKey` (§3) and matching the Service Bus
-  `SessionId` convention in
+* **The property is named `Category`** on every entity in this service
+  (`InventoryEvent.Category`, `InventoryBulkImportItem.Category`,
+  `OrderArchive.Category`, `AuditEntry.Category`) and is mapped to the
+  container's configured `/category` partition path (§1) — one consistent
+  name end to end, not a per-entity choice.
+* **For `InventoryEvent`/`InventoryBulkImportItem`, the partitioning *value*
+  stored in `Category` remains the high-cardinality composite
+  `WarehouseId:Sku`, never a true low-cardinality category string** —
+  matching the Service Bus `SessionId` convention in
   [integration-resiliency.instructions.md](integration-resiliency.instructions.md) §1 —
   the same key that groups messages for ordering is what partitions the
-  data, so one warehouse/SKU's writes are both ordered and co-located.
+  data, so one warehouse/SKU's writes are both ordered and co-located. The
+  property name `Category` describes its role as *the* partition key
+  property, not the shape of the value it holds.
 * Avoid a bare `Sku` or bare `WarehouseId` alone for this entity: a single
   large warehouse would otherwise concentrate all of its SKUs' write
   traffic on one logical partition.
-* Avoid `Status`, `Country`, or any low-cardinality/boolean field — these
-  create hot partitions under concurrent inventory updates.
+* Avoid `Status`, `Country`, or any other genuinely low-cardinality/boolean
+  field — these create hot partitions under concurrent inventory updates.
 
 ## 5. Repository Pattern
 
@@ -235,7 +243,7 @@ call path.
 public interface IInventoryEventRepository
 {
     Task<InventoryEvent?> GetAsync(
-        string id, string partitionKey, CancellationToken cancellationToken = default);
+        string id, string category, CancellationToken cancellationToken = default);
 
     Task<InventoryEvent> CreateAsync(
         InventoryEvent entity, CancellationToken cancellationToken = default);
@@ -244,11 +252,11 @@ public interface IInventoryEventRepository
         InventoryEvent entity, string expectedETag, CancellationToken cancellationToken = default);
 
     Task<InventoryEvent> PatchAsync(
-        string id, string partitionKey, string expectedETag,
+        string id, string category, string expectedETag,
         IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default);
 
     Task DeleteAsync(
-        string id, string partitionKey, CancellationToken cancellationToken = default);
+        string id, string category, CancellationToken cancellationToken = default);
 
     Task<PagedResult<InventoryEvent>> GetPagedAsync(
         QueryOptions<InventoryEvent> options, CancellationToken cancellationToken = default);
@@ -278,12 +286,12 @@ redelivered create is a no-op, not a processing failure:
 try
 {
     var response = await container.CreateItemAsync(entity,
-        new PartitionKey(entity.PartitionKey), cancellationToken: cancellationToken);
+        new PartitionKey(entity.Category), cancellationToken: cancellationToken);
     return response.Resource;
 }
 catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
 {
-    return await GetAsync(entity.Id, entity.PartitionKey, cancellationToken)
+    return await GetAsync(entity.Id, entity.Category, cancellationToken)
         ?? throw new InvalidOperationException(
             $"Create conflicted on id {entity.Id} but the item could not be re-read.");
 }
@@ -298,7 +306,7 @@ public class QueryOptions<T>
     public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
     public int PageSize { get; set; } = 20;
     public string? ContinuationToken { get; set; }
-    public string? PartitionKey { get; set; }
+    public string? Category { get; set; }
     public bool AllowCrossPartitionScan { get; set; } = false;
 }
 ```
@@ -327,24 +335,24 @@ public class QueryOptions<T, TResult>
     public IReadOnlyList<OrderByClause<T>>? OrderBy { get; set; }
     public int PageSize { get; set; } = 20;
     public string? ContinuationToken { get; set; }
-    public string? PartitionKey { get; set; }
+    public string? Category { get; set; }
     public bool AllowCrossPartitionScan { get; set; } = false;
 }
 ```
 
 The same guardrail check in this section applies to both variants — the
-repository's projection query method validates `PartitionKey`/
+repository's projection query method validates `Category`/
 `AllowCrossPartitionScan` exactly like the entity query method does.
 
-The repository implementation **must throw** if `PartitionKey` is null and
+The repository implementation **must throw** if `Category` is null and
 `AllowCrossPartitionScan` is `false` — this is what makes §7's "minimize
 cross-partition queries" rule real instead of aspirational:
 
 ```csharp
-if (options.PartitionKey is null && !options.AllowCrossPartitionScan)
+if (options.Category is null && !options.AllowCrossPartitionScan)
 {
     throw new ArgumentException(
-        $"{nameof(options.PartitionKey)} is required unless " +
+        $"{nameof(options.Category)} is required unless " +
         $"{nameof(options.AllowCrossPartitionScan)} is explicitly set to true.",
         nameof(options));
 }
@@ -380,7 +388,7 @@ var options = new QueryOptions<InventoryEvent>
 {
     Predicate = x => x.Sku == sku && x.WarehouseId == warehouseId,
     OrderBy = [OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)],
-    PartitionKey = $"{warehouseId}:{sku}",
+    Category = $"{warehouseId}:{sku}",
 };
 ```
 
@@ -406,18 +414,18 @@ var options = new QueryOptions<InventoryEvent, InventoryEventSummary>
 {
     Selector = x => new InventoryEventSummary { Id = x.Id, Sku = x.Sku },
     Predicate = x => x.Sku == sku && x.WarehouseId == warehouseId,
-    PartitionKey = $"{warehouseId}:{sku}",
+    Category = $"{warehouseId}:{sku}",
 };
 ```
 
 **Selective-column reads without a dedicated DTO.** `CosmosRepository<TDomain,TDocument>`
-also exposes a lighter-weight `GetAsync(partitionKey, select:, where:, orderBy:, ...)`
+also exposes a lighter-weight `GetAsync(category, select:, where:, orderBy:, ...)`
 overload for when a caller wants only a handful of fields but doesn't want
 to stand up a projected `TResult` shape just for that one call site:
 
 ```csharp
 var page = await repository.GetAsync(
-    partitionKey,
+    category,
     select: [x => x.Id, x => x.Sku],
     where: x => x.Sku == sku,
     orderBy: [OrderByClause.Asc<InventoryEvent>(x => x.Id), OrderByClause.Desc<InventoryEvent>(x => x.CreatedUtc)]);
@@ -447,7 +455,7 @@ public async Task<InventoryEvent> ReplaceAsync(
     {
         var response = await container.ReplaceItemAsync(
             entity, entity.Id,
-            new PartitionKey(entity.PartitionKey),
+            new PartitionKey(entity.Category),
             new ItemRequestOptions { IfMatchEtag = expectedETag },
             cancellationToken);
 
@@ -480,7 +488,7 @@ lower RU cost and a smaller blast radius for concurrent writes.
 ```csharp
 await repository.PatchAsync(
     inventoryEvent.Id,
-    inventoryEvent.PartitionKey,
+    inventoryEvent.Category,
     inventoryEvent.ETag!,
     [
         PatchOperation.Increment("/onHandQuantity", -1),
@@ -503,7 +511,7 @@ Cosmos, and pass the ETag the same way `ReplaceAsync` does in §9:
 
 ```csharp
 public async Task<InventoryEvent> PatchAsync(
-    string id, string partitionKey, string expectedETag,
+    string id, string category, string expectedETag,
     IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default)
 {
     if (operations.Count > 10)
@@ -517,7 +525,7 @@ public async Task<InventoryEvent> PatchAsync(
     {
         var response = await container.PatchItemAsync<InventoryEvent>(
             id,
-            new PartitionKey(partitionKey),
+            new PartitionKey(category),
             operations,
             new PatchItemRequestOptions { IfMatchEtag = expectedETag },
             cancellationToken);

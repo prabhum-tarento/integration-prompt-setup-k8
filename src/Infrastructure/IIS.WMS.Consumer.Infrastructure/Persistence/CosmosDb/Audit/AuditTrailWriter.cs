@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 
@@ -13,11 +14,20 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 /// never <c>WriteAsync</c> - <c>TryWrite</c> never blocks, which is what makes audit capture genuinely
 /// non-blocking for the calling mutation rather than merely "usually fast."
 /// </remarks>
-public sealed class AuditTrailWriter(Channel<AuditEntry> channel, ILogger<AuditTrailWriter> logger) : IAuditTrailWriter
+public sealed class AuditTrailWriter(
+    Channel<AuditEntry> channel, IOptions<AuditOptions> options, ILogger<AuditTrailWriter> logger) : IAuditTrailWriter
 {
+    /// <summary><see cref="AuditOptions.ExcludedContainers"/>, indexed for a case-insensitive lookup per <see cref="Enqueue"/> call.</summary>
+    private readonly HashSet<string> excludedContainers = new(options.Value.ExcludedContainers, StringComparer.OrdinalIgnoreCase);
+
     /// <inheritdoc />
     public void Enqueue(AuditEntry entry)
     {
+        if (excludedContainers.Contains(entry.ContainerName))
+        {
+            return;
+        }
+
         if (channel.Writer.TryWrite(entry))
         {
             return;

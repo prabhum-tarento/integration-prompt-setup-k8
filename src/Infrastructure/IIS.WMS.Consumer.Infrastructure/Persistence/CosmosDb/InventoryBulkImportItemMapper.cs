@@ -12,7 +12,7 @@ internal static class InventoryBulkImportItemMapper
         Id = aggregate.Id,
         WarehouseId = aggregate.WarehouseId,
         Sku = aggregate.Sku,
-        PartitionKey = aggregate.PartitionKey,
+        Category = aggregate.Category,
         Quantity = aggregate.Quantity,
         SourceSystem = aggregate.SourceSystem,
         SourceLastUpdatedUtc = aggregate.SourceLastUpdatedUtc,

@@ -32,4 +32,17 @@ public sealed class ServiceBusConsumerOptions
     /// at its SDK defaults (<see cref="ServiceBusRetryMode.Exponential"/>, 3 retries) unless overridden.
     /// </summary>
     public ServiceBusRetryOptions Retry { get; init; } = new();
+
+    /// <summary>
+    /// Allow-list of Service Bus consumer names to start - the Service Bus-side mirror of
+    /// <c>Kafka:KafkaEventFunctions</c> (<c>Infrastructure.Messaging.Kafka.KafkaConsumerOptions.KafkaEventFunctions</c>),
+    /// same "run only the named ones" semantics, just gating the two Service Bus → Cosmos DB
+    /// consumers instead of the three Kafka → Service Bus ones. Names match
+    /// <c>Infrastructure.Messaging.MessagingServiceCollectionExtensions.InventoryEventsServiceBusKey</c>
+    /// ("InventoryEvents") or <c>...BulkInventoryImportServiceBusKey</c> ("BulkInventoryImport").
+    /// This gates whether a consumer's hosted service, keyed <c>ServiceBusHealthState</c>, and queue
+    /// health check are registered at all - independent of any per-consumer enable/disable flag.
+    /// <see langword="null"/> or empty means "no filter - every consumer starts."
+    /// </summary>
+    public string[]? ServiceBusEventFunctions { get; init; }
 }

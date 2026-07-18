@@ -12,7 +12,7 @@ internal static class InventoryEventMapper
         Id = aggregate.Id,
         WarehouseId = aggregate.WarehouseId,
         Sku = aggregate.Sku,
-        PartitionKey = aggregate.PartitionKey,
+        Category = aggregate.Category,
         OnHandQuantity = aggregate.OnHandQuantity,
         ActiveReservations = new Dictionary<string, int>(aggregate.ActiveReservations),
         CreatedUtc = aggregate.CreatedUtc,

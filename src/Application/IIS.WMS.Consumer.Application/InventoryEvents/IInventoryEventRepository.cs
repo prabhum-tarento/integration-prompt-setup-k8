@@ -16,9 +16,9 @@ public interface IInventoryEventRepository
 {
     /// <summary>Reads a single aggregate by id, or <see langword="null"/> if it doesn't exist.</summary>
     /// <param name="id">Aggregate id.</param>
-    /// <param name="partitionKey">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
+    /// <param name="category">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
     /// <param name="cancellationToken">Token to cancel the read.</param>
-    Task<InventoryEvent?> GetAsync(string id, string partitionKey, CancellationToken cancellationToken = default);
+    Task<InventoryEvent?> GetAsync(string id, string category, CancellationToken cancellationToken = default);
 
     /// <summary>Creates a new item. A duplicate create for a deterministic id (redelivery) returns the existing item instead of throwing.</summary>
     /// <param name="entity">Aggregate to persist.</param>
@@ -34,19 +34,19 @@ public interface IInventoryEventRepository
 
     /// <summary>Applies a partial update via the Cosmos Patch API, guarded by an ETag match. At most 10 operations per call.</summary>
     /// <param name="id">Aggregate id.</param>
-    /// <param name="partitionKey">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
+    /// <param name="category">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
     /// <param name="expectedETag">ETag the stored item is expected to still have.</param>
     /// <param name="operations">Patch operations to apply (Add/Set/Replace/Remove/Increment).</param>
     /// <param name="cancellationToken">Token to cancel the write.</param>
     Task<InventoryEvent> PatchAsync(
-        string id, string partitionKey, string expectedETag,
+        string id, string category, string expectedETag,
         IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default);
 
     /// <summary>Deletes an item. Idempotent - deleting an item that no longer exists is not an error.</summary>
     /// <param name="id">Aggregate id.</param>
-    /// <param name="partitionKey">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
+    /// <param name="category">Cosmos partition key (<c>WarehouseId:Sku</c>).</param>
     /// <param name="cancellationToken">Token to cancel the delete.</param>
-    Task DeleteAsync(string id, string partitionKey, CancellationToken cancellationToken = default);
+    Task DeleteAsync(string id, string category, CancellationToken cancellationToken = default);
 
     /// <summary>Runs a filtered, paged query over full aggregates.</summary>
     /// <param name="options">Filter/sort/paging options. Throws if no partition key is supplied and cross-partition scanning isn't explicitly allowed.</param>

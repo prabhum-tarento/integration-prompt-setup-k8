@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Common.Logging;
 using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Messaging.ServiceBus;
@@ -143,32 +144,15 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
     {
         healthState.LastSuccessfulReceiveUtc = DateTimeOffset.UtcNow;
 
-        ServiceBusRelayEnvelope envelope;
-        InboundInventoryEventMessage inbound;
+        var deserialized = TryDeserializeEnvelope(message, out var deadLetterOutcome);
 
-        try
+        if (deserialized is null)
         {
-            envelope = JsonSerializer.Deserialize<ServiceBusRelayEnvelope>(message.Body.ToString())
-                ?? throw new JsonException("Deserialized envelope was null.");
-            inbound = envelope.ReflexSchema.Deserialize<InboundInventoryEventMessage>()
-                ?? throw new JsonException("Deserialized payload was null.");
-        }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
-        {
-            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
-
-            return ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
+            return deadLetterOutcome!;
         }
 
-        // ApplicationProperties is the transport-hop property (integration-resiliency.instructions.md
-        // §4) - preferred when present, with the envelope's own CorrelationId as a fallback for a
-        // message relayed without it, and a fresh id only if neither is set.
-        var correlationId = message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
-                && value?.ToString() is { Length: > 0 } propertyCorrelationId
-            ? propertyCorrelationId
-            : envelope.CorrelationId is { Length: > 0 } envelopeCorrelationId
-                ? envelopeCorrelationId
-                : Guid.NewGuid().ToString();
+        var (envelope, inbound) = deserialized.Value;
+        var correlationId = ResolveCorrelationId(message, envelope);
 
         var (logLevel, module) = LogMetadataResolver.Resolve(GetType());
         string[] types = envelope.Type is { Length: > 0 } envelopeType ? [envelopeType] : [];
@@ -180,8 +164,99 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
         using var logLevelLogContext = LogContext.PushProperty("LogLevel", logLevel);
         using var moduleLogContext = LogContext.PushProperty("Module", module);
 
+        var dynamicEventValidator = scope.ServiceProvider.GetRequiredService<IDynamicEventValidator>();
+        var validationOutcome = await RunDynamicValidationAsync(dynamicEventValidator, scope.ServiceProvider, inbound, message, cancellationToken);
+
+        if (validationOutcome is not null)
+        {
+            return validationOutcome;
+        }
+
         var inventoryEventService = scope.ServiceProvider.GetRequiredService<IInventoryEventService>();
 
+        return await DispatchEventAsync(inventoryEventService, inbound, message, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deserializes the envelope and inner inbound event payload. On a poison message (malformed
+    /// JSON, or either deserialization producing <see langword="null"/>) returns <see langword="null"/>
+    /// and sets <paramref name="deadLetterOutcome"/> to the outcome the caller should return immediately.
+    /// </summary>
+    /// <param name="message">The received Service Bus message.</param>
+    /// <param name="deadLetterOutcome">Set when this message is poison and must be dead-lettered by the caller.</param>
+    private (ServiceBusRelayEnvelope Envelope, InboundInventoryEventMessage Inbound)? TryDeserializeEnvelope(
+        ServiceBusReceivedMessage message, out ServiceBusMessageOutcome? deadLetterOutcome)
+    {
+        try
+        {
+            var envelope = JsonSerializer.Deserialize<ServiceBusRelayEnvelope>(message.Body.ToString())
+                ?? throw new JsonException("Deserialized envelope was null.");
+            var inbound = envelope.ReflexSchema.Deserialize<InboundInventoryEventMessage>()
+                ?? throw new JsonException("Deserialized payload was null.");
+
+            deadLetterOutcome = null;
+            return (envelope, inbound);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            logger.LogError(ex, "Poison Service Bus message {MessageId} - dead-lettering.", message.MessageId);
+
+            deadLetterOutcome = ServiceBusMessageOutcome.DeadLettered("PoisonMessage", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Resolves this message's correlation id: <see cref="ServiceBusReceivedMessage.ApplicationProperties"/>
+    /// (the transport-hop property, integration-resiliency.instructions.md §4) first, falling back to
+    /// the envelope's own <see cref="ServiceBusRelayEnvelope.CorrelationId"/> for a message relayed
+    /// without it, and a fresh id only if neither is set.
+    /// </summary>
+    private static string ResolveCorrelationId(ServiceBusReceivedMessage message, ServiceBusRelayEnvelope envelope) =>
+        message.ApplicationProperties.TryGetValue("CorrelationId", out var value)
+                && value?.ToString() is { Length: > 0 } propertyCorrelationId
+            ? propertyCorrelationId
+            : envelope.CorrelationId is { Length: > 0 } envelopeCorrelationId
+                ? envelopeCorrelationId
+                : Guid.NewGuid().ToString();
+
+    /// <summary>
+    /// Runs the blob-stored dynamic template (if any) against <paramref name="inbound"/>, returning
+    /// <see langword="null"/> when the message should continue to dispatch. A non-null result is the
+    /// outcome the caller should return immediately - either <see cref="ServiceBusMessageOutcome.Completed"/>
+    /// (the template deliberately skipped this message) or <see cref="ServiceBusMessageOutcome.DeadLettered(string, string?)"/>
+    /// (the template itself threw).
+    /// </summary>
+    private async Task<ServiceBusMessageOutcome?> RunDynamicValidationAsync(
+        IDynamicEventValidator dynamicEventValidator, IServiceProvider serviceProvider, InboundInventoryEventMessage inbound,
+        ServiceBusReceivedMessage message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var isValid = await dynamicEventValidator.ValidateAsync(
+                DynamicValidationTransports.ServiceBus, options.QueueName, inbound, ToHeaderLookup(message.ApplicationProperties), logger, serviceProvider, cancellationToken);
+
+            if (!isValid)
+            {
+                logger.LogInformation("Message {MessageId} skipped by dynamic validation - completing without dispatch.", message.MessageId);
+                return ServiceBusMessageOutcome.Completed;
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex, "Dynamic validation failed for message {MessageId} - dead-lettering.", message.MessageId);
+
+            return ServiceBusMessageOutcome.DeadLettered("DynamicValidationFailed", ex.Message);
+        }
+    }
+
+    /// <summary>Dispatches <paramref name="inbound"/> to the matching <see cref="IInventoryEventService"/> use case by <c>EventType</c>.</summary>
+    private async Task<ServiceBusMessageOutcome> DispatchEventAsync(
+        IInventoryEventService inventoryEventService, InboundInventoryEventMessage inbound,
+        ServiceBusReceivedMessage message, CancellationToken cancellationToken)
+    {
         try
         {
             switch (inbound.EventType)
@@ -227,6 +302,28 @@ public sealed class ServiceBusConsumerHostedService : BackgroundService, IAsyncD
 
             return ServiceBusMessageOutcome.Abandoned;
         }
+    }
+
+    /// <summary>
+    /// Adapts this message's <see cref="ServiceBusReceivedMessage.ApplicationProperties"/> into the
+    /// transport-neutral <see cref="HeaderLookup"/> the dynamic-validation script contract reads
+    /// through - see <see cref="HeaderLookup"/>'s own remarks for why templates don't read
+    /// <see cref="ServiceBusReceivedMessage.ApplicationProperties"/> directly.
+    /// </summary>
+    /// <param name="applicationProperties">Application properties on the received message.</param>
+    private static HeaderLookup ToHeaderLookup(IReadOnlyDictionary<string, object> applicationProperties)
+    {
+        var values = new Dictionary<string, string>();
+
+        foreach (var (key, value) in applicationProperties)
+        {
+            if (value?.ToString() is { } stringValue)
+            {
+                values[key] = stringValue;
+            }
+        }
+
+        return new HeaderLookup(values);
     }
 
     /// <summary>Logs an error raised by the processor's own infrastructure (e.g. a lock-renewal or connection failure) - not tied to any single message.</summary>

@@ -1,3 +1,4 @@
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
@@ -10,7 +11,8 @@ public class EventValidationTemplateExamplesTests
     [Fact(DisplayName = "Every served example compiles against the real script contract")]
     public void All_EveryExample_CompilesAgainstScriptContract()
     {
-        var compiler = new ValidationScriptCompiler(Substitute.For<ILogger<ValidationScriptCompiler>>());
+        var compiler = new ValidationScriptCompiler(
+            [new ConsumerValidationScriptReferenceProvider()], Substitute.For<ILogger<ValidationScriptCompiler>>());
 
         foreach (var example in EventValidationTemplateExamples.All)
         {

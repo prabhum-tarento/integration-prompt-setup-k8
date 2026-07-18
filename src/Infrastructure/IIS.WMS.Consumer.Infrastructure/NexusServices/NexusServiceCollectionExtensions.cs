@@ -42,7 +42,7 @@ public static class NexusServiceCollectionExtensions
             client.BaseAddress = new Uri($"{clientBaseAddress.GetLeftPart(UriPartial.Authority)}/nexus/deduper/api/dedupe");
 
             client.DefaultRequestHeaders.Add(
-                Messaging.Kafka.KafkaHeaderNames.AppId,
+                IIS.WMS.Common.Messaging.WellKnownHeaderNames.AppId,
                 applicationOptions.AppId
                     ?? throw new InvalidOperationException(
                         $"Missing '{ApplicationOptions.SectionName}:{nameof(ApplicationOptions.AppId)}' configuration."));

@@ -1,5 +1,6 @@
 using FluentValidation;
 using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Consumer.Application.Exceptions;
 using IIS.WMS.Consumer.Domain.Exceptions;
 using Microsoft.AspNetCore.Diagnostics;

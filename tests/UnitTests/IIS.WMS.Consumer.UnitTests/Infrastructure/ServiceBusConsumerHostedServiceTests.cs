@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Common.Logging;
+using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
@@ -59,6 +61,60 @@ public class ServiceBusConsumerHostedServiceTests
             "WH1", "SKU1",
             Arg.Is<ReserveStockRequest>(r => r.ReservationId == "res-1" && r.Quantity == 3),
             Arg.Any<CancellationToken>());
+    }
+
+    [Fact(DisplayName = "Dynamic validation returning false completes the message without dispatching")]
+    public async Task HandleMessageAsync_DynamicValidationReturnsFalse_ReturnsCompletedWithoutDispatch()
+    {
+        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var dynamicEventValidator = Substitute.For<IDynamicEventValidator>();
+        dynamicEventValidator.ValidateAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(),
+                Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(false);
+        var sut = CreateSut(inventoryEventService, out _, dynamicEventValidator: dynamicEventValidator);
+
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+
+        var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
+
+        Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
+        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+    }
+
+    [Fact(DisplayName = "Dynamic validation throwing dead-letters the message as DynamicValidationFailed")]
+    public async Task HandleMessageAsync_DynamicValidationThrows_ReturnsDeadLetteredDynamicValidationFailed()
+    {
+        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var dynamicEventValidator = Substitute.For<IDynamicEventValidator>();
+        dynamicEventValidator.ValidateAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(),
+                Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<bool>(new InvalidOperationException("Template blew up.")));
+        var sut = CreateSut(inventoryEventService, out _, dynamicEventValidator: dynamicEventValidator);
+
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+
+        var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
+
+        Assert.Equal(ServiceBusMessageOutcomeKind.DeadLettered, outcome.Kind);
+        Assert.Equal("DynamicValidationFailed", outcome.Reason);
+        Assert.Equal("Template blew up.", outcome.Description);
+        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+    }
+
+    [Fact(DisplayName = "Dynamic validation returning true dispatches normally, unaffected by wiring")]
+    public async Task HandleMessageAsync_DynamicValidationReturnsTrue_DispatchesNormally()
+    {
+        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var sut = CreateSut(inventoryEventService, out _);
+
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+
+        var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
+
+        Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
+        await inventoryEventService.Received(1).CreateAsync(Arg.Any<CreateInventoryEventRequest>(), Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "An unrecognized event type is dead-lettered as UnknownEventType")]
@@ -288,14 +344,18 @@ public class ServiceBusConsumerHostedServiceTests
     private static ServiceBusConsumerHostedService CreateSut(
         IInventoryEventService inventoryEventService,
         out ICorrelationContext correlationContext,
-        ServiceBusHealthState? healthState = null)
+        ServiceBusHealthState? healthState = null,
+        IDynamicEventValidator? dynamicEventValidator = null)
     {
         var scopedCorrelationContext = Substitute.For<ICorrelationContext>();
         correlationContext = scopedCorrelationContext;
 
+        var validator = dynamicEventValidator ?? CreatePassthroughValidator();
+
         var services = new ServiceCollection();
         services.AddSingleton(scopedCorrelationContext);
         services.AddSingleton(inventoryEventService);
+        services.AddSingleton(validator);
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         return new ServiceBusConsumerHostedService(
@@ -304,5 +364,16 @@ public class ServiceBusConsumerHostedServiceTests
             scopeFactory,
             healthState ?? new ServiceBusHealthState(),
             Substitute.For<ILogger<ServiceBusConsumerHostedService>>());
+    }
+
+    private static IDynamicEventValidator CreatePassthroughValidator()
+    {
+        var validator = Substitute.For<IDynamicEventValidator>();
+        validator.ValidateAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(),
+                Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(true);
+
+        return validator;
     }
 }

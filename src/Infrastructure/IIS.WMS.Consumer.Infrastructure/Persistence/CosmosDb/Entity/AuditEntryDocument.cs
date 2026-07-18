@@ -16,9 +16,6 @@ public sealed class AuditEntryDocument : ICosmosDocument
     /// <summary><c>{ContainerName}_{EntityPartitionKey}</c> - also this entity's Cosmos partition key.</summary>
     public string Category { get; init; } = default!;
 
-    /// <summary>Cosmos partition key value - identical to <see cref="Category"/> for this entity.</summary>
-    public string PartitionKey { get; init; } = default!;
-
     /// <summary>Name of the Cosmos container the mutated entity lives in.</summary>
     public string ContainerName { get; init; } = default!;
 

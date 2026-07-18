@@ -1,3 +1,5 @@
+using IIS.WMS.Consumer.Domain.Aggregates;
+
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 
 /// <summary>Bound from the <c>Audit</c> configuration section.</summary>
@@ -30,4 +32,11 @@ public sealed class AuditOptions
     /// <see langword="false"/>. Independent of <see cref="CosmosDbEnabled"/>.
     /// </summary>
     public bool ColdStorageEnabled { get; init; }
+
+    /// <summary>
+    /// Container names excluded from audit capture entirely - <see cref="AuditTrailWriter.Enqueue"/>
+    /// drops entries for these before they reach the channel. Matched case-insensitively against
+    /// <see cref="AuditEntry.ContainerName"/>. Empty by default (every container is audited).
+    /// </summary>
+    public IReadOnlyList<string> ExcludedContainers { get; init; } = [];
 }

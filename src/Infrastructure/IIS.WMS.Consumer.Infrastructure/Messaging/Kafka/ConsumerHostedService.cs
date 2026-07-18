@@ -7,12 +7,12 @@ using Confluent.Kafka;
 using Confluent.SchemaRegistry;
 using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Common.Correlation;
+using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Common.Logging;
 using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Resilience;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -27,7 +27,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// consumer regardless of wire format. A single topic/consumer group can carry more than one
 /// schema/event type - a derived class registers one <see cref="ISchemaHandler"/> per schema it
 /// understands (built via <see cref="CreateSchemaHandler{TValue}"/>), keyed by the Kafka
-/// <see cref="KafkaHeaderNames.Type"/> header value that schema corresponds to. A consumer that
+/// <see cref="WellKnownHeaderNames.Type"/> header value that schema corresponds to. A consumer that
 /// handles exactly one schema regardless of what's in that header registers its one handler under
 /// <see cref="DefaultEventType"/> instead of an exact value - see <see cref="ProcessMessageAsync"/>
 /// for the exact lookup order. Each schema publishes to its own <see cref="ISchemaHandler.ServiceBusQueueName"/>
@@ -104,7 +104,7 @@ public abstract class ConsumerHostedService : BackgroundService
 
     /// <summary>
     /// The key a schema handler is registered under when a consumer doesn't distinguish by the Kafka
-    /// <see cref="KafkaHeaderNames.Type"/> header - every consumer that (like each one today) handles
+    /// <see cref="WellKnownHeaderNames.Type"/> header - every consumer that (like each one today) handles
     /// exactly one schema regardless of that header's value registers its one handler under this key.
     /// A message's own <c>Type</c> header value is looked up first; if nothing is registered under
     /// that exact value, this key is tried next - see <see cref="ProcessMessageAsync"/>. <c>internal</c>
@@ -242,7 +242,7 @@ public abstract class ConsumerHostedService : BackgroundService
     /// Builds a type-erased schema entry for one event type - the only place the concrete
     /// <typeparamref name="TValue"/> needs naming when registering a schema. A derived consumer calls
     /// this once per schema it supports (in its own constructor) and passes the resulting dictionary,
-    /// keyed by <see cref="KafkaHeaderNames.Type"/> header value (or <see cref="DefaultEventType"/> for
+    /// keyed by <see cref="WellKnownHeaderNames.Type"/> header value (or <see cref="DefaultEventType"/> for
     /// "any/no specific type"), to the base constructor.
     /// </summary>
     /// <typeparam name="TValue">The deserialized shape for this one schema/event type.</typeparam>
@@ -504,7 +504,7 @@ public abstract class ConsumerHostedService : BackgroundService
     /// <summary>
     /// Registers this consumer's schema handlers, built via <see cref="CreateSchemaHandler{TValue}"/>/
     /// <see cref="CreateSchemaHandler{TAvro,TValue}"/> and keyed by the Kafka
-    /// <see cref="KafkaHeaderNames.Type"/> header value each corresponds to (or
+    /// <see cref="WellKnownHeaderNames.Type"/> header value each corresponds to (or
     /// <see cref="DefaultEventType"/> for a schema that applies regardless of that header's value) -
     /// see <see cref="ProcessMessageAsync"/> for the lookup order. Call this once, from the derived
     /// class's own constructor body immediately after the <c>base(...)</c> call - it cannot be supplied
@@ -809,15 +809,15 @@ public abstract class ConsumerHostedService : BackgroundService
     /// <param name="headers">Headers on the consumed Kafka message, or <see langword="null"/> if none were sent.</param>
     private (string? RawCorrelationId, string CorrelationId, string DeduplicationId, string EventType, string AppId, string EventKey) ExtractMessageIdentifiers(Headers? headers)
     {
-        var rawCorrelationId = TryGetHeader(headers, KafkaHeaderNames.CorrelationId);
+        var rawCorrelationId = TryGetHeader(headers, WellKnownHeaderNames.CorrelationId);
         var correlationId = rawCorrelationId ?? $"-{Guid.NewGuid().ToString()}";
-        var deduplicationId = TryGetHeader(headers, KafkaHeaderNames.DeduplicationId) ?? string.Empty;
-        var eventType = TryGetHeader(headers, KafkaHeaderNames.Type) ?? string.Empty;
+        var deduplicationId = TryGetHeader(headers, WellKnownHeaderNames.DeduplicationId) ?? string.Empty;
+        var eventType = TryGetHeader(headers, WellKnownHeaderNames.Type) ?? string.Empty;
 
-        var rawAppId = TryGetHeader(headers, KafkaHeaderNames.AppId);
+        var rawAppId = TryGetHeader(headers, WellKnownHeaderNames.AppId);
         var appId = string.IsNullOrEmpty(rawAppId) ? applicationOptions.AppId : rawAppId;
 
-        var eventKey = TryGetHeader(headers, KafkaHeaderNames.EventKey) ?? string.Empty;
+        var eventKey = TryGetHeader(headers, WellKnownHeaderNames.EventKey) ?? string.Empty;
 
         return (rawCorrelationId, correlationId, deduplicationId, eventType, appId, eventKey);
     }
@@ -983,8 +983,8 @@ public abstract class ConsumerHostedService : BackgroundService
             var schemaValidationDuration = schemaValidationStopwatch.Elapsed;
             var dynamicValidationDuration = TimeSpan.Zero;
 
-            // Second validation stage: the blob-stored {SchemaName}/{eventType}.cs template, when one
-            // exists (no template means the message passes this stage untouched). Same throw-vs-false
+            // Second validation stage: the blob-stored Kafka/{eventType}.cs template, when one exists
+            // (no template means the message passes this stage untouched). Same throw-vs-false
             // contract as ValidateAsync itself - a throw lands in the catch below like any other
             // validation failure - and only reached when the static handler already passed, so a
             // template can tighten a schema's validation but never overrule a rejection. The message's
@@ -994,7 +994,7 @@ public abstract class ConsumerHostedService : BackgroundService
             {
                 var dynamicValidationStopwatch = Stopwatch.StartNew();
                 isValid = await dynamicEventValidator.ValidateAsync(
-                    "Kafka", eventType, value, headers, logger, scope.ServiceProvider, cancellationToken);
+                    DynamicValidationTransports.Kafka, eventType, value, ToHeaderLookup(headers), logger, scope.ServiceProvider, cancellationToken);
                 dynamicValidationDuration = dynamicValidationStopwatch.Elapsed;
             }
 
@@ -1169,13 +1169,36 @@ public abstract class ConsumerHostedService : BackgroundService
 
     /// <summary>Reads a Kafka header's value as a UTF-8 string, if present.</summary>
     /// <param name="headers">Headers on the consumed Kafka message, or <see langword="null"/> if none were sent.</param>
-    /// <param name="key">Header name - see <see cref="KafkaHeaderNames"/>.</param>
+    /// <param name="key">Header name - see <see cref="WellKnownHeaderNames"/>.</param>
     /// <returns>The header value, or <see langword="null"/> if absent.</returns>
     private static string? TryGetHeader(Headers? headers, string key)
     {
         return headers is not null && headers.TryGetLastBytes(key, out var bytes)
             ? Encoding.UTF8.GetString(bytes)
             : null;
+    }
+
+    /// <summary>
+    /// Adapts this message's Kafka <see cref="Headers"/> into the transport-neutral
+    /// <see cref="HeaderLookup"/> the dynamic-validation script contract reads through - see
+    /// <see cref="HeaderLookup"/>'s own remarks for why templates don't read <see cref="Headers"/> directly.
+    /// </summary>
+    /// <param name="headers">Headers on the consumed Kafka message, or <see langword="null"/> if none were sent.</param>
+    private static HeaderLookup ToHeaderLookup(Headers? headers)
+    {
+        if (headers is null)
+        {
+            return HeaderLookup.Empty;
+        }
+
+        var values = new Dictionary<string, string>();
+
+        foreach (var header in headers)
+        {
+            values[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
+        }
+
+        return new HeaderLookup(values);
     }
 
     #endregion

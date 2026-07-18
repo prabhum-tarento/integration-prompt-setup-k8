@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.Domain.Aggregates;
 /// Consistency boundary for one warehouse/SKU's on-hand quantity. Enforces the oversell-prevention
 /// invariant (on-hand quantity never goes negative) and models reservation/allocation as an explicit
 /// state machine so a reservation and its eventual allocation or release net to zero
-/// (dotnet-architecture-good-practices.instructions.md §5). Partition key is the composite
+/// (dotnet-architecture-good-practices.instructions.md §5). <c>Category</c> is the composite
 /// <c>WarehouseId:Sku</c>, matching the Service Bus session id
 /// (integration-resiliency.instructions.md §1) and the Cosmos partition key
 /// (cosmos-db.instructions.md §4).
@@ -24,7 +24,7 @@ public sealed class InventoryEvent : AggregateRoot
     public string Sku { get; private init; } = default!;
 
     /// <summary>The composite <c>WarehouseId:Sku</c> key - matches the Cosmos partition key and the Service Bus session id for this aggregate.</summary>
-    public string PartitionKey => $"{WarehouseId}:{Sku}";
+    public string Category => $"{WarehouseId}:{Sku}";
 
     /// <summary>Current on-hand quantity, after any active reservations have already been deducted. Never negative.</summary>
     public int OnHandQuantity { get; private set; }
