@@ -9,20 +9,20 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// <summary>
 /// Relays the high-volume, unordered bulk-import Avro event from Kafka onto a
 /// <b>non-session</b> Service Bus queue (integration-resiliency.instructions.md §1) - built on the
-/// shared <see cref="ConsumerHostedService"/> like the other two consumers, but this one's
+/// shared <see cref="KafkaConsumerHostedServiceBase"/> like the other two consumers, but this one's
 /// target queue has <c>RequiresSession = false</c>: the upstream data is an idempotent snapshot
 /// reload with no per-aggregate ordering requirement, so there is no reason to pay the
 /// <c>MaxConcurrentCallsPerSession = 1</c> serialization cost sessions would otherwise impose on any
 /// warehouse/SKU repeated across the burst. The registered handler's <c>SessionId</c> is
 /// therefore unused by the downstream consumer (<c>BulkImportServiceBusConsumerHostedService</c>) -
 /// harmless to still set (Service Bus stores it as ordinary metadata on a non-session queue), kept
-/// only because <see cref="ConsumerHostedService"/>'s shared per-message flow always sets it. Handles
+/// only because <see cref="KafkaConsumerHostedServiceBase"/>'s shared per-message flow always sets it. Handles
 /// exactly one schema regardless of the Kafka <c>Type</c> header's value (registered under
 /// <see cref="DefaultEventType"/>), same as before this class supported registering more than one.
 /// </summary>
 [LogLevelCriteria(LogCriteria.Low)]
 [Module("BulkImport")]
-public sealed class BulkInventoryImportConsumerHostedService : ConsumerHostedService
+public sealed class BulkInventoryImportConsumerHostedService : KafkaConsumerHostedServiceBase
 {
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer.</param>

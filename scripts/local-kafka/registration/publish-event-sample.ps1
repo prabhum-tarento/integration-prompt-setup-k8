@@ -15,7 +15,7 @@ A sample fixture file looks like:
 
     { "headers": { "Content-Type": "...", "Correlation-Id": "...", ... }, "body": { ... } }
 
-Only "headers" is filtered to the four Kafka record headers ConsumerHostedService.cs
+Only "headers" is filtered to the four Kafka record headers KafkaConsumerHostedServiceBase.cs
 actually reads (WellKnownHeaderNames.cs: Correlation-Id, Deduplication-Id, Type, App-Id) -
 "Content-Type" and anything else under "headers" is fixture documentation, not a Kafka
 header, and is dropped.
@@ -56,7 +56,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The four Kafka record headers ConsumerHostedService.cs reads (WellKnownHeaderNames.cs) - any
+# The four Kafka record headers KafkaConsumerHostedServiceBase.cs reads (WellKnownHeaderNames.cs) - any
 # other key under the fixture's "headers" object (e.g. "Content-Type") is dropped.
 $CanonicalHeaderNames = @('Correlation-Id', 'Deduplication-Id', 'Type', 'App-Id')
 

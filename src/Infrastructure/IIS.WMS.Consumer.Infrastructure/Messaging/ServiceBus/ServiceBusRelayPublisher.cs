@@ -42,7 +42,7 @@ public sealed class ServiceBusRelayPublisher(
     /// leaves headroom for <see cref="ServiceBusRelayEnvelope"/>'s own fields wrapped around the
     /// payload. A Kafka consumer's own <c>ConsumerOptions.MaxServiceBusMessageSizeBytes</c> is a
     /// separate, independently configurable setting that resolves to the same value by default and is
-    /// passed through as the per-message override - see <c>ConsumerHostedService</c>.
+    /// passed through as the per-message override - see <c>KafkaConsumerHostedServiceBase</c>.
     /// </summary>
     public const int DefaultMaxMessageSizeBytes = 200 * 1024;
 

@@ -547,7 +547,7 @@ function Invoke-ApiRequest($Sync, [System.Net.HttpListenerContext]$Context) {
         # the schema/subject Kafka REST Proxy is told to validate against below. Header names
         # are canonicalized to WellKnownHeaderNames.cs's exact casing regardless of how the caller
         # sent them - HTTP headers are case-insensitive, but Confluent.Kafka's Headers lookup
-        # on the consumer side (ConsumerHostedService.TryGetHeader) is an exact byte-string
+        # on the consumer side (KafkaConsumerHostedServiceBase.TryGetHeader) is an exact byte-string
         # match, so a caller-sent "correlation-id" would otherwise silently fail to match
         # "Correlation-Id" downstream.
         $canonicalHeaderNames = @('Correlation-Id', 'Deduplication-Id', 'Id', 'App-Id', 'Type')

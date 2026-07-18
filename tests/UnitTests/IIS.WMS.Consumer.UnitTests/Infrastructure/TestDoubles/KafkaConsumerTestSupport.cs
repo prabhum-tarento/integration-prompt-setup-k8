@@ -17,8 +17,8 @@ using NSubstitute;
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
 
 /// <summary>
-/// Shared scaffolding for testing <see cref="ConsumerHostedService"/> subclasses without a live Kafka
-/// broker or Service Bus. <see cref="ConsumerHostedService"/> builds its own real (but never actually
+/// Shared scaffolding for testing <see cref="KafkaConsumerHostedServiceBase"/> subclasses without a live Kafka
+/// broker or Service Bus. <see cref="KafkaConsumerHostedServiceBase"/> builds its own real (but never actually
 /// connected) Confluent.Kafka <c>IConsumer</c> in its constructor and has no constructor seam to
 /// substitute it - so these tests invoke its private per-message flow (<c>ProcessMessageAsync</c>)
 /// directly via reflection instead of driving it through <c>ExecuteAsync</c>'s poll loop. This is safe
@@ -95,7 +95,7 @@ internal static class KafkaConsumerTestSupport
             deduplicationService, dynamicEventValidator, orderArchiveRepository, orderArchiveWriter);
     }
 
-    /// <summary>Builds a raw Kafka <see cref="ConsumeResult{TKey,TValue}"/> with the header set <see cref="ConsumerHostedService"/> reads - pass <see langword="null"/> for a header to omit it entirely (e.g. to test the "no Correlation-Id header" fallback).</summary>
+    /// <summary>Builds a raw Kafka <see cref="ConsumeResult{TKey,TValue}"/> with the header set <see cref="KafkaConsumerHostedServiceBase"/> reads - pass <see langword="null"/> for a header to omit it entirely (e.g. to test the "no Correlation-Id header" fallback).</summary>
     public static ConsumeResult<string, byte[]> CreateConsumeResult(
         byte[] value,
         string? correlationId = "corr-1",
@@ -144,29 +144,29 @@ internal static class KafkaConsumerTestSupport
         };
     }
 
-    private static readonly MethodInfo ProcessMessageAsyncMethod = typeof(ConsumerHostedService)
+    private static readonly MethodInfo ProcessMessageAsyncMethod = typeof(KafkaConsumerHostedServiceBase)
         .GetMethod("ProcessMessageAsync", BindingFlags.NonPublic | BindingFlags.Instance)
-        ?? throw new InvalidOperationException("ConsumerHostedService.ProcessMessageAsync not found by reflection - has its signature changed?");
+        ?? throw new InvalidOperationException("KafkaConsumerHostedServiceBase.ProcessMessageAsync not found by reflection - has its signature changed?");
 
     /// <summary>Invokes the private per-message flow directly - see this class's own remarks for why that's safe without a live broker.</summary>
-    public static async Task ProcessMessageAsync(this ConsumerHostedService service, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken = default)
+    public static async Task ProcessMessageAsync(this KafkaConsumerHostedServiceBase service, ConsumeResult<string, byte[]> result, CancellationToken cancellationToken = default)
     {
         var task = (Task)ProcessMessageAsyncMethod.Invoke(service, [result, cancellationToken])!;
         await task;
     }
 
-    private static readonly FieldInfo SchemaHandlersField = typeof(ConsumerHostedService)
+    private static readonly FieldInfo SchemaHandlersField = typeof(KafkaConsumerHostedServiceBase)
         .GetField("schemaHandlers", BindingFlags.NonPublic | BindingFlags.Instance)
-        ?? throw new InvalidOperationException("ConsumerHostedService.schemaHandlers not found by reflection - has its signature changed?");
+        ?? throw new InvalidOperationException("KafkaConsumerHostedServiceBase.schemaHandlers not found by reflection - has its signature changed?");
 
     /// <summary>
     /// Fetches one registered schema handler by its <see cref="WellKnownHeaderNames.Type"/> key, as a
     /// loosely-typed <see cref="object"/> since the handler's own runtime type
-    /// (<c>ConsumerHostedService.SchemaHandler{T}</c>/<c>MappedSchemaHandler{TAvro,TValue}</c>) is a
+    /// (<c>KafkaConsumerHostedServiceBase.SchemaHandler{T}</c>/<c>MappedSchemaHandler{TAvro,TValue}</c>) is a
     /// private nested class - callers invoke its members via the reflection helpers below instead of a
     /// compile-time interface reference.
     /// </summary>
-    public static object GetSchemaHandler(this ConsumerHostedService service, string eventType)
+    public static object GetSchemaHandler(this KafkaConsumerHostedServiceBase service, string eventType)
     {
         var dictionary = SchemaHandlersField.GetValue(service)!;
         var tryGetValue = dictionary.GetType().GetMethod("TryGetValue")!;

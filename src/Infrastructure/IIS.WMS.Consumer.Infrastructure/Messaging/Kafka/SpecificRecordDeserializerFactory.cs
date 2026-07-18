@@ -10,7 +10,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Builds a Confluent Schema Registry client and the Avro <see cref="IDeserializer{T}"/> wired to it
 /// for a given Avro-generated <c>ISpecificRecord</c> type - the reusable, testable counterpart to
 /// what <see cref="InventoryStateChangedConsumerHostedService"/> used to build inline in a private
-/// static method. Kept separate from <see cref="ConsumerHostedService"/> so a second
+/// static method. Kept separate from <see cref="KafkaConsumerHostedServiceBase"/> so a second
 /// Avro-schema consumer (integration-resiliency.instructions.md §1: "adding a third schema consumer
 /// means adding its options/hosted-service/health-check trio") can reuse this instead of duplicating
 /// the Schema Registry wiring.
@@ -29,7 +29,7 @@ public interface ISpecificRecordDeserializerFactory
     /// <param name="schemaRegistryApiSecret">Schema Registry API secret, paired with <paramref name="schemaRegistryApiKey"/>.</param>
     /// <param name="schemaRegistryClient">
     /// The Schema Registry client created for this deserializer - the caller owns disposing it
-    /// alongside the Kafka consumer it's wired into (see <see cref="ConsumerHostedService"/>'s
+    /// alongside the Kafka consumer it's wired into (see <see cref="KafkaConsumerHostedServiceBase"/>'s
     /// <c>additionalDisposable</c>).
     /// </param>
     /// <returns>A deserializer ready to pass to <see cref="ConsumerBuilder{TKey,TValue}.SetValueDeserializer"/>.</returns>

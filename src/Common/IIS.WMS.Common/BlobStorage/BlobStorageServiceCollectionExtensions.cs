@@ -64,7 +64,7 @@ public static class BlobStorageServiceCollectionExtensions
         // Singleton, not Scoped - BlobFileStore is stateless (its own dependencies, BlobServiceClient
         // and ResiliencePipelineProvider<string>, are already singletons), and it needs to be safe to
         // inject directly into a caller's own singleton BackgroundService (e.g. the Consumer project's
-        // ConsumerHostedService) - a Scoped registration would throw ("cannot consume scoped service
+        // KafkaConsumerHostedServiceBase) - a Scoped registration would throw ("cannot consume scoped service
         // from singleton") the moment such a caller resolved it without going through a manually
         // created DI scope per message.
         services.AddKeyedSingleton<IFileStore>(tierKey, (sp, key) =>

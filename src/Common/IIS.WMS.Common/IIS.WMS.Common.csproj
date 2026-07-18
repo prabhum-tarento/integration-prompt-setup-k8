@@ -18,6 +18,12 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
     <PackageReference Include="Polly.Core" />
+    <PackageReference Include="Serilog" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="IIS.WMS.Consumer.UnitTests" />
+    <InternalsVisibleTo Include="IIS.WMS.Consumer.IntegrationTests" />
   </ItemGroup>
 
 </Project>

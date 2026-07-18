@@ -26,7 +26,12 @@ public sealed class ServiceBusRelayEnvelope
     /// <summary>The Kafka event type and relaying consumer's name - see <c>ICorrelationContext.Types</c>.</summary>
     public string? Type { get; init; }
 
-    /// <summary>The schema handler's own JSON for this event - deserialize into that schema's wire contract (e.g. <see cref="InboundInventoryEventMessage"/>).</summary>
-    public JsonElement ReflexSchema { get; init; }
+    /// <summary>
+    /// The schema handler's own JSON for this event - deserialize into that schema's wire contract
+    /// (e.g. <see cref="InboundInventoryEventMessage"/>). Empty when <see cref="BlobPath"/> is set
+    /// instead; <c>ServiceBusConsumerHostedService</c> reassigns this after construction once it
+    /// rehydrates the blob - see that class's own remarks.
+    /// </summary>
+    public JsonElement ReflexSchema { get; set; }
     public string BlobPath { get; set; } = string.Empty;
 }

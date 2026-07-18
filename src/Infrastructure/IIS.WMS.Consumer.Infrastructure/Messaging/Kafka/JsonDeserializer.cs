@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// so a JSON-contract consumer fails the same way an Avro one does: any bad payload throws inside
 /// <c>Consume()</c> itself (surfaced as a <see cref="ConsumeException"/> with <c>ConsumerRecord</c>
 /// populated), rather than requiring a separate manual deserialize-and-catch step downstream. This
-/// is what lets <see cref="ConsumerHostedService"/> handle poison messages identically for
+/// is what lets <see cref="KafkaConsumerHostedServiceBase"/> handle poison messages identically for
 /// both wire formats.
 /// </summary>
 public sealed class JsonDeserializer<T> : IDeserializer<T>

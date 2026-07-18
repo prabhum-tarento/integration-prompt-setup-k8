@@ -64,9 +64,9 @@ public sealed class BlobStorageOptions
     /// in the Service Bus message body, with only the resulting blob path set on
     /// <see cref="Messaging.ServiceBusRelayEnvelope.BlobPath"/>. Configurable per environment; lives in
     /// the <see cref="Hot"/> storage account, same tier as <see cref="ValidationTemplateContainerName"/>.
-    /// <b>Producer side only</b>: <c>ServiceBusConsumerHostedService</c> does not yet rehydrate
-    /// <see cref="Messaging.ServiceBusRelayEnvelope.BlobPath"/> back into a payload on the consume
-    /// side - see that class's own remarks.
+    /// Read back on the consume side too: <c>ServiceBusConsumerHostedService</c> downloads from this
+    /// container to rehydrate a <see cref="Messaging.ServiceBusRelayEnvelope.BlobPath"/>-offloaded
+    /// payload - see that class's own remarks.
     /// </summary>
     public string LargePayloadContainerName { get; init; } = "large-payload";
 

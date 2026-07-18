@@ -3,7 +3,7 @@ using IIS.WMS.Consumer.Domain.Aggregates;
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 
 /// <summary>
-/// Non-blocking hand-off from <c>ConsumerHostedService.TryUpsertOrderArchiveAsync</c> to the background
+/// Non-blocking hand-off from <c>KafkaConsumerHostedServiceBase.TryUpsertOrderArchiveAsync</c> to the background
 /// <see cref="OrderArchiveBackgroundService"/> - decouples the Kafka worker's per-message latency from
 /// the Cosmos round-trip an <see cref="OrderArchive"/> upsert costs, the same producer/consumer pattern
 /// <c>AuditTrailWriter</c>/<c>AuditBackgroundService</c> already use for audit-trail writes

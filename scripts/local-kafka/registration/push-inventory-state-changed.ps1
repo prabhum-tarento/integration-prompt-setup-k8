@@ -1,6 +1,6 @@
 <#
 Produces one Avro-encoded event onto a Kafka topic through Kafka REST Proxy's v3 Produce
-API (via Schema Registry), with the four Kafka headers ConsumerHostedService.cs reads (see
+API (via Schema Registry), with the four Kafka headers KafkaConsumerHostedServiceBase.cs reads (see
 WellKnownHeaderNames.cs): Correlation-Id, Deduplication-Id, Type, App-Id.
 
 Generic over the event itself - pass -Body (a raw JSON string, spliced into the request

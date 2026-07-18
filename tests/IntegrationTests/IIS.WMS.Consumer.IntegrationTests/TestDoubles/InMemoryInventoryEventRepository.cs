@@ -1,8 +1,8 @@
 using System.Collections.Concurrent;
+using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Domain.Exceptions;
 using Microsoft.Azure.Cosmos;
 
 namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles;

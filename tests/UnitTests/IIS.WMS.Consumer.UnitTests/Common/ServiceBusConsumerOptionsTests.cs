@@ -17,6 +17,8 @@ public class ServiceBusConsumerOptionsTests
         Assert.Equal("inventory-events", options.QueueName);
         Assert.Equal(ServiceBusTransportType.AmqpTcp, options.TransportType);
         Assert.NotNull(options.Retry);
+        Assert.Null(options.MaxConcurrentSessions);
+        Assert.Null(options.MaxConcurrentCallsPerSession);
     }
 
     [Fact(DisplayName = "Every settable property can be overridden via object initializer")]
@@ -30,11 +32,15 @@ public class ServiceBusConsumerOptionsTests
             QueueName = "custom-queue",
             TransportType = ServiceBusTransportType.AmqpWebSockets,
             Retry = retry,
+            MaxConcurrentSessions = 16,
+            MaxConcurrentCallsPerSession = 2,
         };
 
         Assert.Equal("Endpoint=sb://fake.servicebus.windows.net/;SharedAccessKeyName=x;SharedAccessKey=y", options.ConnectionString);
         Assert.Equal("custom-queue", options.QueueName);
         Assert.Equal(ServiceBusTransportType.AmqpWebSockets, options.TransportType);
         Assert.Same(retry, options.Retry);
+        Assert.Equal(16, options.MaxConcurrentSessions);
+        Assert.Equal(2, options.MaxConcurrentCallsPerSession);
     }
 }

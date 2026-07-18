@@ -25,7 +25,7 @@ public interface IInventoryEventRepository
     /// <param name="cancellationToken">Token to cancel the write.</param>
     Task<InventoryEvent> CreateAsync(InventoryEvent entity, CancellationToken cancellationToken = default);
 
-    /// <summary>Replaces an existing item, guarded by an ETag match. Throws <see cref="Domain.Exceptions.ConcurrencyException"/> on a mismatch.</summary>
+    /// <summary>Replaces an existing item, guarded by an ETag match. Throws <see cref="IIS.WMS.Common.Exceptions.ConcurrencyException"/> on a mismatch.</summary>
     /// <param name="entity">Aggregate with its new state to persist.</param>
     /// <param name="expectedETag">ETag the stored item is expected to still have.</param>
     /// <param name="cancellationToken">Token to cancel the write.</param>

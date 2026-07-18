@@ -3,6 +3,20 @@ using Azure.Messaging.ServiceBus;
 namespace IIS.WMS.Common.Messaging.ServiceBus;
 
 /// <summary>Bound from the <c>ServiceBus</c> configuration section.</summary>
+/// <remarks>
+/// <see cref="MaxConcurrentSessions"/> and <see cref="MaxConcurrentCallsPerSession"/> are resolved
+/// queue-level-first, ServiceBus-level-fallback: a queue-level consumer (e.g.
+/// <c>ServiceBus:InventoryStateChanged</c>) that leaves one of these unset inherits it from this
+/// (top-level <c>ServiceBus</c> section) value instead of having to repeat it, mirroring Kafka's own
+/// event-level/Kafka-level fallback (<c>Kafka.ConsumerOptions.ApplyKafkaLevelDefaults</c>).
+/// That's why these are mutable and nullable rather than <see langword="init"/>-only like the rest of
+/// this type - the fallback has to fill them in after configuration binding runs, before any consumer
+/// reads them. This top-level <c>ServiceBus</c> section itself bottoms out at hardcoded defaults (see
+/// <c>MessagingServiceCollectionExtensions.AddServiceBusConsumers</c>'s <c>PostConfigure</c>), so by
+/// the time any consumer runs, both are guaranteed non-null - callers still read them defensively
+/// (e.g. <c>?? 8</c>) rather than asserting that, since an options POCO built directly in a unit test
+/// (bypassing the DI <c>PostConfigure</c> pipeline) wouldn't get that guarantee.
+/// </remarks>
 public sealed class ServiceBusConsumerOptions
 {
     /// <summary>Configuration section name this options type binds from.</summary>
@@ -32,6 +46,24 @@ public sealed class ServiceBusConsumerOptions
     /// at its SDK defaults (<see cref="ServiceBusRetryMode.Exponential"/>, 3 retries) unless overridden.
     /// </summary>
     public ServiceBusRetryOptions Retry { get; init; } = new();
+
+    /// <summary>
+    /// Independent aggregates (sessions) a <see cref="Azure.Messaging.ServiceBus.ServiceBusSessionProcessor"/>
+    /// processes in parallel (<see cref="Azure.Messaging.ServiceBus.ServiceBusSessionProcessorOptions.MaxConcurrentSessions"/>).
+    /// Queue level falls back to this ServiceBus-level value if unset (see remarks), which itself
+    /// bottoms out at 8 - today's hardcoded value, preserved as the default.
+    /// </summary>
+    public int? MaxConcurrentSessions { get; set; }
+
+    /// <summary>
+    /// Messages processed at a time <em>within</em> a single session
+    /// (<see cref="Azure.Messaging.ServiceBus.ServiceBusSessionProcessorOptions.MaxConcurrentCallsPerSession"/>) -
+    /// this is what orders processing for a given aggregate, so raising it above 1 trades that
+    /// ordering guarantee for throughput. Queue level falls back to this ServiceBus-level value if
+    /// unset (see remarks), which itself bottoms out at 1 - today's hardcoded value, preserved as the
+    /// default.
+    /// </summary>
+    public int? MaxConcurrentCallsPerSession { get; set; }
 
     /// <summary>
     /// Allow-list of Service Bus consumer names to start - the Service Bus-side mirror of

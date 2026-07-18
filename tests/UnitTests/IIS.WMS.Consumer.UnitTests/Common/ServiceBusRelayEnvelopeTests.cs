@@ -58,4 +58,15 @@ public class ServiceBusRelayEnvelopeTests
 
         Assert.Equal("large-payload/corr-2.json", envelope.BlobPath);
     }
+
+    [Fact(DisplayName = "ReflexSchema, like BlobPath, can be assigned after construction")]
+    public void ReflexSchema_AssignedAfterConstruction_UpdatesValue()
+    {
+        var envelope = new ServiceBusRelayEnvelope { BlobPath = "large-payload/corr-3.json" };
+        var rehydratedSchema = JsonSerializer.SerializeToElement(new { Sku = "SKU2" });
+
+        envelope.ReflexSchema = rehydratedSchema;
+
+        Assert.Equal(JsonValueKind.Object, envelope.ReflexSchema.ValueKind);
+    }
 }

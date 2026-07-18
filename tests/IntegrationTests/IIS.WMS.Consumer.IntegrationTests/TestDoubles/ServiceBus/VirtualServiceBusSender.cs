@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles.ServiceBus;
 /// (provided specifically for mocking/subclassing, per Azure SDK guidelines), overriding
 /// <see cref="SendMessageAsync"/>/<see cref="SendMessagesAsync(System.Collections.Generic.IEnumerable{ServiceBusMessage},System.Threading.CancellationToken)"/>
 /// to forward into <see cref="VirtualServiceBusBroker.DispatchAsync"/> instead of a real network call
-/// (integration-resiliency.instructions.md §9). <c>ConsumerHostedService</c>'s (the Kafka relay)
+/// (integration-resiliency.instructions.md §9). <c>KafkaConsumerHostedServiceBase</c>'s (the Kafka relay)
 /// existing sender-cache logic keeps working unmodified against whatever this returns - no production
 /// code change needed for the publish side.
 /// </summary>

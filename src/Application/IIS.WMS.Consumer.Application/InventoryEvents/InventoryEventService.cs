@@ -1,8 +1,8 @@
+using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.Exceptions;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Domain.Exceptions;
 using Microsoft.Extensions.Logging;
 
 namespace IIS.WMS.Consumer.Application.InventoryEvents;

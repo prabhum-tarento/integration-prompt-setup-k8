@@ -45,7 +45,7 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
     private IntegrationTestBackendOptions backends = default!;
     private ServiceProvider provider = default!;
     private KafkaConsumerHostedService kafkaConsumer = default!;
-    private ServiceBusConsumerHostedService serviceBusConsumer = default!;
+    private InventoryStateChangedServiceBusHostedService serviceBusConsumer = default!;
     private VirtualServiceBusClient? virtualServiceBusClient;
     private InMemoryCosmosContainerFactory? cosmosFactory;
 
@@ -99,17 +99,23 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
         kafkaConsumer = provider.GetRequiredService<KafkaConsumerHostedService>();
         await kafkaConsumer.StartAsync(CancellationToken.None);
 
-        // ServiceBusConsumerHostedService's own DI registration is currently gated off
-        // (MessagingServiceCollectionExtensions.AddMessaging's `if (false)` block - pre-existing,
-        // unrelated to this test), so it's constructed directly here instead of resolved from `provider`.
-        // Its constructor no longer builds a session processor eagerly (see its own ExecuteAsync
+        // Constructed directly here (rather than resolved from `provider`) so the queue name and
+        // ServiceBusHealthState instance are test-local, not the DI-registered singleton. Its
+        // constructor no longer builds a session processor eagerly (see its own ExecuteAsync
         // remarks), so this is safe even against VirtualServiceBusClient.
-        serviceBusConsumer = new ServiceBusConsumerHostedService(
+        var dependencies = new ServiceBusConsumerDependencies(
             provider.GetRequiredService<ServiceBusClient>(),
-            Options.Create(new ServiceBusConsumerOptions { QueueName = QueueName }),
             provider.GetRequiredService<IServiceScopeFactory>(),
-            new ServiceBusHealthState(),
-            provider.GetRequiredService<ILogger<ServiceBusConsumerHostedService>>());
+            provider.GetRequiredKeyedService<IFileStore>(BlobStorageServiceCollectionExtensions.HotTierKey),
+            provider.GetRequiredKeyedService<IFileStore>(BlobStorageServiceCollectionExtensions.ColdTierKey),
+            provider.GetRequiredService<IOptions<BlobStorageOptions>>(),
+            new ServiceBusHealthStateRegistry());
+
+        serviceBusConsumer = new InventoryStateChangedServiceBusHostedService(
+            dependencies,
+            QueueName,
+            Options.Create(new InventoryStateChangedServiceBusConsumerOptions()),
+            provider.GetRequiredService<ILogger<InventoryStateChangedServiceBusHostedService>>());
 
         if (backends.ServiceBus == BackendMode.Fake)
         {

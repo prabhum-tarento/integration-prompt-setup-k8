@@ -251,7 +251,7 @@ The `/topics/{topic}` endpoint above (the REST Proxy's "v2" Produce API) only ac
 headers (`Content-Type`) - it has no way to set actual **Kafka record headers**, so a
 message produced that way always arrives with none of `Correlation-Id`/
 `Deduplication-Id`/`Type` that
-[ConsumerHostedService.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/ConsumerHostedService.cs)
+[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaConsumerHostedServiceBase.cs)
 optionally reads (see the "No Kafka headers" note in step 7 below) - it always falls back
 to a fresh correlation id, skipped dedup, and the default schema handler. To set those from
 curl, use the REST Proxy's newer **v3 Produce API** instead, which is header-aware.
@@ -1044,7 +1044,7 @@ Service Bus message id.
 
 No Kafka headers (`Correlation-Id`, `Deduplication-Id`, `Type`) are sent above; all three
 are optional and degrade gracefully when absent (see
-[ConsumerHostedService.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/ConsumerHostedService.cs)) -
+[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaConsumerHostedServiceBase.cs)) -
 a fresh correlation id is generated, dedup is skipped, and the default schema handler is used.
 
 ### 8. Verify the message landed, into a consumer group (optional)

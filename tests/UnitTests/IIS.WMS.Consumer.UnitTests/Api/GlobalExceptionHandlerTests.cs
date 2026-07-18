@@ -1,6 +1,7 @@
 using FluentValidation;
 using IIS.WMS.Common.Correlation;
 using IIS.WMS.Common.DynamicValidation;
+using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Consumer.Api.ExceptionHandling;
 using IIS.WMS.Consumer.Application.Exceptions;
 using IIS.WMS.Consumer.Domain.Exceptions;

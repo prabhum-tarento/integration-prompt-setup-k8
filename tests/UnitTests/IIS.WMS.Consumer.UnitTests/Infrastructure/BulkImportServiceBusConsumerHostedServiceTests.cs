@@ -29,8 +29,8 @@ public class BulkImportServiceBusConsumerHostedServiceTests
     public async Task HandleMessageAsync_ValidMessage_ImportsAndReturnsCompleted()
     {
         var bulkImportService = Substitute.For<IBulkInventoryImportService>();
-        var healthState = new ServiceBusHealthState { LastSuccessfulReceiveUtc = DateTimeOffset.UnixEpoch };
-        var sut = CreateSut(bulkImportService, out _, healthState: healthState);
+        var healthStateRegistry = new ServiceBusHealthStateRegistry();
+        var sut = CreateSut(bulkImportService, out _, healthStateRegistry: healthStateRegistry);
 
         var message = BuildReceivedMessage(BuildEventJson());
 
@@ -41,7 +41,7 @@ public class BulkImportServiceBusConsumerHostedServiceTests
             Arg.Is<ImportBulkInventoryItemRequest>(r =>
                 r.WarehouseId == "WH1" && r.Sku == "SKU1" && r.Quantity == 42 && r.SourceSystem == "Nexus"),
             Arg.Any<CancellationToken>());
-        Assert.True(healthState.LastSuccessfulReceiveUtc > DateTimeOffset.UnixEpoch);
+        Assert.True(healthStateRegistry.GetOrAdd("inventory-bulk-import").LastSuccessfulReceiveUtc > DateTimeOffset.UnixEpoch);
     }
 
     [Fact(DisplayName = "Malformed JSON is dead-lettered as a poison message rather than throwing")]
@@ -174,7 +174,7 @@ public class BulkImportServiceBusConsumerHostedServiceTests
     private static BulkImportServiceBusConsumerHostedService CreateSut(
         IBulkInventoryImportService bulkImportService,
         out ICorrelationContext correlationContext,
-        ServiceBusHealthState? healthState = null)
+        ServiceBusHealthStateRegistry? healthStateRegistry = null)
     {
         var scopedCorrelationContext = Substitute.For<ICorrelationContext>();
         correlationContext = scopedCorrelationContext;
@@ -188,7 +188,7 @@ public class BulkImportServiceBusConsumerHostedServiceTests
             new FakeServiceBusClient(),
             Options.Create(new BulkImportServiceBusConsumerOptions()),
             scopeFactory,
-            healthState ?? new ServiceBusHealthState(),
+            healthStateRegistry ?? new ServiceBusHealthStateRegistry(),
             Substitute.For<ILogger<BulkImportServiceBusConsumerHostedService>>());
     }
 }

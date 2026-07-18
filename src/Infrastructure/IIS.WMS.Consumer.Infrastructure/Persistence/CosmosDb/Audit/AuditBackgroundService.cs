@@ -31,7 +31,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 /// inherent limitation of any in-memory buffer, not something closeable without a durably-persisted
 /// queue ahead of it (e.g. writing straight to Service Bus/Kafka first, which is a larger change than
 /// this pipeline). The same trade-off is already accepted elsewhere in this codebase for the same
-/// reason - see <c>ConsumerHostedService</c>'s <c>ServiceBusSender</c> disposal remarks. Each
+/// reason - see <c>KafkaConsumerHostedServiceBase</c>'s <c>ServiceBusSender</c> disposal remarks. Each
 /// <see cref="IAuditSink"/> owns its own failure handling for its own destination (e.g.
 /// <see cref="CosmosAuditSink"/>'s hot-tier dead-letter fallback) - a sink's own write failure is never
 /// this class's concern.
@@ -80,7 +80,7 @@ public sealed class AuditBackgroundService(
     /// others from running. Pushes <see cref="AuditEntry.CorrelationId"/> onto Serilog's ambient
     /// <see cref="LogContext"/> (integration-resiliency.instructions.md §7) so every log line emitted
     /// while persisting - including inside the sinks themselves - carries it, the same convention
-    /// <c>ConsumerHostedService</c> uses at the Kafka boundary.
+    /// <c>KafkaConsumerHostedServiceBase</c> uses at the Kafka boundary.
     /// </summary>
     private async Task PersistAsync(AuditEntry entry, CancellationToken cancellationToken)
     {

@@ -8,15 +8,15 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// <c>net.pandora.nexus.event.inventory.InventoryStateChanged</c> and
 /// <c>net.pandora.nexus.event.inventory.InventoryAdjusted</c> - from Kafka onto the durable Azure
 /// Service Bus queue (integration-resiliency.instructions.md §1), built on the shared
-/// <see cref="ConsumerHostedService"/> - the Avro counterpart to the JSON
-/// <see cref="KafkaConsumerHostedService"/>. Registers one <see cref="ConsumerHostedService.ISchemaHandler"/>
+/// <see cref="KafkaConsumerHostedServiceBase"/> - the Avro counterpart to the JSON
+/// <see cref="KafkaConsumerHostedService"/>. Registers one <see cref="KafkaConsumerHostedServiceBase.ISchemaHandler"/>
 /// per event type, keyed by its exact Kafka <c>Type</c> header value (<see cref="InventoryStateChangedEventType"/>/
-/// <see cref="InventoryAdjustedEventType"/>) rather than <see cref="ConsumerHostedService.DefaultEventType"/> -
+/// <see cref="InventoryAdjustedEventType"/>) rather than <see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/> -
 /// unlike every other consumer in this repo, this one cannot treat "any Type header value" as one schema, since the
 /// two events it forwards are structurally unrelated Avro records. A message whose <c>Type</c> header
 /// matches neither is dead-lettered as an unrecognized schema, same as any consumer (see the base
 /// class's remarks). Both deserializers share one Schema Registry client - the base class's
-/// <see cref="ConsumerHostedService.CreateSchemaHandler{TAvro,TValue}"/> builds it once, on the first
+/// <see cref="KafkaConsumerHostedServiceBase.CreateSchemaHandler{TAvro,TValue}"/> builds it once, on the first
 /// call, and reuses it for the second, rather than opening a second connection to the same registry.
 /// </summary>
 /// <remarks>
@@ -33,7 +33,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// </remarks>
 [LogLevelCriteria(LogCriteria.High)]
 [Module("Inventory")]
-public sealed class InventoryStateChangedConsumerHostedService : ConsumerHostedService
+public sealed class InventoryStateChangedConsumerHostedService : KafkaConsumerHostedServiceBase
 {
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">

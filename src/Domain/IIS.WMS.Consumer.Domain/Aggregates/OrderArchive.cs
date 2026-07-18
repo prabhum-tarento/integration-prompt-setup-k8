@@ -5,8 +5,8 @@ namespace IIS.WMS.Consumer.Domain.Aggregates;
 
 /// <summary>
 /// Archival copy of one relayed Kafka event, written to Cosmos DB before the event is published to
-/// Service Bus - see <c>ConsumerHostedService.ProcessMessageAsync</c>. Only schemas that opt in via
-/// a <c>getOrderArchiveKey</c> selector (<c>ConsumerHostedService.CreateSchemaHandler</c>) produce
+/// Service Bus - see <c>KafkaConsumerHostedServiceBase.ProcessMessageAsync</c>. Only schemas that opt in via
+/// a <c>getOrderArchiveKey</c> selector (<c>KafkaConsumerHostedServiceBase.CreateSchemaHandler</c>) produce
 /// one of these; unlike <see cref="InventoryEvent"/>, this aggregate has no invariants beyond its
 /// required fields and raises no domain events - it is a write-once audit record, not a consistency
 /// boundary the rest of the domain reasons about.

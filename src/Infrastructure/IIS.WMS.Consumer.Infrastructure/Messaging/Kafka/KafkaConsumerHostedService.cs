@@ -6,14 +6,14 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 /// <summary>
 /// Relays JSON-contract inventory events from Kafka onto the durable Azure Service Bus queue
-/// (integration-resiliency.instructions.md §1), built on the shared <see cref="ConsumerHostedService"/>
+/// (integration-resiliency.instructions.md §1), built on the shared <see cref="KafkaConsumerHostedServiceBase"/>
 /// - the JSON counterpart to the Avro <see cref="InventoryStateChangedConsumerHostedService"/>. Handles
 /// exactly one schema regardless of the Kafka <c>Type</c> header's value (registered under
 /// <see cref="DefaultEventType"/>), same as before this class supported registering more than one.
 /// </summary>
 [LogLevelCriteria(LogCriteria.High)]
 [Module("Inventory")]
-public sealed class KafkaConsumerHostedService : ConsumerHostedService
+public sealed class KafkaConsumerHostedService : KafkaConsumerHostedServiceBase
 {
     /// <summary>Builds the long-lived Kafka consumer (with a JSON value deserializer) and the Service Bus sender it relays onto.</summary>
     /// <param name="options">Kafka connection/topic settings.</param>

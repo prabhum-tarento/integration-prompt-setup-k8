@@ -75,7 +75,7 @@ public sealed class OrderArchiveBackgroundService(
     /// entry is dropped - see this class's remarks for why there is no dead-letter fallback here.
     /// Pushes <see cref="OrderArchive.CorrelationId"/> onto Serilog's ambient <see cref="LogContext"/>
     /// (integration-resiliency.instructions.md §7) so every log line for this persist - success or
-    /// failure - carries it, the same convention <c>ConsumerHostedService</c> uses at the Kafka boundary.
+    /// failure - carries it, the same convention <c>KafkaConsumerHostedServiceBase</c> uses at the Kafka boundary.
     /// </summary>
     private async Task PersistAsync(OrderArchive entry, CancellationToken cancellationToken)
     {

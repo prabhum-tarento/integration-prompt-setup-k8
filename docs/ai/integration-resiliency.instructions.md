@@ -18,12 +18,13 @@ all of it lives in `Infrastructure`.
 
 ```
 Kafka topic (inventory events)
-    │  ConsumerHostedService subclasses (Confluent.Kafka) - one per consumer,
+    │  KafkaConsumerHostedServiceBase subclasses (Confluent.Kafka) - one per consumer,
     │  each registering one or more schemas: KafkaConsumerHostedService (JSON),
     │  InventoryStateChangedConsumerHostedService (Avro), BulkInventoryImportConsumerHostedService (Avro)
     ▼
 Azure Service Bus queue (durable relay)
-    │  ServiceBusConsumerHostedService (session-enabled) or
+    │  ServiceBusConsumerHostedService<TMessage> subclasses (session-enabled,
+    │  e.g. InventoryStateChangedServiceBusHostedService) or
     │  BulkImportServiceBusConsumerHostedService (non-session) (Azure.Messaging.ServiceBus)
     ▼
 Application layer (use case) → Cosmos DB repository (ETag-guarded write)
@@ -39,7 +40,7 @@ every hop, log line, and outbound call this flow makes.
 ## 1. Kafka consumer → Service Bus relay
 
 - Every Kafka consumer is a concrete subclass of the shared
-  `ConsumerHostedService : BackgroundService` (no longer generic over a
+  `KafkaConsumerHostedServiceBase : BackgroundService` (no longer generic over a
   single `TValue`), which owns a single long-lived `IConsumer<string, byte[]>`
   (Confluent.Kafka) per hosted-service instance — Kafka's consumer-group
   protocol assigns it a subset of the topic's partitions automatically on
@@ -53,7 +54,7 @@ every hop, log line, and outbound call this flow makes.
   non-generic interface), keyed by the Kafka `Type` header value
   (`WellKnownHeaderNames.Type`) that schema corresponds to. A consumer that
   handles exactly one schema regardless of that header's value registers
-  its one handler under `ConsumerHostedService.DefaultEventType` instead of
+  its one handler under `KafkaConsumerHostedServiceBase.DefaultEventType` instead of
   an exact value; the header's actual value is looked up first, falling
   back to that default key, and a value matching neither is dead-lettered
   (raw bytes, hot-tier) as an unrecognized schema rather than attempting to
@@ -238,9 +239,19 @@ every hop, log line, and outbound call this flow makes.
   the broker's own per-message size limit regardless of source payload size.
   A blob upload failure here is handled the same as every other non-fatal
   failure mode above (logged `Critical`, JSON to hot storage, offset
-  committed forward). **Producer side only** - `ServiceBusConsumerHostedService`
-  does not yet rehydrate a `BlobPath`-offloaded payload back on the consume
-  side; see that class's own remarks for the open TODO.
+  committed forward). On the consume side, `ServiceBusConsumerHostedService`
+  rehydrates a `BlobPath`-offloaded payload in its own pipeline step, before
+  the request-audit blob write (step 3 below): when `BlobPath` is set, the
+  hot-tier `IFileStore` downloads it and the blob's content is assigned onto
+  the envelope's (settable) `ReflexSchema`, replacing the empty inline value
+  - a single download shared by both the audit write and the later
+  `DeserializePayload` hook, rather than one download per consumer. A
+  download or parse failure here doesn't short-circuit immediately: the
+  request-audit blob write below still runs (best-effort, unconditional,
+  falling back to the raw wire bytes since `ReflexSchema` never got
+  populated), and only then is the failure surfaced as any other poison
+  payload (§2) - dead-lettered as `PoisonMessage`, with the envelope written
+  to the hot-tier dead-letter container.
 - Use the Kafka message key (or a stable field from the payload, e.g.
   `WarehouseId:Sku:EventId`) as the outbound Service Bus **message ID** —
   this is what makes the Service Bus consumer's dedupe check (§2) work.
@@ -256,12 +267,12 @@ every hop, log line, and outbound call this flow makes.
   that partitions the data they write to. This groups every message for
   the same inventory aggregate into one Service Bus session — see §2 for
   why that matters for ordering, not just dedup.
-- **`ServiceBusSender` lifecycle.** `ConsumerHostedService` caches one
+- **`ServiceBusSender` lifecycle.** `KafkaConsumerHostedServiceBase` caches one
   `ServiceBusSender` per distinct queue name actually used (keyed off
   `ISchemaHandler.ServiceBusQueueName`/`ConsumerOptions.ServiceBusQueueName`,
   not per schema), reused for the lifetime of the app per Microsoft's
   Service Bus client-lifetime guidance — never opened per message. Since
-  `ConsumerHostedService` is itself registered `AddSingleton`, this cache
+  `KafkaConsumerHostedServiceBase` is itself registered `AddSingleton`, this cache
   lives for the process's lifetime. It implements `IAsyncDisposable`
   alongside `IDisposable` so every cached sender is disposed on a graceful
   shutdown: the default `ServiceProvider` prefers `DisposeAsync` over
@@ -306,7 +317,7 @@ every hop, log line, and outbound call this flow makes.
   this one message's offset": workers can finish out of order, so a later
   offset can complete before an earlier one on the same partition.
   `PartitionOffsetCommitTracker` (used by
-  `ConsumerHostedService`) tracks each partition's contiguous
+  `KafkaConsumerHostedServiceBase`) tracks each partition's contiguous
   low-water mark and only commits up to the highest offset that's safe —
   i.e. every offset below it has actually completed — never a bare
   `consumer.Commit(result)` per message once more than one worker is in
@@ -348,12 +359,71 @@ primary correctness mechanism.
 ```csharp
 var processor = client.CreateSessionProcessor(queueName, new ServiceBusSessionProcessorOptions
 {
-    MaxConcurrentSessions = 8,        // independent aggregates processed in parallel
-    MaxConcurrentCallsPerSession = 1, // one message at a time *within* a session — this is what orders it
+    MaxConcurrentSessions = MaxConcurrentSessions,               // independent aggregates processed in parallel
+    MaxConcurrentCallsPerSession = MaxConcurrentCallsPerSession, // one message at a time *within* a session — this is what orders it
     AutoCompleteMessages = false,     // complete/abandon/dead-letter explicitly, only after a durable outcome
 });
 ```
 
+`MaxConcurrentSessions`/`MaxConcurrentCallsPerSession` are configurable,
+resolved queue-level-first, ServiceBus-level-fallback — the Service Bus
+mirror of §1's Kafka event-level/Kafka-level fallback
+(`ConsumerOptions.ApplyKafkaLevelDefaults`). The top-level `ServiceBus`
+section (`ServiceBusConsumerOptions`) carries the fallback values, bottomed
+out to today's hardcoded 8/1 via a `PostConfigure<ServiceBusConsumerOptions>`
+in `AddServiceBusConsumers` if left unset in configuration. A queue-level
+options type (e.g. `InventoryStateChangedServiceBusConsumerOptions`, bound
+from `ServiceBus:InventoryStateChanged`) merges onto that fallback via its
+own `ApplyServiceBusLevelDefaults(ServiceBusConsumerOptions)` — queue level
+wins wherever it's configured, ServiceBus level is only the fallback. The
+resolved pair is passed into `ServiceBusConsumerHostedService<TMessage>`'s
+constructor as two plain `int`s (the base class itself stays queue-agnostic
+and does not read configuration directly), and exposed as its
+`MaxConcurrentSessions`/`MaxConcurrentCallsPerSession` protected properties,
+which is what `ExecuteAsync` reads above. `AutoCompleteMessages` stays
+hardcoded `false` and `ReceiveMode` stays the SDK default (`PeekLock`) —
+neither is configurable, since the whole complete/abandon/dead-letter
+outcome model below depends on manual settlement.
+
+- **Shape**: `ServiceBusConsumerHostedService<TMessage>` (the shared kernel,
+  `IIS.WMS.Common`, not this Infrastructure project — shared so that a
+  future Producer project's own Service Bus hosted service could reuse it
+  without pulling in Consumer's Application/Domain/Infrastructure layers)
+  is an abstract, generic base class — the Service Bus counterpart
+  to `Kafka.KafkaConsumerHostedServiceBase`. Its constructor takes a
+  `ServiceBusConsumerDependencies` bundle (`Client`, `ScopeFactory`,
+  hot/cold `IFileStore`, `IOptions<BlobStorageOptions>`, and a
+  `ServiceBusHealthStateRegistry`) plus the per-queue values that vary —
+  `queueName` (exposed as the `QueueName` protected property, the single
+  source of truth every internal reference reads instead of a duplicate
+  options-bound copy) and the two resolved concurrency `int`s — the same
+  plumbing-vs-per-queue split Kafka's `ConsumerRelayInfrastructure` uses.
+  `HealthState` is not its own constructor parameter: the base class
+  resolves it internally via `dependencies.HealthStateRegistry.GetOrAdd(queueName)`,
+  so a hosted service and `ServiceBusHealthCheck` always derive the same
+  shared instance from the one piece of data they both already have (the
+  queue name) instead of needing a separately-injected, separately-keyed
+  parameter that merely has to agree with it. Unlike Kafka, one queue here
+  carries exactly one message shape, so there is no schema-keyed handler
+  map and no per-derived-class deserialization hook either — `TMessage` is
+  already fixed at compile time by a derived class's own class declaration
+  (e.g. `: ServiceBusConsumerHostedService<InboundInventoryEventMessage>`),
+  so the base class keeps a concrete, private `DeserializePayload(JsonElement reflexSchema)`
+  helper that calls `reflexSchema.Deserialize<TMessage>()` directly — no
+  abstract method, no derived-class override, no constructor-supplied
+  `Func`. A derived class supplies only `TMessage` (via its class
+  declaration) and one hook:
+  `ProcessMessageAsync(TMessage message, ServiceBusRelayEnvelope envelope, string correlationId, CancellationToken cancellationToken)`.
+  Business logic itself does not live in the hosted service — the derived
+  class's `ProcessMessageAsync` resolves a scoped handler (under a
+  `Messaging/ServiceBus/Handlers/` folder) and delegates to it, mirroring
+  how a controller calls into an application-layer use case rather than
+  embedding logic inline. `InventoryStateChangedServiceBusHostedService` is the
+  sole consumer of the `inventory-state-changed` queue, deserializing to
+  `InboundInventoryEventMessage` and delegating to
+  `IInventoryStateChangedHandler`, which calls `IInventoryEventService`
+  (never the repository directly) the same way
+  `InventoryEventsController` does.
 - **Idempotency**: before applying a message, check whether its message ID
   has already been processed (a small dedupe record in Cosmos, or rely on
   the target write being naturally idempotent — see
@@ -361,11 +431,42 @@ var processor = client.CreateSessionProcessor(queueName, new ServiceBusSessionPr
   Sessions give you ordering, not exactly-once delivery — redelivery after
   a lock timeout or a crash before `CompleteMessageAsync` is still a normal
   case this code must handle correctly.
-- **Dynamic validation**: right after the inbound envelope is deserialized,
-  `ServiceBusConsumerHostedService.HandleMessageAsync` calls the same shared
+- **Per-message pipeline**: `ServiceBusConsumerHostedService<TMessage>.HandleMessageAsync`
+  runs the following ordered steps, each timed and folded into a final
+  structured log line (`TotalDurationMs` plus a per-step
+  `ProcessingDurations` breakdown — envelope-deserialize, request-audit
+  blob write, payload-deserialize, dynamic validation, processing; the
+  blob-rehydrate step below is folded into the payload-deserialize duration
+  rather than given its own field, since it's part of "time spent obtaining
+  and parsing the payload"):
+  1. Deserialize the `ServiceBusRelayEnvelope`. On failure: write the raw
+     message bytes to the hot-tier dead-letter container (below) and
+     return `DeadLettered("PoisonMessage", ...)`.
+  2. Resolve the correlation ID (`ApplicationProperties["CorrelationId"]`,
+     falling back to the envelope's own `CorrelationId`, falling back to a
+     fresh GUID) and push it onto `ICorrelationContext`/Serilog's
+     `LogContext`.
+  3. If `BlobPath` is set, rehydrate it onto the envelope's `ReflexSchema`
+     (see the claim-check bullet above). Best-effort: a failure here is
+     carried forward rather than returned immediately, so step 4 below
+     still runs.
+  4. Write the whole raw message — or, when step 3 rehydrated a `BlobPath`
+     payload, the envelope re-serialized with its now-populated
+     `ReflexSchema` — to the cold-tier request-audit container (below) —
+     unconditional, best-effort.
+  5. Deserialize the inner payload via the base class's own concrete,
+     private `DeserializePayload` helper (or, if step 3 failed, skip
+     straight to the same outcome). On failure: write the envelope (as
+     JSON) to the hot-tier dead-letter container and return
+     `DeadLettered("PoisonMessage", ...)`.
+  6. Run dynamic validation (see below).
+  7. Call the derived class's `ProcessMessageAsync` and map the
+     result/exception to a `ServiceBusMessageOutcome` (see below).
+- **Dynamic validation**: right after the inner payload is deserialized,
+  `HandleMessageAsync` calls the same shared
   `IIS.WMS.Common.DynamicValidation.IDynamicEventValidator` described in §1,
   using the fixed transport folder `ServiceBus` together with the consumer's
-  own `ServiceBusConsumerOptions.QueueName` as the identifier — one template
+  own `QueueName` as the identifier — one template
   per queue, not per event type, since this consumer has no per-message
   "schema handler" concept the way the Kafka side does (blob path e.g.
   `ServiceBus/inventory-state-changed.cs`). The message's
@@ -374,17 +475,19 @@ var processor = client.CreateSessionProcessor(queueName, new ServiceBusSessionPr
   helper before the call. This runs in its own `try`/`catch`, separate from
   the dispatch `try`/`catch` below, because the two failure modes map to
   different outcomes: a **throw** dead-letters the message
-  (`DeadLetterMessageAsync` with reason `"DynamicValidationFailed"`) rather
-  than being abandoned for redelivery, since a template exception is not a
+  (`DeadLetterMessageAsync` with reason `"DynamicValidationFailed"`, after
+  writing the payload to the hot-tier dead-letter container) rather than
+  being abandoned for redelivery, since a template exception is not a
   transient infrastructure fault; returning **`false`** completes the
   message without dispatching (logged at `Information`, same "valid but
   deliberately not relayed" semantics as §1); returning **`true`** dispatches
   normally, unaffected by this stage.
 - **Concurrency conflict retry (the re-read-and-reapply loop)**: this is
   the one piece of logic every cross-reference to "the concurrency retry
-  pattern" in this doc set points to — it lives here, not in Polly (§3),
-  because it needs to re-fetch fresh state between attempts, which a blind
-  retry of the same delegate cannot do:
+  pattern" in this doc set points to — it lives in the derived handler
+  (e.g. `InventoryStateChangedHandler`, via the use case it calls), not in
+  Polly (§3), because it needs to re-fetch fresh state between attempts,
+  which a blind retry of the same delegate cannot do:
 
 ```csharp
 const int maxAttempts = 3;
@@ -416,19 +519,31 @@ for (var attempt = 1; attempt <= maxAttempts; attempt++)
 }
 ```
 
-  A `ConcurrencyException` that escapes this loop is caught by the outer
-  message-processing handler below and treated the same as any other
-  processing failure (abandon and let Service Bus redeliver, or dead-letter
-  once `MaxDeliveryCount` is reached) — it is not retried by the Polly
-  pipeline in §3, which only handles transient infrastructure faults
-  (Service Bus/Blob/HTTP), not application-level concurrency conflicts.
-- On success: `CompleteMessageAsync`. On a transient infrastructure failure
-  the Polly policy (§3) already retried and exhausted, or a
-  `ConcurrencyException` that exhausted the loop above:
-  `AbandonMessageAsync` (goes back to the queue, retried up to
-  `MaxDeliveryCount`). On a poison message (fails deserialization, or is
-  provably not transient): `DeadLetterMessageAsync` with a reason — never
-  silently drop it, and alert on a rising dead-letter count (see
+  A `ConcurrencyException` that escapes this loop propagates up to
+  `HandleMessageAsync`'s outer try/catch around step 6 above (calling
+  `ProcessMessageAsync`), which maps exceptions to outcomes exactly as
+  follows — this is the definitive mapping; nothing else in this repo
+  should restate or diverge from it:
+  - No exception → `Completed`.
+  - `ConcurrencyException` → `Abandoned` (goes back to the queue, retried
+    up to `MaxDeliveryCount` — the loop above is expected to make this
+    rare once sessions are in place).
+  - `OperationCanceledException` → `Abandoned` (a canceled operation is not
+    evidence the message itself is poison; let it be redelivered).
+  - **Any other exception** → `DeadLettered`, with `Reason` set to the
+    exception's type name and `Description` set to `ex.ToString()` (the
+    full exception, including stack trace — not just `ex.Message`), after
+    writing the payload to the hot-tier dead-letter container. This is a
+    deliberate change from "abandon on any failure": an exception that
+    isn't a known-transient case (concurrency, cancellation) is treated as
+    provably not transient, the same posture §1 takes for a Kafka message
+    that fails deserialization.
+- On success: `CompleteMessageAsync`. On `Abandoned`: `AbandonMessageAsync`
+  (goes back to the queue, retried up to `MaxDeliveryCount`). On
+  `DeadLettered` (a poison message, a dynamic-validation template
+  exception, or any processing exception besides the two `Abandoned`
+  cases above): `DeadLetterMessageAsync` with a reason — never silently
+  drop it, and alert on a rising dead-letter count (see
   [kubernetes-deployment-best-practices.instructions.md](kubernetes-deployment-best-practices.instructions.md)).
 
 ## 3. Polly resiliency pipeline
@@ -545,7 +660,7 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
   across transports the same way `HeaderLookup` is — see §1) also names the
   `Deduplication-Id`, `App-Id`, and
   `Type` headers read for the dedup check and structured logging in §1. If
-  `App-Id` is missing or empty, `ConsumerHostedService` falls back to this
+  `App-Id` is missing or empty, `KafkaConsumerHostedServiceBase` falls back to this
   service's own identity (`ApplicationOptions.ApplicationId`, bound from the
   `Application` configuration section — `ApplicationOptions` also carries
   `ApplicationName`, enriched onto every Serilog log line in `Program.cs`)
@@ -585,7 +700,7 @@ directly off configuration, same pattern as the single-account case used to).
 `BlobStorageServiceCollectionExtensions.AddBlobStorage` registers a keyed
 `BlobServiceClient`/`IFileStore` pair per tier
 (`BlobStorageServiceCollectionExtensions.HotTierKey`/`ColdTierKey`) rather
-than one shared instance; `ConsumerHostedService` resolves both via
+than one shared instance; `KafkaConsumerHostedServiceBase` resolves both via
 `[FromKeyedServices]` and picks the tier that matches each write below —
 never assume the two containers share an account or a client.
 
@@ -628,6 +743,48 @@ never assume the two containers share an account or a client.
   recognize is silently absent here - it never survives deserialization to
   be included. A message that fails to deserialize at all only ever gets a
   hot-tier raw-bytes record, never a cold-tier one.
+- **Hot tier, Service Bus consumer dead-letter** (also the
+  `consumer-dead-letter` container): the Service Bus-side counterpart to the
+  Kafka consumer dead-letter bullet above, written by
+  `ServiceBusConsumerHostedService<TMessage>` whenever a message's
+  processing fails past the point of no automatic recovery (§2) — poison
+  envelope, poison inner payload, a dynamic-validation template exception,
+  or any processing exception besides the two that map to `Abandoned`.
+  Named `{correlationId}/{ServiceBusQueueName}/{timestamp}_{guid}.{extension}`
+  — the same shape as the Kafka consumer's dead-letter naming, with the
+  queue name standing in for `ConsumerHostedServiceName`. Content shape
+  follows the same raw-bytes-vs-JSON split as the Kafka side: **raw bytes**
+  (`.bin`) when the envelope itself failed to deserialize (nothing parsed
+  yet — correlation id is `"unknown"` at this point, since the envelope is
+  what carries it); otherwise the best-available deserialized value — the
+  envelope (if the inner payload didn't parse) or the payload (if
+  validation or processing failed) — as **JSON** (`.json`). Best-effort:
+  serializing or uploading is wrapped in its own `try`/`catch`, logged and
+  swallowed on failure, so a value that can't be serialized (e.g. an
+  envelope whose `ReflexSchema` is an undefined `JsonElement`) or a Blob
+  Storage outage never blocks the dead-letter outcome itself from being
+  returned.
+- **Cold tier, Service Bus consumer audit** (also the `request-audit`
+  container): the Service Bus-side counterpart to the Kafka consumer audit
+  bullet above — every message `ServiceBusConsumerHostedService<TMessage>`
+  receives gets an audit blob written unconditionally, before the inner
+  payload is deserialized (so it captures a poison payload too, unlike the
+  Kafka bullet above which only captures messages that successfully
+  deserialized). Content is the **raw** message body, *except* when
+  `BlobPath` was set and successfully rehydrated (§2's claim-check bullet):
+  in that case the envelope — now carrying its real payload in the
+  rehydrated `ReflexSchema` — is serialized as the audit content instead,
+  so the audit trail is self-contained rather than just a pointer into
+  `BlobStorageOptions.LargePayloadContainerName`; a rehydration failure
+  falls back to the raw wire bytes here (the failure itself is handled as a
+  poison payload, per §2). Named
+  `{CorrelationId}/ServiceBus/{ServiceBusQueueName}/{timestamp}_{guid}.json`
+  — a fourth folder shape this container now holds, alongside the general
+  request/response audit's `{yyyy}/{MM}/{dd}/...`, the Kafka consumer's
+  `{correlationId}/{ConsumerHostedServiceName}/{SchemaName}/...`, and the
+  Cosmos-mutation archive's `{CorrelationId}/Entity/{ContainerName}/...`
+  below — don't assume every blob under `request-audit` follows any single
+  one of them.
 - **Cold tier, Cosmos-mutation audit archive** (`audit-archive` container,
   `BlobStorageOptions.AuditArchiveContainerName`, **plus** a second copy in
   the `request-audit` container, `BlobStorageOptions.RequestAuditContainerName`):
@@ -681,7 +838,7 @@ never assume the two containers share an account or a client.
   against `AuditEntry.ContainerName`) before it ever reaches the channel, so
   neither sink ever sees it.
 - All five go through Polly (§3) for transient fault handling — the Kafka
-  consumer's own audit writes (`ConsumerHostedService.WriteBlobAsync`)
+  consumer's own audit writes (`KafkaConsumerHostedServiceBase.WriteBlobAsync`)
   additionally treat a Blob Storage outage (after Polly's retries are
   exhausted) as non-fatal: logged and swallowed, so a Blob Storage outage
   doesn't block the dedup check or the relay itself. The audit trail is a
@@ -769,7 +926,7 @@ treating them as interchangeable concurrency knobs:
   (a Kafka poll loop) is paired with a slower, I/O-bound consumer (a
   publish/write call), and you want several concurrent workers draining
   one shared queue rather than processing strictly one item at a time.
-  `ConsumerHostedService` (§1) is this repo's worked example:
+  `KafkaConsumerHostedServiceBase` (§1) is this repo's worked example:
   bounded `Channel` between the poll loop and `WorkerCount` workers.
 
 **Default to horizontal scaling first.** More Kafka partitions and more

@@ -7,7 +7,7 @@ namespace IIS.WMS.Consumer.Infrastructure;
 /// Bound from the <c>Application</c> configuration section - this service's own identity, as opposed
 /// to <see cref="ICorrelationContext.AppId"/>, which is the <i>producing</i> application's id read off
 /// the Kafka <c>App-Id</c> header (integration-resiliency.instructions.md §4). <see cref="AppId"/>
-/// is the fallback <see cref="ConsumerHostedService"/> uses when that header is missing or empty, so a
+/// is the fallback <see cref="KafkaConsumerHostedServiceBase"/> uses when that header is missing or empty, so a
 /// relayed event never carries a blank <c>AppId</c> downstream.
 /// </summary>
 public sealed class ApplicationOptions

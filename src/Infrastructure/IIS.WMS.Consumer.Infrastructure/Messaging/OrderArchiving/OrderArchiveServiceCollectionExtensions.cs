@@ -9,7 +9,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 /// <summary>
 /// Registers the background OrderArchive pipeline: the bounded <see cref="Channel{T}"/>,
 /// <see cref="IOrderArchiveWriter"/>, and <see cref="OrderArchiveBackgroundService"/> - decouples
-/// <c>ConsumerHostedService</c>'s per-message Kafka-worker latency from the Cosmos round-trip an
+/// <c>KafkaConsumerHostedServiceBase</c>'s per-message Kafka-worker latency from the Cosmos round-trip an
 /// <see cref="OrderArchive"/> upsert costs (integration-resiliency.instructions.md §6), mirroring
 /// <c>AuditServiceCollectionExtensions.AddAuditTrail</c>.
 /// </summary>

@@ -42,19 +42,19 @@ public sealed class BulkImportServiceBusConsumerHostedService : BackgroundServic
     /// <param name="client">Service Bus client the processor is built from, on first start (see <see cref="ExecuteAsync"/>) - the same client <see cref="ServiceBusConsumerHostedService"/> uses, just a different queue.</param>
     /// <param name="options">Queue name and concurrency settings.</param>
     /// <param name="scopeFactory">Creates a DI scope per message, since the hosted service itself is a singleton but <see cref="IBulkInventoryImportService"/> is scoped.</param>
-    /// <param name="healthState">This consumer's own keyed <see cref="ServiceBusHealthState"/> instance.</param>
+    /// <param name="healthStateRegistry">Process-wide registry this consumer resolves its own <see cref="ServiceBusHealthState"/> from, keyed by <see cref="BulkImportServiceBusConsumerOptions.QueueName"/>.</param>
     /// <param name="logger">Logger for processing/error events.</param>
     public BulkImportServiceBusConsumerHostedService(
         ServiceBusClient client,
         IOptions<BulkImportServiceBusConsumerOptions> options,
         IServiceScopeFactory scopeFactory,
-        [FromKeyedServices(MessagingServiceCollectionExtensions.BulkInventoryImportServiceBusKey)] ServiceBusHealthState healthState,
+        ServiceBusHealthStateRegistry healthStateRegistry,
         ILogger<BulkImportServiceBusConsumerHostedService> logger)
     {
         this.client = client;
         this.options = options.Value;
         this.scopeFactory = scopeFactory;
-        this.healthState = healthState;
+        healthState = healthStateRegistry.GetOrAdd(this.options.QueueName);
         this.logger = logger;
     }
 

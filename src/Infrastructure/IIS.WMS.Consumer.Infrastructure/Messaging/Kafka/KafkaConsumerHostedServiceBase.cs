@@ -98,7 +98,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Service Bus consumer dedupe (§2).
 /// </para>
 /// </remarks>
-public abstract class ConsumerHostedService : BackgroundService
+public abstract class KafkaConsumerHostedServiceBase : BackgroundService
 {
     #region Constants and shared static state
 
@@ -128,7 +128,7 @@ public abstract class ConsumerHostedService : BackgroundService
 
     /// <summary>
     /// Type-erased per-schema entry - build one via <see cref="CreateSchemaHandler{TValue}"/>, never
-    /// implement this directly. Lets <see cref="ConsumerHostedService"/> store handlers for
+    /// implement this directly. Lets <see cref="KafkaConsumerHostedServiceBase"/> store handlers for
     /// structurally unrelated schemas (different Avro records, or JSON shapes) in one dictionary
     /// without itself being generic over any single one of them.
     /// </summary>
@@ -167,7 +167,7 @@ public abstract class ConsumerHostedService : BackgroundService
         /// <summary>
         /// Computes this schema's <c>OrderArchive</c> category key for a previously-deserialized
         /// value, or <see langword="null"/>/empty if this schema doesn't archive to Cosmos before
-        /// publishing - see <see cref="ConsumerHostedService.CreateSchemaHandler{TAvro,TValue}"/>'s
+        /// publishing - see <see cref="KafkaConsumerHostedServiceBase.CreateSchemaHandler{TAvro,TValue}"/>'s
         /// <c>getOrderArchiveKey</c> parameter.
         /// </summary>
         string? GetOrderArchiveKey(object value);
@@ -444,7 +444,7 @@ public abstract class ConsumerHostedService : BackgroundService
     /// this constructor's own argument list. This is also why <see cref="ConsumerHealthState"/> is not a
     /// constructor parameter here - see <see cref="RegisterSchemaHandlers"/> and <see cref="GetHealthState"/>.
     /// </remarks>
-    protected ConsumerHostedService(
+    protected KafkaConsumerHostedServiceBase(
         ConsumerOptions options,
         ConsumerRelayInfrastructure infrastructure,
         ILogger logger,
@@ -537,7 +537,7 @@ public abstract class ConsumerHostedService : BackgroundService
     private static string DeriveConsumerName(Type type)
     {
         return type.Name;
-        //const string Suffix = "ConsumerHostedService";
+        //const string Suffix = "KafkaConsumerHostedServiceBase";
         //return type.Name.EndsWith(Suffix, StringComparison.Ordinal) ? type.Name[..^Suffix.Length] : type.Name;
     }
 

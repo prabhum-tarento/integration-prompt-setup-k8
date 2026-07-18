@@ -79,7 +79,7 @@ public sealed class NexusDeduplicationService(
 
     /// <summary>
     /// Debug-level completion log for one <see cref="IsDuplicateAsync"/> call - owned here rather than
-    /// by <c>ConsumerHostedService</c>, which only needs the elapsed duration itself (folded into its
+    /// by <c>KafkaConsumerHostedServiceBase</c>, which only needs the elapsed duration itself (folded into its
     /// own per-message "relayed" summary log line), not a duplicate log line per call.
     /// </summary>
     private void LogCompleted(string compositeDeduplicationId, string correlationId, TimeSpan elapsed, bool isDuplicate) =>

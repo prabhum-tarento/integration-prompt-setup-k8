@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// Correctness tests for <see cref="OrderArchiveWriter"/> - the non-blocking channel hand-off
-/// <c>ConsumerHostedService</c> enqueues an <see cref="OrderArchive"/> onto instead of upserting to
+/// <c>KafkaConsumerHostedServiceBase</c> enqueues an <see cref="OrderArchive"/> onto instead of upserting to
 /// Cosmos inline.
 /// </summary>
 public class OrderArchiveWriterTests

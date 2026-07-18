@@ -7,9 +7,9 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// Unhealthy if the paired consumer event type's last successful poll exceeds a staleness window - an
 /// idle topic isn't a failure, so this does not require a message to have been processed
 /// (integration-resiliency.instructions.md §8). One instance is registered per event type a consumer
-/// registers via <see cref="ConsumerHostedService.RegisterSchemaHandlers"/> (see
+/// registers via <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/> (see
 /// <c>MessagingServiceCollectionExtensions.AddKafkaConsumer</c>, which resolves each event type's own
-/// <see cref="ConsumerHealthState"/> off the consumer via <see cref="ConsumerHostedService.GetHealthState"/>
+/// <see cref="ConsumerHealthState"/> off the consumer via <see cref="KafkaConsumerHostedServiceBase.GetHealthState"/>
 /// at check time), each given its own display name for the log messages below.
 /// </summary>
 public sealed class ConsumerHealthCheck(ConsumerHealthState state, string consumerName, ILogger<ConsumerHealthCheck> logger)

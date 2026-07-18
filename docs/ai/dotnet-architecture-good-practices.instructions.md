@@ -112,6 +112,15 @@ falls on, default to running the full process rather than skipping it.
   (e.g., `InsufficientStockException`); translate to Problem Details only at
   the Api boundary (see
   [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md)).
+  Not every exception thrown in this codebase is a Domain invariant, though:
+  `ConcurrencyException` signals an optimistic-concurrency conflict at the
+  storage/write boundary (a Cosmos ETag mismatch surfaced after the retry
+  loop in `InventoryEventService` is exhausted), not a violated business
+  rule, so it lives as a plain `Exception` subclass in `IIS.WMS.Common`
+  (`IIS.WMS.Common.Exceptions`) alongside `TemplateCompilationException`,
+  which follows the same shape — cross-cutting, not Domain-owned. Domain's
+  own exceptions remain reserved for invariant violations like
+  `InsufficientStockException`.
 
 ## 2. Required process for Domain/Application changes
 

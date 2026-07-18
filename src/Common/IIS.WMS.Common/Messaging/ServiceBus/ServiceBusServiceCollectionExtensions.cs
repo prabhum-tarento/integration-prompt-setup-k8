@@ -13,11 +13,13 @@ namespace IIS.WMS.Common.Messaging.ServiceBus;
 /// Consumer project's session-enabled inventory-events queue and non-session bulk-import queue today,
 /// and the planned Producer project's own Service Bus consumption tomorrow. Registers the shared
 /// <see cref="ServiceBusClient"/>/<see cref="ServiceBusAdministrationClient"/>, binds
-/// <see cref="ServiceBusConsumerOptions"/>/<see cref="BulkImportServiceBusConsumerOptions"/>, and
-/// registers <see cref="ICorrelationContext"/> - what's deliberately left out (the concrete hosted
-/// services, their keyed <see cref="ServiceBusHealthState"/> instances, and health-check
-/// registrations) stays with whichever project owns the business logic that reads from the queue,
-/// since that's where the queue names and consumer-specific wiring are known.
+/// <see cref="ServiceBusConsumerOptions"/>/<see cref="BulkImportServiceBusConsumerOptions"/>, registers
+/// <see cref="ICorrelationContext"/>, and registers the single process-wide
+/// <see cref="ServiceBusHealthStateRegistry"/> every consumer resolves its own
+/// <see cref="ServiceBusHealthState"/> from, keyed by queue name - what's deliberately left out (the
+/// concrete hosted services and health-check registrations) stays with whichever project owns the
+/// business logic that reads from the queue, since that's where the queue names and consumer-specific
+/// wiring are known.
 /// </summary>
 public static class ServiceBusServiceCollectionExtensions
 {
@@ -31,6 +33,8 @@ public static class ServiceBusServiceCollectionExtensions
     public static IServiceCollection AddServiceBusConsumerInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<ICorrelationContext, CorrelationContext>();
+
+        services.AddSingleton<ServiceBusHealthStateRegistry>();
 
         services.Configure<ServiceBusConsumerOptions>(configuration.GetSection(ServiceBusConsumerOptions.SectionName));
         services.Configure<BulkImportServiceBusConsumerOptions>(

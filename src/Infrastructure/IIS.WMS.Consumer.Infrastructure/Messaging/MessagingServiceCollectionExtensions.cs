@@ -7,6 +7,7 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
 using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus.Handlers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
@@ -18,15 +19,15 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 /// <see cref="Kafka.KafkaConsumerHostedService"/>, the Avro/Schema-Registry
 /// <see cref="Kafka.InventoryStateChangedConsumerHostedService"/>, and the high-volume
 /// <see cref="Kafka.BulkInventoryImportConsumerHostedService"/>, all built on the shared
-/// <see cref="Kafka.ConsumerHostedService"/>) and both Service Bus → Cosmos DB consumers (the
-/// session-enabled <see cref="ServiceBus.ServiceBusConsumerHostedService"/> and the non-session
+/// <see cref="Kafka.KafkaConsumerHostedServiceBase"/>) and both Service Bus → Cosmos DB consumers (the
+/// session-enabled <see cref="ServiceBus.InventoryStateChangedServiceBusHostedService"/> and the non-session
 /// <see cref="ServiceBus.BulkImportServiceBusConsumerHostedService"/>)
 /// (integration-resiliency.instructions.md). Each event type a Kafka consumer registers gets its own
 /// <see cref="ConsumerHealthState"/>, built internally by that consumer (see
-/// <see cref="ConsumerHostedService.RegisterSchemaHandlers"/>) rather than injected here - a stall on
+/// <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/>) rather than injected here - a stall on
 /// one event type must not be masked by another still polling. Each consumer as a whole can still be
 /// turned off independently via its own <c>Enabled</c> configuration key,
-/// checked by <see cref="ConsumerHostedService"/> at startup - adding a further schema
+/// checked by <see cref="KafkaConsumerHostedServiceBase"/> at startup - adding a further schema
 /// consumer means adding its options/hosted-service/health-check trio here, not touching the
 /// shared base class - the Schema Registry wiring itself is shared via the singleton
 /// <see cref="Kafka.ISpecificRecordDeserializerFactory"/> registered below, so that consumer would
@@ -158,7 +159,7 @@ public static class MessagingServiceCollectionExtensions
         {
             AddKafkaConsumer<KafkaConsumerHostedService>(
                 services,
-                (ConsumerHostedService.DefaultEventType, "kafka-consumer", "InventoryEvents Kafka consumer health"));
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "kafka-consumer", "InventoryEvents Kafka consumer health"));
         }
     }
 
@@ -205,7 +206,7 @@ public static class MessagingServiceCollectionExtensions
         {
             AddKafkaConsumer<BulkInventoryImportConsumerHostedService>(
                 services,
-                (ConsumerHostedService.DefaultEventType, "bulk-import-consumer", "BulkInventoryImport Kafka consumer health"));
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "bulk-import-consumer", "BulkInventoryImport Kafka consumer health"));
         }
     }
 
@@ -216,9 +217,25 @@ public static class MessagingServiceCollectionExtensions
     public static IServiceCollection AddServiceBusConsumers(this IServiceCollection services, IConfiguration configuration)
     {
         // Shared Service Bus consuming base setup (client/admin client, options binding,
-        // ICorrelationContext) - common to every project that consumes off a Service Bus queue, see
-        // ServiceBusServiceCollectionExtensions's own remarks.
+        // ICorrelationContext, ServiceBusHealthStateRegistry) - common to every project that consumes
+        // off a Service Bus queue, see ServiceBusServiceCollectionExtensions's own remarks.
         services.AddServiceBusConsumerInfrastructure(configuration);
+
+        // Facade bundling the plumbing dependencies every ServiceBusConsumerHostedService<TMessage>
+        // needs and which never vary between queues - see ServiceBusConsumerDependencies's own doc
+        // comment for why this exists and what's deliberately excluded from it (the Kafka-side mirror
+        // is ConsumerRelayInfrastructure, registered the same way above in AddKafkaConsumers).
+        services.AddSingleton<ServiceBusConsumerDependencies>();
+
+        // No parent above ServiceBus level to fall back to, so this is the one place "unset" resolves
+        // to a hardcoded default rather than a fallback lookup - preserves today's session-processor
+        // behavior for a queue that doesn't override these at its own level. Mirrors
+        // AddKafkaConsumers' own Kafka-level PostConfigure bottom-out above.
+        services.PostConfigure<ServiceBusConsumerOptions>(options =>
+        {
+            options.MaxConcurrentSessions ??= 8;
+            options.MaxConcurrentCallsPerSession ??= 1;
+        });
 
         // Read once, directly off configuration - mirrors AddKafkaConsumers' own functionsFilter read
         // below, same "gates registration, independent of any per-consumer enable flag" semantics, just
@@ -232,12 +249,6 @@ public static class MessagingServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>
-    /// Keyed, not a single shared singleton - the bulk-import consumer registered by
-    /// <see cref="RegisterBulkImportServiceBusConsumer"/> gets its own <see cref="ServiceBusHealthState"/>
-    /// instance, and a plain (unkeyed) second <c>AddSingleton&lt;ServiceBusHealthState&gt;()</c> would
-    /// silently collide (last registration wins for unkeyed resolution).
-    /// </summary>
     /// <param name="services">The service collection to register against.</param>
     /// <param name="configuration">Application configuration, read for the <c>ServiceBus</c> section.</param>
     /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
@@ -250,8 +261,15 @@ public static class MessagingServiceCollectionExtensions
             return;
         }
 
-        services.AddKeyedSingleton<ServiceBusHealthState>(InventoryEventsServiceBusKey);
-        services.AddHostedService<ServiceBusConsumerHostedService>();
+        services.Configure<InventoryStateChangedServiceBusConsumerOptions>(
+            configuration.GetSection(InventoryStateChangedServiceBusConsumerOptions.SectionName));
+
+        // Queue level first, ServiceBus level as fallback (InventoryStateChangedServiceBusConsumerOptions.ApplyServiceBusLevelDefaults).
+        // Resolving IOptions<ServiceBusConsumerOptions> here is what runs its PostConfigure above
+        // first, so MaxConcurrentSessions/MaxConcurrentCallsPerSession are never null by this point.
+        services.AddOptions<InventoryStateChangedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
 
         // ServiceBusHealthCheck takes a queue name directly (not IOptions<ServiceBusConsumerOptions>)
         // so both queues can share the one check type - see its own doc comment. Registered here,
@@ -259,6 +277,14 @@ public static class MessagingServiceCollectionExtensions
         // mirroring how each Kafka consumer's health check is registered alongside its hosted service.
         var serviceBusQueueName = configuration.GetSection(ServiceBusConsumerOptions.SectionName).Get<ServiceBusConsumerOptions>()?.QueueName
             ?? throw new InvalidOperationException($"Missing '{ServiceBusConsumerOptions.SectionName}:{nameof(ServiceBusConsumerOptions.QueueName)}'.");
+
+        // ActivatorUtilities.CreateInstance is needed here (rather than a plain AddHostedService<T>())
+        // because queueName is a plain constructor string with no attribute DI can resolve it from -
+        // every other constructor parameter is filled from the container as usual.
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<InventoryStateChangedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+        services.AddScoped<IInventoryStateChangedHandler, InventoryStateChangedHandler>();
+
         services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
     }
 
@@ -274,7 +300,6 @@ public static class MessagingServiceCollectionExtensions
             return;
         }
 
-        services.AddKeyedSingleton<ServiceBusHealthState>(BulkInventoryImportServiceBusKey);
         services.AddHostedService<BulkImportServiceBusConsumerHostedService>();
 
         var bulkImportQueueName = configuration.GetSection(BulkImportServiceBusConsumerOptions.SectionName).Get<BulkImportServiceBusConsumerOptions>()?.QueueName
@@ -300,17 +325,17 @@ public static class MessagingServiceCollectionExtensions
     /// the health checks below can reach the same running instance - plus one
     /// <see cref="ConsumerHealthCheck"/> per <paramref name="eventTypeHealthChecks"/> entry. Each
     /// check's <see cref="ConsumerHealthState"/> is resolved off that consumer instance via
-    /// <see cref="ConsumerHostedService.GetHealthState"/> lazily, at check-execution time rather than
-    /// here: <see cref="ConsumerHostedService.RegisterSchemaHandlers"/> (which builds those states)
+    /// <see cref="KafkaConsumerHostedServiceBase.GetHealthState"/> lazily, at check-execution time rather than
+    /// here: <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/> (which builds those states)
     /// doesn't run until <typeparamref name="THostedService"/>'s own constructor does, so there is
     /// nothing yet to bind a health check to when this method runs at startup - by the time anything
     /// actually calls <c>/health/ready</c>, the host has already constructed every hosted service.
     /// </summary>
-    /// <typeparam name="THostedService">The concrete <see cref="ConsumerHostedService"/> subclass to register.</typeparam>
+    /// <typeparam name="THostedService">The concrete <see cref="KafkaConsumerHostedServiceBase"/> subclass to register.</typeparam>
     /// <param name="services">The service collection to register against.</param>
     /// <param name="eventTypeHealthChecks">
-    /// One entry per event type this consumer passes to its own <see cref="ConsumerHostedService.RegisterSchemaHandlers"/>
-    /// call (<see cref="ConsumerHostedService.DefaultEventType"/> for a consumer that registers exactly
+    /// One entry per event type this consumer passes to its own <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/>
+    /// call (<see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/> for a consumer that registers exactly
     /// one, regardless of the Kafka <c>Type</c> header) paired with the health check name to register
     /// it under and the display name used in its log lines/description. Always tagged
     /// <c>kafka-consumer</c> - every Kafka consumer shares that pod in the target topology, see
@@ -319,7 +344,7 @@ public static class MessagingServiceCollectionExtensions
     private static void AddKafkaConsumer<THostedService>(
         IServiceCollection services,
         params (string EventType, string HealthCheckName, string DisplayName)[] eventTypeHealthChecks)
-        where THostedService : ConsumerHostedService
+        where THostedService : KafkaConsumerHostedServiceBase
     {
         services.AddSingleton<THostedService>();
         services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<THostedService>());

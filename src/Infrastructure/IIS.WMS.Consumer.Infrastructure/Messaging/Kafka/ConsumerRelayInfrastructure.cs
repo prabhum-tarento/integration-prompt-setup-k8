@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 
 /// <summary>
-/// Facade bundling the dependencies every <see cref="ConsumerHostedService"/> subclass needs and
+/// Facade bundling the dependencies every <see cref="KafkaConsumerHostedServiceBase"/> subclass needs and
 /// which never vary from one consumer to the next - the shared <see cref="IServiceBusRelayPublisher"/>,
 /// hot/cold <see cref="IFileStore"/> pair, <see cref="BlobStorageOptions"/>,
 /// <see cref="IDeduplicationService"/>, <see cref="IOrderArchiveWriter"/>, <see cref="IServiceScopeFactory"/>,
@@ -19,7 +19,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 /// category name), and consumer-specific collaborators like <see cref="ISpecificRecordDeserializerFactory"/>
 /// or a schema's own <c>IValidator&lt;T&gt;</c>. <see cref="ConsumerHealthState"/> isn't here either,
 /// but for a different reason - it's no longer a constructor dependency at all, see
-/// <see cref="ConsumerHostedService.RegisterSchemaHandlers"/>.
+/// <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/>.
 /// Registered as a singleton - safe to share since every member is itself already a singleton.
 /// </summary>
 public sealed class ConsumerRelayInfrastructure(
@@ -57,6 +57,6 @@ public sealed class ConsumerRelayInfrastructure(
     /// <summary>Creates the per-message DI scope used to resolve <see cref="IIS.WMS.Common.Correlation.ICorrelationContext"/>, since the hosted service itself is a singleton but that service is scoped.</summary>
     public IServiceScopeFactory ScopeFactory { get; } = scopeFactory;
 
-    /// <summary>This service's own identity - <see cref="ApplicationOptions.AppId"/> is the fallback <see cref="ConsumerHostedService"/> uses when a relayed message's Kafka <c>App-Id</c> header is missing or empty.</summary>
+    /// <summary>This service's own identity - <see cref="ApplicationOptions.AppId"/> is the fallback <see cref="KafkaConsumerHostedServiceBase"/> uses when a relayed message's Kafka <c>App-Id</c> header is missing or empty.</summary>
     public ApplicationOptions ApplicationOptions { get; } = applicationOptions.Value;
 }

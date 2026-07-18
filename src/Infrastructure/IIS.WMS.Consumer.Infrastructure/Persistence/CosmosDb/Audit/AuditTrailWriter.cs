@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 /// <inheritdoc cref="IAuditTrailWriter"/>
 /// <remarks>
 /// Wraps the bounded <see cref="Channel{T}"/> registered by <c>AuditServiceCollectionExtensions</c> -
-/// the same producer/consumer-decoupling pattern <c>ConsumerHostedService</c> uses for its own worker
+/// the same producer/consumer-decoupling pattern <c>KafkaConsumerHostedServiceBase</c> uses for its own worker
 /// pool (integration-resiliency.instructions.md §6), here decoupling a Cosmos mutation from the
 /// (slower, Cosmos-round-trip-bound) audit write. <see cref="Enqueue"/> uses <see cref="ChannelWriter{T}.TryWrite"/>,
 /// never <c>WriteAsync</c> - <c>TryWrite</c> never blocks, which is what makes audit capture genuinely

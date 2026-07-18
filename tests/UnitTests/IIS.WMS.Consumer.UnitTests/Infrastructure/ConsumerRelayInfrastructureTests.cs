@@ -13,7 +13,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// Correctness tests for <see cref="ConsumerRelayInfrastructure"/> - a plain facade bundling the
-/// dependencies every <see cref="ConsumerHostedService"/> subclass needs, so these only need to prove
+/// dependencies every <see cref="KafkaConsumerHostedServiceBase"/> subclass needs, so these only need to prove
 /// each constructor argument surfaces unchanged on the matching property (integration-resiliency
 /// .instructions.md §1's "cut constructor over-injection" rationale).
 /// </summary>
