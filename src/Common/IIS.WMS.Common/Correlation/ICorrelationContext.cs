@@ -34,6 +34,13 @@ public interface ICorrelationContext
     /// </summary>
     string Module { get; }
 
+    /// <summary>
+    /// The Service Bus <c>DeliveryCount</c> for the current message, or <c>1</c> before
+    /// <see cref="Set(string, string, IReadOnlyList{string}, LogCriteria, string, int)"/> has been
+    /// called - only populated at the Service Bus consumer boundary.
+    /// </summary>
+    int DeliveryCount { get; }
+
     /// <summary>Sets the correlation id for the remainder of this scope. Called exactly once, at the HTTP or Service Bus consumer boundary.</summary>
     void Set(string correlationId);
 
@@ -55,4 +62,18 @@ public interface ICorrelationContext
     /// <param name="logLevel">The consuming class's declared <see cref="LogLevelCriteriaAttribute.LogLevel"/>.</param>
     /// <param name="module">The consuming class's declared <see cref="ModuleAttribute.Name"/>.</param>
     void Set(string correlationId, string appId, IReadOnlyList<string> types, LogCriteria logLevel, string module);
+
+    /// <summary>
+    /// Sets the correlation id, app id, event/consumer types, this consumer's own declared log
+    /// metadata (<see cref="LogLevelCriteriaAttribute"/>/<see cref="ModuleAttribute"/>), and the
+    /// Service Bus delivery count for the remainder of this scope. Called exactly once, at the
+    /// Service Bus consumer boundary.
+    /// </summary>
+    /// <param name="correlationId">The message's correlation id.</param>
+    /// <param name="appId">The producing application's id.</param>
+    /// <param name="types">The event type and the relaying consumer's name.</param>
+    /// <param name="logLevel">The consuming class's declared <see cref="LogLevelCriteriaAttribute.LogLevel"/>.</param>
+    /// <param name="module">The consuming class's declared <see cref="ModuleAttribute.Name"/>.</param>
+    /// <param name="deliveryCount">The Service Bus <c>DeliveryCount</c> for the current message.</param>
+    void Set(string correlationId, string appId, IReadOnlyList<string> types, LogCriteria logLevel, string module, int deliveryCount);
 }

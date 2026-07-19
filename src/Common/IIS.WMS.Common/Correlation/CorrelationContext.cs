@@ -23,6 +23,9 @@ public sealed class CorrelationContext : ICorrelationContext
     public string Module { get; private set; } = string.Empty;
 
     /// <inheritdoc />
+    public int DeliveryCount { get; private set; } = 1;
+
+    /// <inheritdoc />
     public void Set(string correlationId)
     {
         CorrelationId = correlationId;
@@ -44,5 +47,16 @@ public sealed class CorrelationContext : ICorrelationContext
         Types = types;
         LogLevel = logLevel;
         Module = module;
+    }
+
+    /// <inheritdoc />
+    public void Set(string correlationId, string appId, IReadOnlyList<string> types, LogCriteria logLevel, string module, int deliveryCount)
+    {
+        CorrelationId = correlationId;
+        AppId = appId;
+        Types = types;
+        LogLevel = logLevel;
+        Module = module;
+        DeliveryCount = deliveryCount;
     }
 }

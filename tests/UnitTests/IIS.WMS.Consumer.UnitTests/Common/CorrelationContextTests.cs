@@ -21,6 +21,7 @@ public class CorrelationContextTests
         Assert.Empty(context.Types);
         Assert.Equal(LogCriteria.Default, context.LogLevel);
         Assert.Equal(string.Empty, context.Module);
+        Assert.Equal(1, context.DeliveryCount);
     }
 
     [Fact(DisplayName = "Set(correlationId) sets only the correlation id, leaving every other member at its default")]
@@ -36,6 +37,7 @@ public class CorrelationContextTests
         Assert.Empty(context.Types);
         Assert.Equal(LogCriteria.Default, context.LogLevel);
         Assert.Equal(string.Empty, context.Module);
+        Assert.Equal(1, context.DeliveryCount);
     }
 
     [Fact(DisplayName = "Set(correlationId, appId, types) sets the three Kafka-boundary members, leaving log metadata at its default")]
@@ -86,6 +88,23 @@ public class CorrelationContextTests
         Assert.Equal("InventoryStateChanged", context.Type);
         Assert.Equal(LogCriteria.High, context.LogLevel);
         Assert.Equal("Inventory", context.Module);
+        Assert.Equal(1, context.DeliveryCount);
+    }
+
+    [Fact(DisplayName = "Set(correlationId, appId, types, logLevel, module, deliveryCount) sets every member including DeliveryCount")]
+    public void Set_SixArgOverload_SetsEveryMemberIncludingDeliveryCount()
+    {
+        var context = new CorrelationContext();
+
+        context.Set("corr-1", "app-1", ["InventoryStateChanged"], LogCriteria.High, "Inventory", 3);
+
+        Assert.Equal("corr-1", context.CorrelationId);
+        Assert.Equal("app-1", context.AppId);
+        Assert.Equal(["InventoryStateChanged"], context.Types);
+        Assert.Equal("InventoryStateChanged", context.Type);
+        Assert.Equal(LogCriteria.High, context.LogLevel);
+        Assert.Equal("Inventory", context.Module);
+        Assert.Equal(3, context.DeliveryCount);
     }
 
     [Fact(DisplayName = "A later Set call overwrites values from an earlier one")]
@@ -93,13 +112,14 @@ public class CorrelationContextTests
     {
         var context = new CorrelationContext();
 
-        context.Set("corr-1", "app-1", ["First"], LogCriteria.High, "Inventory");
-        context.Set("corr-2", "app-2", ["Second"], LogCriteria.Low, "BulkImport");
+        context.Set("corr-1", "app-1", ["First"], LogCriteria.High, "Inventory", 2);
+        context.Set("corr-2", "app-2", ["Second"], LogCriteria.Low, "BulkImport", 5);
 
         Assert.Equal("corr-2", context.CorrelationId);
         Assert.Equal("app-2", context.AppId);
         Assert.Equal(["Second"], context.Types);
         Assert.Equal(LogCriteria.Low, context.LogLevel);
         Assert.Equal("BulkImport", context.Module);
+        Assert.Equal(5, context.DeliveryCount);
     }
 }

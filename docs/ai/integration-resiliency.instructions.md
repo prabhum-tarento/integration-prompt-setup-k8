@@ -368,22 +368,30 @@ var processor = client.CreateSessionProcessor(queueName, new ServiceBusSessionPr
 `MaxConcurrentSessions`/`MaxConcurrentCallsPerSession` are configurable,
 resolved queue-level-first, ServiceBus-level-fallback — the Service Bus
 mirror of §1's Kafka event-level/Kafka-level fallback
-(`ConsumerOptions.ApplyKafkaLevelDefaults`). The top-level `ServiceBus`
-section (`ServiceBusConsumerOptions`) carries the fallback values, bottomed
-out to today's hardcoded 8/1 via a `PostConfigure<ServiceBusConsumerOptions>`
-in `AddServiceBusConsumers` if left unset in configuration. A queue-level
+(`ConsumerOptions.ApplyKafkaLevelDefaults`). Both settings live on the
+shared abstract `ServiceBusConsumerOptionsBase`, which the top-level
+`ServiceBusConsumerOptions` (the `ServiceBus` section) and every queue-level
 options type (e.g. `InventoryStateChangedServiceBusConsumerOptions`, bound
-from `ServiceBus:InventoryStateChanged`) merges onto that fallback via its
-own `ApplyServiceBusLevelDefaults(ServiceBusConsumerOptions)` — queue level
+from `ServiceBus:InventoryStateChanged`) both extend — a future
+session-processor setting needing the same fallback treatment is added once
+on the base type rather than duplicated across every options type. The
+top-level section carries the fallback values, bottomed out to today's
+hardcoded 8/1 via a `PostConfigure<ServiceBusConsumerOptions>` in
+`AddServiceBusConsumers` if left unset in configuration. A queue-level
+options type merges onto that fallback via its own
+`ApplyServiceBusLevelDefaults(ServiceBusConsumerOptions)` — queue level
 wins wherever it's configured, ServiceBus level is only the fallback. The
-resolved pair is passed into `ServiceBusConsumerHostedService<TMessage>`'s
-constructor as two plain `int`s (the base class itself stays queue-agnostic
-and does not read configuration directly), and exposed as its
-`MaxConcurrentSessions`/`MaxConcurrentCallsPerSession` protected properties,
-which is what `ExecuteAsync` reads above. `AutoCompleteMessages` stays
-hardcoded `false` and `ReceiveMode` stays the SDK default (`PeekLock`) —
-neither is configurable, since the whole complete/abandon/dead-letter
-outcome model below depends on manual settlement.
+resolved queue-level options instance (typed as `ServiceBusConsumerOptionsBase`)
+is passed whole into `ServiceBusConsumerHostedService<TMessage>`'s
+constructor (the base class itself stays queue-agnostic and does not read
+configuration directly), which reads `MaxConcurrentSessions`/
+`MaxConcurrentCallsPerSession` off it (falling back to 8/1 defensively, the
+same as an options POCO built directly in a unit test would need) and
+exposes them as its own protected properties, which is what `ExecuteAsync`
+reads above. `AutoCompleteMessages` stays hardcoded `false` and
+`ReceiveMode` stays the SDK default (`PeekLock`) — neither is configurable,
+since the whole complete/abandon/dead-letter outcome model below depends on
+manual settlement.
 
 - **Shape**: `ServiceBusConsumerHostedService<TMessage>` (the shared kernel,
   `IIS.WMS.Common`, not this Infrastructure project — shared so that a
@@ -396,7 +404,8 @@ outcome model below depends on manual settlement.
   `ServiceBusHealthStateRegistry`) plus the per-queue values that vary —
   `queueName` (exposed as the `QueueName` protected property, the single
   source of truth every internal reference reads instead of a duplicate
-  options-bound copy) and the two resolved concurrency `int`s — the same
+  options-bound copy) and the resolved `ServiceBusConsumerOptionsBase`
+  instance the concurrency properties are read from — the same
   plumbing-vs-per-queue split Kafka's `ConsumerRelayInfrastructure` uses.
   `HealthState` is not its own constructor parameter: the base class
   resolves it internally via `dependencies.HealthStateRegistry.GetOrAdd(queueName)`,

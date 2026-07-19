@@ -490,3 +490,4 @@ $RECYCLE.BIN/
 /.claude/settings.json
 /CoverageBaseline/report
 *.runsettings
+/.vs/slnx.sqlite

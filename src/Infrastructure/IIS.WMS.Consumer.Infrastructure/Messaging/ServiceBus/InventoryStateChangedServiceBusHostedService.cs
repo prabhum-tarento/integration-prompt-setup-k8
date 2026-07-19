@@ -1,3 +1,4 @@
+using IIS.WMS.Common.Correlation;
 using IIS.WMS.Common.Logging;
 using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Messaging.ServiceBus;
@@ -32,23 +33,18 @@ public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusCon
         string queueName,
         IOptions<InventoryStateChangedServiceBusConsumerOptions> eventOptions,
         ILogger<InventoryStateChangedServiceBusHostedService> logger)
-        : base(
-            dependencies,
-            queueName,
-            eventOptions.Value.MaxConcurrentSessions ?? 8,
-            eventOptions.Value.MaxConcurrentCallsPerSession ?? 1,
-            logger)
+        : base(dependencies, queueName, eventOptions.Value, logger)
     {
         scopeFactory = dependencies.ScopeFactory;
     }
 
     /// <inheritdoc/>
     protected override async Task ProcessMessageAsync(
-        InboundInventoryEventMessage message, ServiceBusRelayEnvelope envelope, string correlationId, CancellationToken cancellationToken)
+        InboundInventoryEventMessage message, ICorrelationContext correlationContext, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var handler = scope.ServiceProvider.GetRequiredService<IInventoryStateChangedHandler>();
 
-        await handler.HandleAsync(message, correlationId, cancellationToken);
+        await handler.HandleAsync(message, correlationContext.CorrelationId, cancellationToken);
     }
 }

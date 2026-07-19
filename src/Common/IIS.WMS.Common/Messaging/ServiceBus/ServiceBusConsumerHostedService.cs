@@ -22,7 +22,7 @@ namespace IIS.WMS.Common.Messaging.ServiceBus;
 /// <see cref="DeserializePayload"/> helper using this class's own <typeparamref name="TMessage"/>
 /// generic parameter - fixed at compile time by the derived class's declaration, so there is nothing
 /// for a derived class to override. A derived class supplies only
-/// <see cref="ProcessMessageAsync(TMessage, ServiceBusRelayEnvelope, string, CancellationToken)"/>
+/// <see cref="ProcessMessageAsync(TMessage, ICorrelationContext, CancellationToken)"/>
 /// instead of registering a schema-keyed handler map. Uses <see cref="ServiceBusSessionProcessor"/> -
 /// sessions guarantee in-order, single-active-consumer processing per aggregate key, which is what
 /// makes a derived handler's own concurrency-conflict retry loop (if any) a defensive backstop rather
@@ -67,14 +67,18 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
 
     /// <param name="dependencies">Plumbing dependencies shared by every Service Bus consumer - client, scope factory, hot/cold file stores, blob storage options, and the health-state registry.</param>
     /// <param name="queueName">Queue this consumer reads from - also the key used to resolve this consumer's <see cref="ServiceBusHealthState"/> from <paramref name="dependencies"/>'s registry.</param>
-    /// <param name="maxConcurrentSessions">Resolved value for <see cref="ServiceBusSessionProcessorOptions.MaxConcurrentSessions"/>.</param>
-    /// <param name="maxConcurrentCallsPerSession">Resolved value for <see cref="ServiceBusSessionProcessorOptions.MaxConcurrentCallsPerSession"/>.</param>
+    /// <param name="consumerOptions">
+    /// This queue's already-merged (queue-level-first, ServiceBus-level-fallback) session-processor
+    /// options - the same <see cref="ServiceBusConsumerOptionsBase"/> a derived class's own queue-level
+    /// options type extends, so a future shared setting only needs adding to
+    /// <see cref="ServiceBusConsumerOptionsBase"/> itself rather than to this constructor's parameter
+    /// list.
+    /// </param>
     /// <param name="logger">Logger for processing/error events.</param>
     protected ServiceBusConsumerHostedService(
         ServiceBusConsumerDependencies dependencies,
         string queueName,
-        int maxConcurrentSessions,
-        int maxConcurrentCallsPerSession,
+        ServiceBusConsumerOptionsBase consumerOptions,
         ILogger logger)
     {
         client = dependencies.Client;
@@ -84,15 +88,15 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
         coldFileStore = dependencies.ColdFileStore;
         blobStorageOptions = dependencies.BlobStorageOptions.Value;
         HealthState = dependencies.HealthStateRegistry.GetOrAdd(queueName);
-        MaxConcurrentSessions = maxConcurrentSessions;
-        MaxConcurrentCallsPerSession = maxConcurrentCallsPerSession;
+        MaxConcurrentSessions = consumerOptions.MaxConcurrentSessions ?? 8;
+        MaxConcurrentCallsPerSession = consumerOptions.MaxConcurrentCallsPerSession ?? 1;
         Logger = logger;
     }
 
     private static TMessage DeserializePayload(JsonElement reflexSchema) =>
         reflexSchema.Deserialize<TMessage>() ?? throw new JsonException("Deserialized payload was null.");
 
-    protected abstract Task ProcessMessageAsync(TMessage message, ServiceBusRelayEnvelope envelope, string correlationId, CancellationToken cancellationToken);
+    protected abstract Task ProcessMessageAsync(TMessage message, ICorrelationContext correlationContext, CancellationToken cancellationToken);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -160,11 +164,12 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
         var correlationId = ResolveCorrelationId(message, envelope);
 
         var (logLevel, module) = LogMetadataResolver.Resolve(GetType());
-        string[] types = envelope.Type is { Length: > 0 } envelopeType ? [envelopeType] : [];
+        string[] envelopeTypes = envelope.Type is { Length: > 0 } envelopeType ? [envelopeType] : [];
+        string[] types = [.. envelopeTypes, $"Msg-{message.DeliveryCount}_{message.MessageId}", GetType().Name];
 
         using var scope = ScopeFactory.CreateScope();
         var correlationContext = scope.ServiceProvider.GetRequiredService<ICorrelationContext>();
-        correlationContext.Set(correlationId, envelope.AppId ?? string.Empty, types, logLevel, module);
+        correlationContext.Set(correlationId, envelope.AppId ?? string.Empty, types, logLevel, module, message.DeliveryCount);
 
         using var logLevelLogContext = LogContext.PushProperty("LogLevel", logLevel);
         using var moduleLogContext = LogContext.PushProperty("Module", module);
@@ -198,7 +203,7 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
         }
 
         var processingStopwatch = Stopwatch.StartNew();
-        var outcome = await RunProcessMessageAsync(payload, envelope, message, correlationId, cancellationToken);
+        var outcome = await RunProcessMessageAsync(payload, correlationContext, message, correlationId, cancellationToken);
         var processingDuration = processingStopwatch.Elapsed;
 
         var durations = new ProcessingDurations(
@@ -293,7 +298,7 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
             ? propertyCorrelationId
             : envelope.CorrelationId is { Length: > 0 } envelopeCorrelationId
                 ? envelopeCorrelationId
-                : Guid.NewGuid().ToString();
+                : "-"+Guid.NewGuid().ToString();
 
     private async Task<ServiceBusMessageOutcome?> RunDynamicValidationAsync(
         IDynamicEventValidator dynamicEventValidator, IServiceProvider serviceProvider, TMessage payload,
@@ -322,11 +327,11 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
     }
 
     private async Task<ServiceBusMessageOutcome> RunProcessMessageAsync(
-        TMessage payload, ServiceBusRelayEnvelope envelope, ServiceBusReceivedMessage message, string correlationId, CancellationToken cancellationToken)
+        TMessage payload, ICorrelationContext correlationContext, ServiceBusReceivedMessage message, string correlationId, CancellationToken cancellationToken)
     {
         try
         {
-            await ProcessMessageAsync(payload, envelope, correlationId, cancellationToken);
+            await ProcessMessageAsync(payload, correlationContext, cancellationToken);
             return ServiceBusMessageOutcome.Completed;
         }
         catch (ConcurrencyException ex)

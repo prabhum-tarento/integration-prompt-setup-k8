@@ -30,7 +30,8 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 /// </summary>
 public class ServiceBusConsumerHostedServiceTests
 {
-    private static bool IsGuid(string? value) => !string.IsNullOrEmpty(value) && Guid.TryParse(value, out _);
+    private static bool IsGuid(string? value) =>
+        !string.IsNullOrEmpty(value) && Guid.TryParse(value.TrimStart('-'), out _);
 
     [Fact(DisplayName = "A Create event dispatches to CreateAsync and the outcome is Completed")]
     public async Task HandleMessageAsync_CreateEvent_DispatchesCreateAndReturnsCompleted()
@@ -355,7 +356,7 @@ public class ServiceBusConsumerHostedServiceTests
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
         correlationContext.Received(1).Set(
-            "corr-property", Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>());
+            "corr-property", Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>(), Arg.Any<int>());
     }
 
     [Fact(DisplayName = "Without a CorrelationId application property, the envelope's own correlation id is used")]
@@ -371,7 +372,7 @@ public class ServiceBusConsumerHostedServiceTests
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
         correlationContext.Received(1).Set(
-            "corr-envelope", Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>());
+            "corr-envelope", Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>(), Arg.Any<int>());
     }
 
     [Fact(DisplayName = "With neither a CorrelationId property nor an envelope correlation id, a fresh id is generated")]
@@ -388,7 +389,7 @@ public class ServiceBusConsumerHostedServiceTests
 
         correlationContext.Received(1).Set(
             Arg.Is<string>(id => IsGuid(id)),
-            Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>());
+            Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<LogCriteria>(), Arg.Any<string>(), Arg.Any<int>());
     }
 
     [Fact(DisplayName = "The envelope's Type is carried into the correlation context's Types list when present")]
@@ -403,8 +404,8 @@ public class ServiceBusConsumerHostedServiceTests
 
         correlationContext.Received(1).Set(
             Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Is<IReadOnlyList<string>>(types => types.Count == 1 && types[0] == "InventoryStateChanged"),
-            Arg.Any<LogCriteria>(), Arg.Any<string>());
+            Arg.Is<IReadOnlyList<string>>(types => types.Count == 3 && types[0] == "InventoryStateChanged"),
+            Arg.Any<LogCriteria>(), Arg.Any<string>(), Arg.Any<int>());
     }
 
     [Fact(DisplayName = "A missing envelope Type results in an empty Types list, and a missing AppId falls back to empty string")]
@@ -419,8 +420,23 @@ public class ServiceBusConsumerHostedServiceTests
 
         correlationContext.Received(1).Set(
             Arg.Any<string>(), string.Empty,
-            Arg.Is<IReadOnlyList<string>>(types => types.Count == 0),
-            Arg.Any<LogCriteria>(), Arg.Any<string>());
+            Arg.Is<IReadOnlyList<string>>(types => types.Count == 2),
+            Arg.Any<LogCriteria>(), Arg.Any<string>(), Arg.Any<int>());
+    }
+
+    [Fact(DisplayName = "The message's DeliveryCount is carried into the correlation context")]
+    public async Task HandleMessageAsync_AnyMessage_PassesDeliveryCountToCorrelationContext()
+    {
+        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")), deliveryCount: 4);
+
+        await sut.HandleMessageAsync(message, CancellationToken.None);
+
+        correlationContext.Received(1).Set(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<LogCriteria>(), Arg.Any<string>(), 4);
     }
 
     private static string BuildInboundJson(
@@ -454,11 +470,13 @@ public class ServiceBusConsumerHostedServiceTests
         });
     }
 
-    private static ServiceBusReceivedMessage BuildReceivedMessage(string envelopeJson, string? correlationIdProperty = "corr-property") =>
+    private static ServiceBusReceivedMessage BuildReceivedMessage(
+        string envelopeJson, string? correlationIdProperty = "corr-property", int deliveryCount = 1) =>
         ServiceBusModelFactory.ServiceBusReceivedMessage(
             body: BinaryData.FromString(envelopeJson),
             messageId: "msg-1",
             sessionId: "WH1:SKU1",
+            deliveryCount: deliveryCount,
             properties: correlationIdProperty is null
                 ? new Dictionary<string, object>()
                 : new Dictionary<string, object> { ["CorrelationId"] = correlationIdProperty });
