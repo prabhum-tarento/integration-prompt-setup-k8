@@ -6,6 +6,9 @@
     "InventoryEvents",
     "OrderArchive",
     "BulkInventoryImports",
-    "AuditLog"
+    "AuditLog",
+    "ItemStockInventory",
+    "MessageArchive",
+    "Rules"
   ]
 }
