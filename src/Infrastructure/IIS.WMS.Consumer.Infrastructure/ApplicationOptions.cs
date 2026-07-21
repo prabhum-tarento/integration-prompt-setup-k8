@@ -1,5 +1,5 @@
 using IIS.WMS.Common.Correlation;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 
 namespace IIS.WMS.Consumer.Infrastructure;
 

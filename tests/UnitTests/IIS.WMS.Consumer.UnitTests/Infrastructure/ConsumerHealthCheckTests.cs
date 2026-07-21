@@ -1,4 +1,4 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using NSubstitute;

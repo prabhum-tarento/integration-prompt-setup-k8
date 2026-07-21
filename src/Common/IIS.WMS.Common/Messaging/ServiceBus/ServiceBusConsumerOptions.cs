@@ -50,7 +50,7 @@ public sealed class ServiceBusConsumerOptions : ServiceBusConsumerOptionsBase
 
     /// <summary>
     /// Allow-list of Service Bus consumer names to start - the Service Bus-side mirror of
-    /// <c>Kafka:KafkaEventFunctions</c> (<c>Infrastructure.Messaging.Kafka.KafkaConsumerOptions.KafkaEventFunctions</c>),
+    /// <c>Kafka:KafkaEventFunctions</c> (<c>Infrastructure.Messaging.Events.InventoryEvents.KafkaConsumerOptions.KafkaEventFunctions</c>),
     /// same "run only the named ones" semantics, just gating the two Service Bus → Cosmos DB
     /// consumers instead of the three Kafka → Service Bus ones. Names match
     /// <c>Infrastructure.Messaging.MessagingServiceCollectionExtensions.InventoryEventsServiceBusKey</c>

@@ -1,5 +1,5 @@
 using Avro;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

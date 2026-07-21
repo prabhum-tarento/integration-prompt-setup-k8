@@ -6,7 +6,7 @@ namespace IIS.WMS.Consumer.Infrastructure.NexusServices;
 /// (integration-resiliency.instructions.md §1). <see cref="ClientSecret"/> is never set in
 /// <c>appsettings.json</c> - local development reads it from user-secrets, every other environment
 /// from Azure Key Vault, per engineering-standards.instructions.md §6. Whether the check runs at all
-/// is controlled solely by <see cref="Messaging.Kafka.ConsumerOptions.DeduplicationCheckEnabled"/>
+/// is controlled solely by <see cref="Messaging.Shared.Kafka.ConsumerOptions.DeduplicationCheckEnabled"/>
 /// (<c>Kafka:DeduplicationCheckEnabled</c>) - there is no separate on/off switch here. This facade's
 /// identity, sent as the <c>App-Id</c> header on every request and folded into the composite
 /// deduplication id (see <c>NexusDeduplicationService</c>), is <see cref="ApplicationOptions.AppId"/>

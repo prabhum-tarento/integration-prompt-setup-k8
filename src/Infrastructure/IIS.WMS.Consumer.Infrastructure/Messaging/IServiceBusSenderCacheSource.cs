@@ -1,9 +1,11 @@
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
+
 namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 
 /// <summary>
 /// One Kafka relay consumer's cached-<c>ServiceBusSender</c> surface - implemented by
-/// <see cref="Kafka.KafkaConsumerHostedServiceBase"/>, and deliberately narrow (not the whole
-/// <c>KafkaConsumerHostedServiceBase</c> base type) so <see cref="ServiceBusSenderCacheService"/> - and its
+/// <see cref="ServiceBusRelayPublisher"/>, and deliberately narrow (not the whole
+/// <c>ServiceBusRelayPublisher</c> type) so <see cref="ServiceBusSenderCacheService"/> - and its
 /// unit tests - depend on exactly this, not on constructing a real Kafka consumer.
 /// </summary>
 public interface IServiceBusSenderCacheSource

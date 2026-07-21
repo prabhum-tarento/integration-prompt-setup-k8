@@ -1,5 +1,4 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using net.pandora.nexus.@event.inventory;
 using net.pandora.nexus.shared;
 

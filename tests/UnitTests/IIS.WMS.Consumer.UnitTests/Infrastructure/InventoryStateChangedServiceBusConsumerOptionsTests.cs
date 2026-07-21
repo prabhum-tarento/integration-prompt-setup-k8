@@ -1,5 +1,5 @@
 using IIS.WMS.Common.Messaging.ServiceBus;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

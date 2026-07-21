@@ -4,7 +4,7 @@ using IIS.WMS.Common.Messaging;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.IntegrationTests.TestDoubles;
 using IIS.WMS.Consumer.IntegrationTests.TestDoubles.ServiceBus;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;

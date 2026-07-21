@@ -3,7 +3,7 @@
 ## What this is
 
 `InventoryStateChangedHandler` (in
-`src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/ServiceBus/Handlers/`)
+`src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Events/InventoryStateChanged/Handlers/`)
 detects when an inbound `InventoryStateChangedEvent` represents a pick or an
 unpick, and builds an `OrderTrackingRelayRequest` describing it. This is a
 port of logic from the upstream Reflex facade's Azure Function trigger:

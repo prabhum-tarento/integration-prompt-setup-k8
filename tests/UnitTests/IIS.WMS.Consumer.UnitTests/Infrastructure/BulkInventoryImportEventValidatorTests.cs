@@ -1,5 +1,5 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.Validators;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

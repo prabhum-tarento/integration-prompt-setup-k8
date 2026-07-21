@@ -2,7 +2,7 @@
 # src/Api/IIS.WMS.Consumer.Api/appsettings.json. Keys use the ".NET double-underscore"
 # convention (`Section__Key`) so envFrom: configMapRef injects them as env vars that
 # Microsoft.Extensions.Configuration binds straight back onto the same `Kafka:*` section
-# tree the app already reads via IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/ConsumerOptions.cs
+# tree the app already reads via IIS.WMS.Consumer.Infrastructure/Messaging/Shared/Kafka/ConsumerOptions.cs
 # and KafkaConsumerOptions - no code change needed to consume this.
 #
 # Credentials (Username/Password/SchemaRegistryApiKey/SchemaRegistryApiSecret) are

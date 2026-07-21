@@ -3,11 +3,14 @@ using FluentValidation;
 using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.Messaging;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.AvroContracts;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
@@ -16,12 +19,12 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 
 /// <summary>
 /// Registers the three Kafka → Service Bus relays (the JSON-contract
-/// <see cref="Kafka.KafkaConsumerHostedService"/>, the Avro/Schema-Registry
-/// <see cref="Kafka.InventoryStateChangedConsumerHostedService"/>, and the high-volume
-/// <see cref="Kafka.BulkInventoryImportConsumerHostedService"/>, all built on the shared
-/// <see cref="Kafka.KafkaConsumerHostedServiceBase"/>) and both Service Bus → Cosmos DB consumers (the
-/// session-enabled <see cref="ServiceBus.InventoryStateChangedServiceBusHostedService"/> and the non-session
-/// <see cref="ServiceBus.BulkImportServiceBusConsumerHostedService"/>)
+/// <see cref="KafkaConsumerHostedService"/>, the Avro/Schema-Registry
+/// <see cref="InventoryStateChangedConsumerHostedService"/>, and the high-volume
+/// <see cref="BulkInventoryImportConsumerHostedService"/>, all built on the shared
+/// <see cref="KafkaConsumerHostedServiceBase"/>) and both Service Bus → Cosmos DB consumers (the
+/// session-enabled <see cref="InventoryStateChangedServiceBusHostedService"/> and the non-session
+/// <see cref="BulkImportServiceBusConsumerHostedService"/>)
 /// (integration-resiliency.instructions.md). Each event type a Kafka consumer registers gets its own
 /// <see cref="ConsumerHealthState"/>, built internally by that consumer (see
 /// <see cref="KafkaConsumerHostedServiceBase.RegisterSchemaHandlers"/>) rather than injected here - a stall on
@@ -30,11 +33,11 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 /// checked by <see cref="KafkaConsumerHostedServiceBase"/> at startup - adding a further schema
 /// consumer means adding its options/hosted-service/health-check trio here, not touching the
 /// shared base class - the Schema Registry wiring itself is shared via the singleton
-/// <see cref="Kafka.ISpecificRecordDeserializerFactory"/> registered below, so that consumer would
+/// <see cref="ISpecificRecordDeserializerFactory"/> registered below, so that consumer would
 /// not need to duplicate it either. Each event-level consumer's <c>Enabled</c>,
 /// <c>BootstrapServers</c>, and <c>SchemaRegistryUrl</c> also fall back to the top-level
-/// <c>Kafka</c> section's values when left unset (<see cref="Kafka.ConsumerOptions.ApplyKafkaLevelDefaults"/>),
-/// and <see cref="Kafka.KafkaConsumerOptions.KafkaEventFunctions"/> gates which consumers get registered at
+/// <c>Kafka</c> section's values when left unset (<see cref="ConsumerOptions.ApplyKafkaLevelDefaults"/>),
+/// and <see cref="KafkaConsumerOptions.KafkaEventFunctions"/> gates which consumers get registered at
 /// all here, independently of their own <c>Enabled</c> flag. All hosted services are registered on the same host as the Api for
 /// this skeleton; kubernetes-deployment-best-practices.instructions.md's target topology is separate
 /// Deployments (Api, Kafka consumers, Service Bus consumers) each with their own image -
@@ -307,7 +310,7 @@ public static class MessagingServiceCollectionExtensions
         services.AddServiceBusQueueHealthCheck("service-bus-bulk-import", bulkImportQueueName, "service-bus-consumer");
     }
 
-    /// <summary>Whether <paramref name="consumerKey"/> should start, per an allow-list's "run only the named ones" semantics - shared by <see cref="Kafka.KafkaConsumerOptions.KafkaEventFunctions"/> and <see cref="ServiceBusConsumerOptions.ServiceBusEventFunctions"/>.</summary>
+    /// <summary>Whether <paramref name="consumerKey"/> should start, per an allow-list's "run only the named ones" semantics - shared by <see cref="KafkaConsumerOptions.KafkaEventFunctions"/> and <see cref="ServiceBusConsumerOptions.ServiceBusEventFunctions"/>.</summary>
     /// <param name="functionsFilter">The configured allow-list, or <see langword="null"/>/empty for "no filter."</param>
     /// <param name="consumerKey">
     /// The candidate consumer's allow-list key - one of <see cref="KafkaEvents.InventoryEventsConsumerKey"/>,

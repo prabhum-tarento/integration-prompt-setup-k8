@@ -1,5 +1,7 @@
 using Confluent.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

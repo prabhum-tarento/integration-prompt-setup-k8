@@ -1,7 +1,7 @@
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
-using IIS.WMS.Consumer.Infrastructure.Messaging;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 

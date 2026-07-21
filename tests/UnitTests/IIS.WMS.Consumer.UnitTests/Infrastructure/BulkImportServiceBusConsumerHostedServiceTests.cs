@@ -5,7 +5,7 @@ using IIS.WMS.Common.Logging;
 using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.BulkInventoryImport.Dtos;
-using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;

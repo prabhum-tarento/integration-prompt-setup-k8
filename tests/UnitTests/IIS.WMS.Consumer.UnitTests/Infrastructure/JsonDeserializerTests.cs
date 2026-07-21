@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Confluent.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

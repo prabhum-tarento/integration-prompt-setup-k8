@@ -425,7 +425,7 @@ manual settlement.
   `ProcessMessageAsync(TMessage message, ServiceBusRelayEnvelope envelope, string correlationId, CancellationToken cancellationToken)`.
   Business logic itself does not live in the hosted service — the derived
   class's `ProcessMessageAsync` resolves a scoped handler (under a
-  `Messaging/ServiceBus/Handlers/` folder) and delegates to it, mirroring
+  `Messaging/Events/InventoryStateChanged/Handlers/` folder) and delegates to it, mirroring
   how a controller calls into an application-layer use case rather than
   embedding logic inline. `InventoryStateChangedServiceBusHostedService` is the
   sole consumer of the `inventory-state-changed` queue, deserializing to

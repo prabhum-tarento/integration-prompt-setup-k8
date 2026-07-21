@@ -251,7 +251,7 @@ The `/topics/{topic}` endpoint above (the REST Proxy's "v2" Produce API) only ac
 headers (`Content-Type`) - it has no way to set actual **Kafka record headers**, so a
 message produced that way always arrives with none of `Correlation-Id`/
 `Deduplication-Id`/`Type` that
-[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaConsumerHostedServiceBase.cs)
+[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Shared/Kafka/KafkaConsumerHostedServiceBase.cs)
 optionally reads (see the "No Kafka headers" note in step 7 below) - it always falls back
 to a fresh correlation id, skipped dedup, and the default schema handler. To set those from
 curl, use the REST Proxy's newer **v3 Produce API** instead, which is header-aware.
@@ -501,7 +501,7 @@ curl.exe -X POST "http://localhost:8086/v3/clusters/<cluster_id>/topics/inventor
 
 This will get past the `400` and produce successfully - but with `value.type: 'JSON'` it
 won't actually be *consumed* correctly: the `$InventoryStateChanged` consumer group's
-[InventoryStateChangedConsumerHostedService](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/InventoryStateChangedConsumerHostedService.cs)
+[InventoryStateChangedConsumerHostedService](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Events/InventoryStateChanged/InventoryStateChangedConsumerHostedService.cs)
 expects a genuine **Avro**-encoded value (Confluent wire format - magic byte + schema id +
 Avro binary, via Schema Registry), not embedded JSON - it doesn't inspect the `Type`
 header to pick a schema at all (it registers its one handler under `DefaultEventType`, so
@@ -1027,7 +1027,7 @@ groups, and registers the Avro schema (see "Registering defaults on their own" a
 ### 7. Push a message
 
 The consumer for this topic
-([KafkaConsumerHostedService](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaConsumerHostedService.cs))
+([KafkaConsumerHostedService](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Events/InventoryEvents/KafkaConsumerHostedService.cs))
 deserializes each message body as
 [InboundInventoryEventMessage](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/InboundInventoryEventMessage.cs):
 `EventId`, `WarehouseId`, `Sku`, `Quantity`, `EventType`.
@@ -1044,7 +1044,7 @@ Service Bus message id.
 
 No Kafka headers (`Correlation-Id`, `Deduplication-Id`, `Type`) are sent above; all three
 are optional and degrade gracefully when absent (see
-[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Kafka/KafkaConsumerHostedServiceBase.cs)) -
+[KafkaConsumerHostedServiceBase.cs](../../src/Infrastructure/IIS.WMS.Consumer.Infrastructure/Messaging/Shared/Kafka/KafkaConsumerHostedServiceBase.cs)) -
 a fresh correlation id is generated, dedup is skipped, and the default schema handler is used.
 
 ### 8. Verify the message landed, into a consumer group (optional)

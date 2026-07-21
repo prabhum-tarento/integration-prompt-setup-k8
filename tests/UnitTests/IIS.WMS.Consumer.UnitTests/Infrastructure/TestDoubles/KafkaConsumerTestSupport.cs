@@ -7,7 +7,7 @@ using IIS.WMS.Common.DynamicValidation;
 using IIS.WMS.Common.Messaging;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;

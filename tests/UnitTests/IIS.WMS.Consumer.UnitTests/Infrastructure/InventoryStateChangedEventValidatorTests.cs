@@ -1,6 +1,5 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Validators;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
