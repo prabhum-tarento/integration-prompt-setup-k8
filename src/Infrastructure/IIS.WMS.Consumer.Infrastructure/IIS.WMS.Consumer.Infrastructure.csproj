@@ -37,9 +37,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Folder Include="Persistence\CosmosDb\Entity\" />
     <Folder Include="Persistence\CosmosDb\Mapper\" />
-    <Folder Include="Persistence\CosmosDb\Repository\" />
   </ItemGroup>
 
 </Project>

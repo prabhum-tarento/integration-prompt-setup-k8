@@ -71,6 +71,26 @@ public sealed class BlobStorageOptions
     public string LargePayloadContainerName { get; init; } = "large-payload";
 
     /// <summary>
+    /// Hot-tier container <c>Messaging.MessageArchiving.CosmosMessageArchiveSink</c> falls back to when
+    /// persisting a message archive entry to the Cosmos <c>MessageArchive</c> container fails even after
+    /// the SDK's own retry policy (cosmos-db.instructions.md §2) is exhausted - kept separate from
+    /// <see cref="AuditDeadLetterContainerName"/> since it is a distinct failure domain (the message
+    /// archive pipeline, not the audit pipeline). Configurable per environment. Lives in the
+    /// <see cref="Hot"/> storage account, since it needs prompt investigation like the other dead-letter
+    /// containers, not archival cold storage.
+    /// </summary>
+    public string MessageArchiveDeadLetterContainerName { get; init; } = "message-archive-dead-letter";
+
+    /// <summary>
+    /// Cold-tier container <c>Messaging.MessageArchiving.BlobMessageArchiveSink</c> archives every
+    /// <c>MessageArchive</c> entry to when <c>MessageArchive:BlobEnabled</c> is on - durable archival
+    /// storage, distinct from <see cref="MessageArchiveDeadLetterContainerName"/> (the hot-tier
+    /// Cosmos-write-failure fallback). Configurable per environment. Lives in the <see cref="Cold"/>
+    /// storage account.
+    /// </summary>
+    public string MessageArchiveContainerName { get; init; } = "message-archive";
+
+    /// <summary>
     /// Hot-tier Blob Storage account - <c>imports</c>/<c>exports</c> and <see cref="ConsumerDeadLetterContainerName"/>
     /// live here. A distinct account from <see cref="Cold"/>, not just a distinct container, since hot
     /// and cold data have different access-frequency and retention needs and this deployment's two

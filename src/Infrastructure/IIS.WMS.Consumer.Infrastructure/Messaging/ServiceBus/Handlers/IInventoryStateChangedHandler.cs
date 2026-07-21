@@ -13,5 +13,5 @@ public interface IInventoryStateChangedHandler
     /// <param name="message">The deserialized inbound event.</param>
     /// <param name="correlationId">This message's resolved correlation id.</param>
     /// <param name="cancellationToken">Token to cancel the write.</param>
-    Task HandleAsync(InboundInventoryEventMessage message, string correlationId, CancellationToken cancellationToken);
+    Task HandleAsync(InventoryStateChangedEvent message, string correlationId, CancellationToken cancellationToken);
 }

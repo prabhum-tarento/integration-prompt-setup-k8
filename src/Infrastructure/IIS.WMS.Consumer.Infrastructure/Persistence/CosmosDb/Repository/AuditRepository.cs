@@ -15,19 +15,12 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 /// </remarks>
 public sealed class AuditRepository : CosmosRepository<AuditEntry, AuditEntryDocument>, IAuditRepository
 {
-    /// <summary>
-    /// Container this repository writes to, declared here rather than in shared configuration
-    /// (cosmos-db.instructions.md §1) - every other repository declares its own container name the same way.
-    /// Provisioned externally (Bicep/Terraform) like every other container - not created by this app.
-    /// </summary>
-    private const string ContainerName = "AuditLog";
-
     public AuditRepository(
         ICosmosContainerFactory containerFactory,
         ILogger<AuditRepository> logger,
         ICorrelationContext correlationContext,
         IAuditTrailWriter auditTrailWriter)
-        : base(ContainerName, containerFactory, logger, correlationContext, auditTrailWriter)
+        : base(CosmosContainerNames.AuditLog, containerFactory, logger, correlationContext, auditTrailWriter)
     {
     }
 

@@ -416,7 +416,7 @@ manual settlement.
   carries exactly one message shape, so there is no schema-keyed handler
   map and no per-derived-class deserialization hook either — `TMessage` is
   already fixed at compile time by a derived class's own class declaration
-  (e.g. `: ServiceBusConsumerHostedService<InboundInventoryEventMessage>`),
+  (e.g. `: ServiceBusConsumerHostedService<InventoryStateChangedEvent>`),
   so the base class keeps a concrete, private `DeserializePayload(JsonElement reflexSchema)`
   helper that calls `reflexSchema.Deserialize<TMessage>()` directly — no
   abstract method, no derived-class override, no constructor-supplied
@@ -429,10 +429,12 @@ manual settlement.
   how a controller calls into an application-layer use case rather than
   embedding logic inline. `InventoryStateChangedServiceBusHostedService` is the
   sole consumer of the `inventory-state-changed` queue, deserializing to
-  `InboundInventoryEventMessage` and delegating to
-  `IInventoryStateChangedHandler`, which calls `IInventoryEventService`
-  (never the repository directly) the same way
-  `InventoryEventsController` does.
+  `InventoryStateChangedEvent` and delegating to
+  `IInventoryStateChangedHandler.HandleAsync`, which detects the pick/unpick
+  transition and calls `IItemStockInventoryService` (never the repository
+  directly) — see
+  [InventoryStateChanged-OrderTracking-Relay.md](../InventoryStateChanged-OrderTracking-Relay.md)
+  for the full mutation/retry-loop mechanics this handler drives.
 - **Idempotency**: before applying a message, check whether its message ID
   has already been processed (a small dedupe record in Cosmos, or rely on
   the target write being naturally idempotent — see

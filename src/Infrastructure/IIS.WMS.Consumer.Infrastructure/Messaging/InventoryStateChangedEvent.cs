@@ -147,3 +147,11 @@ public enum InventoryEventWeightUnit
     Kilogram,
     Carat,
 }
+public enum OrderType
+{
+    SALES,
+    TRANSFER,
+    PURCHASE,
+    INTERNALHALLMARKING,
+    EXTERNALHALLMARKING,
+}

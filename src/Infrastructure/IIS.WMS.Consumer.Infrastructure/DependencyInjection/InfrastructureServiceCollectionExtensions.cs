@@ -1,5 +1,6 @@
 using IIS.WMS.Consumer.Infrastructure.DynamicValidation;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
+using IIS.WMS.Consumer.Infrastructure.Messaging.MessageArchiving;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
@@ -34,6 +35,12 @@ public static class InfrastructureServiceCollectionExtensions
         // Depends on AddCosmosDb for IOrderArchiveRepository, which OrderArchiveBackgroundService
         // resolves per entry - same ordering rationale as AddAuditTrail above.
         services.AddOrderArchiving(configuration);
+
+        // Depends on both AddCosmosDb (IMessageArchiveRepository) and AddBlobStorage (the hot/cold-tier
+        // IFileStore each configured IMessageArchiveSink writes to) already being registered - same
+        // ordering rationale as AddAuditTrail above.
+        services.AddMessageArchiving(configuration);
+
         services.AddDynamicValidation(configuration);
         services.AddNexusDeduplicationService(configuration);
 

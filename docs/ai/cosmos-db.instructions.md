@@ -230,6 +230,34 @@ and every concrete repository live in this project's
 `Persistence/CosmosDb/Repository/` folder (namespace `...Persistence.CosmosDb.Repository`),
 mirroring the `Entity/` convention from §3.
 
+Every container name is a `const` on the single `CosmosContainerNames` static
+class in `Persistence/CosmosDb/CosmosContainerNames.cs` (namespace
+`...Persistence.CosmosDb`) — not scattered as a private `const` inside each
+repository, and not read from configuration (§1's `CosmosDb:ContainerName`
+setting only feeds the base-container registration in §2, and is not how
+per-entity repositories resolve their own container). A concrete repository
+passes its constant to the `CosmosRepository<TDomain,TDocument>` base
+constructor's `containerName` parameter:
+
+```csharp
+public sealed class InventoryEventRepository
+    : CosmosRepository<InventoryEvent, InventoryEventDocument>, IInventoryEventRepository
+{
+    public InventoryEventRepository(
+        ICosmosContainerFactory containerFactory,
+        ILogger<InventoryEventRepository> logger,
+        ICorrelationContext correlationContext,
+        IAuditTrailWriter auditTrailWriter)
+        : base(CosmosContainerNames.InventoryEvents, containerFactory, logger, correlationContext, auditTrailWriter)
+    {
+    }
+}
+```
+
+Adding a new container means adding one `const` to `CosmosContainerNames`
+and referencing it from the new repository — never a bare string literal at
+the call site.
+
 A mapper's `ToDomain(TDocument document)` must assign every document
 property straight into the domain instance without validating or throwing
 on an absent one. Every method here hands it a fully-populated document
@@ -297,6 +325,63 @@ catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
 }
 ```
 
+### 5a. Exception: repositories split across multiple containers
+
+The default above — one repository, one `containerName` passed to the base
+constructor, resolved once — is not universal. `ItemStockInventoryRepository`
+is the sanctioned exception: it serves five containers
+(`ItemStockInventoryEDC`/`TDC`/`ADC`/`CAECOM`/`BRZ3PL`, one per fulfilment
+code) from a single repository instance, because the fulfilment code is only
+known per call, not per deployment. For this case, skip the `containerName`
+constructor argument and override `CosmosRepository<TDomain,TDocument>`'s
+`protected virtual string ResolveContainerName(string? category)` seam
+instead, resolving the container name from `category` on every call:
+
+```csharp
+protected override string ResolveContainerName(string? category) =>
+    category is null
+        ? throw new NotSupportedException(
+            $"{nameof(ItemStockInventoryRepository)} has no single container to scan across " +
+            "fulfilment codes - cross-partition queries are not supported.")
+        : CosmosContainerNames.GetItemStockInventoryContainerName(ExtractFulfilmentCode(category));
+```
+
+Still add the base container name (or, as here, an allow-listed suffix
+enum plus resolver) to `CosmosContainerNames` — never a bare string literal —
+and never introduce a lookup table or `switch` for a fixed allow-list where
+`Enum.TryParse` on a closed enum does the same job with one line. Throw
+`NotSupportedException` (not `ArgumentException`) when `category` is
+`null` here: `ValidatePartitionScope` (§6) already owns `ArgumentException`
+for "caller forgot a partition key" — a repository with no container to fall
+back to for a cross-partition scan is a different failure mode and should
+stay distinguishable from it.
+
+**`GetPagedAsync`/`QueryAsync` need their own overload.** The single-argument
+`ResolveContainerName(string? category)` above is only safe because
+`GetAsync`/`CreateAsync`/`ReplaceAsync`/etc. always pass
+`ItemStockInventory.Category` — the full `FulfilmentId:ItemCode:Hallmark:
+CountryOfOrigin` composite key — so parsing the fulfilment code out of its
+first `:`-delimited segment is reliable. `GetPagedAsync`/`QueryAsync` instead
+take `options.Category` off a caller-supplied `QueryOptions<T>`/
+`QueryOptions<T,TResult>`, which carries no such guarantee — nothing stops a
+caller from passing a bare fulfilment code, an unrelated filter value, or
+`null`. A multi-container repository must not parse `options.Category` to
+route these two methods; read the routing key from the dedicated
+`QueryOptions<T>.FulfilmentCode`/`QueryOptions<T,TResult>.FulfilmentCode`
+field instead, via the two-argument
+`protected virtual string ResolveContainerName(string? category, string? fulfilmentCode)`
+seam (default implementation just defers to the single-argument overload,
+so every other repository is unaffected):
+
+```csharp
+protected override string ResolveContainerName(string? category, string? fulfilmentCode) =>
+    fulfilmentCode is null
+        ? throw new NotSupportedException(
+            $"{nameof(ItemStockInventoryRepository)} requires {nameof(QueryOptions<>.FulfilmentCode)} " +
+            "to route a paged/projected query to the correct container - cross-partition queries are not supported.")
+        : CosmosContainerNames.GetItemStockInventoryContainerName(fulfilmentCode);
+```
+
 ## 6. Query Options & Cross-Partition Guardrail
 
 ```csharp
@@ -308,8 +393,16 @@ public class QueryOptions<T>
     public string? ContinuationToken { get; set; }
     public string? Category { get; set; }
     public bool AllowCrossPartitionScan { get; set; } = false;
+    public string? FulfilmentCode { get; set; }
 }
 ```
+
+`FulfilmentCode` only matters to a multi-container repository (§5a) — every
+single-container repository ignores it. It exists so that repository's
+`ResolveContainerName(string?, string?)` overload can route
+`GetPagedAsync`/`QueryAsync` from an explicit field instead of parsing
+`Category`, which is a partition-key filter, not necessarily shaped like the
+routing key.
 
 `OrderBy` is a **multi-key** sort, not a single field — each
 `OrderByClause<T>` is a `(KeySelector, Descending)` pair, applied in list
@@ -556,6 +649,12 @@ Controllers and Application services:
 | `Container` | Singleton (resolved once from `CosmosClient`, §2) |
 | Repository | Scoped |
 | Application service | Scoped |
+
+`Container` singletons are cached per container **name**, not per
+repository — see §5a's exception: a repository that overrides
+`ResolveContainerName` (`ItemStockInventoryRepository`) resolves more than
+one cached singleton `Container` over its lifetime, one per distinct name it
+requests from `ICosmosContainerFactory`.
 
 ## 13. Testing Requirements
 

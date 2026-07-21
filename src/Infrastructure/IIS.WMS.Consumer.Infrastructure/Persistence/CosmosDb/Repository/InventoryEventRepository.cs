@@ -17,18 +17,12 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 /// </remarks>
 public class InventoryEventRepository : CosmosRepository<InventoryEvent, InventoryEventDocument>, IInventoryEventRepository
 {
-    /// <summary>
-    /// Container this repository reads/writes, declared here rather than in shared configuration
-    /// (cosmos-db.instructions.md §1) - every other repository declares its own container name the same way.
-    /// </summary>
-    private const string ContainerName = "InventoryEvents";
-
     public InventoryEventRepository(
         ICosmosContainerFactory containerFactory,
         ILogger<InventoryEventRepository> logger,
         ICorrelationContext correlationContext,
         IAuditTrailWriter auditTrailWriter)
-        : base(ContainerName, containerFactory, logger, correlationContext, auditTrailWriter)
+        : base(CosmosContainerNames.InventoryEvents, containerFactory, logger, correlationContext, auditTrailWriter)
     {
     }
 

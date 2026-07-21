@@ -25,6 +25,7 @@ public static class ApplicationServiceCollectionExtensions
         services.AddScoped<ICorrelationContext, CorrelationContext>();
         services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
         services.AddScoped<IInventoryEventService, InventoryEventService>();
+        services.AddScoped<IItemStockInventoryService, ItemStockInventoryService>();
         services.AddScoped<IBulkInventoryImportService, BulkInventoryImportService>();
 
         return services;

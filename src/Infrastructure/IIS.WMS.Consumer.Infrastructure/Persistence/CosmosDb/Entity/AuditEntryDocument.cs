@@ -1,4 +1,3 @@
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
@@ -44,6 +43,5 @@ public sealed class AuditEntryDocument : ICosmosDocument
     public DateTime TimestampUtc { get; init; }
 
     /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c> since the camelCase naming policy elsewhere can't produce that name.</summary>
-    [JsonProperty("_etag")]
     public string? ETag { get; init; }
 }

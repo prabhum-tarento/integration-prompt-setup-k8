@@ -1,4 +1,5 @@
 using IIS.WMS.Common.Logging;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Kafka.Validators;
 using net.pandora.nexus.@event.inventory;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
@@ -35,6 +36,8 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Kafka;
 [Module("Inventory")]
 public sealed class InventoryStateChangedConsumerHostedService : KafkaConsumerHostedServiceBase
 {
+    private readonly ILogger<InventoryStateChangedConsumerHostedService> logger;
+
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">
     /// Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer -
@@ -52,17 +55,53 @@ public sealed class InventoryStateChangedConsumerHostedService : KafkaConsumerHo
         ILogger<InventoryStateChangedConsumerHostedService> logger)
         : base(options.Value, infrastructure, logger, specificRecordDeserializerFactory)
     {
+        this.logger = logger;
+
         RegisterSchemaHandlers(new Dictionary<string, ISchemaHandler>
         {
             [KafkaEvents.InventoryStateChangedEventType] = CreateSchemaHandler<InventoryStateChanged, InventoryStateChangedEvent>(
                 InventoryStateChangedEventMapper.ToInventoryStateChangedEvent,
-                getOrderArchiveKey: x => x.Id + "_" + x.ReferenceId),
+                getOrderArchiveKey: GetOrderArchiveKey,
+                validateAsync: ValidateAsync),
             [KafkaEvents.InventoryAdjustedEventType] = CreateSchemaHandler<InventoryAdjusted, InventoryAdjustedEvent>(
                 InventoryAdjustedEventMapper.ToInventoryAdjustedEvent,
                 // Null (the default) unless InventoryAdjustedServiceBusQueueName is configured -
                 // falls back to the consumer-wide ServiceBusQueueName, so InventoryAdjusted lands
                 // on the same queue as InventoryStateChanged until ops points it elsewhere.
-                serviceBusQueueName: options.Value.InventoryAdjustedServiceBusQueueName),
+                serviceBusQueueName: options.Value.InventoryAdjustedServiceBusQueueName)
         });
     }
+
+    /// <summary>
+    /// Business-rule validation for one mapped <see cref="InventoryStateChangedEvent"/> - see
+    /// <see cref="InventoryStateChangedEventValidator.GetRejectionReason"/> for the rule set. A
+    /// rejection is valid but deliberately not relayed (returns <see langword="false"/>, not a
+    /// throw) - see <see cref="KafkaConsumerHostedServiceBase.CreateSchemaHandler{TAvro,TValue}"/>'s
+    /// <c>validateAsync</c> remarks for the throw-vs-return-false distinction.
+    /// </summary>
+    private Task<bool> ValidateAsync(InventoryStateChangedEvent value, CancellationToken cancellationToken)
+    {
+        var rejectionReason = InventoryStateChangedEventValidator.GetRejectionReason(value);
+
+        if (rejectionReason is not null)
+        {
+            logger.LogWarning(
+                "{ConsumerName}: InventoryStateChanged event {Id} at location {LocationId} failed business-rule validation - skipping Service Bus publish. Reason: {RejectionReason}",
+                ConsumerName, value.Id, value.Location.Id, rejectionReason);
+        }
+
+        return Task.FromResult(rejectionReason is null);
+    }
+
+    /// <summary>
+    /// Computes the <c>OrderArchive</c> category key for one mapped <see cref="InventoryStateChangedEvent"/> -
+    /// <see cref="InventoryStateChangedEvent.ReferenceId"/> itself, but only for the pick/unpick
+    /// transitions this consumer archives (see <see cref="InventoryStateTransitionRules"/>). Every
+    /// other transition returns <see langword="null"/>, so
+    /// <see cref="KafkaConsumerHostedServiceBase.EnqueueOrderArchive"/> skips the Cosmos write for it.
+    /// </summary>
+    private static string? GetOrderArchiveKey(InventoryStateChangedEvent value) =>
+        InventoryStateTransitionRules.IsPickableToPrepared(value) || InventoryStateTransitionRules.IsUnpickTransition(value)
+            ? value.ReferenceId
+            : null;
 }

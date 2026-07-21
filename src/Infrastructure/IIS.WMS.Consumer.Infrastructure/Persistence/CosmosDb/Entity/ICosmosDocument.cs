@@ -1,3 +1,5 @@
+using Newtonsoft.Json;
+
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 /// <summary>
@@ -7,11 +9,14 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 public interface ICosmosDocument
 {
     /// <summary>Deterministic item id.</summary>
+    [JsonProperty("id")]
     string Id { get; }
 
     /// <summary>Cosmos partition key value.</summary>
+    [JsonProperty("category")]
     string Category { get; }
 
     /// <summary>Cosmos's system-managed optimistic-concurrency token.</summary>
+    [JsonProperty("_etag")]
     string? ETag { get; }
 }

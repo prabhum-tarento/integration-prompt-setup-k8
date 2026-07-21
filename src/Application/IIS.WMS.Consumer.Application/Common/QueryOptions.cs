@@ -31,6 +31,15 @@ public class QueryOptions<T>
 
     /// <summary>Explicit opt-in to a cross-partition scan when <see cref="Category"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
     public bool AllowCrossPartitionScan { get; set; }
+
+    /// <summary>
+    /// Container-routing key for a repository split across multiple containers (cosmos-db.instructions.md
+    /// §5a - e.g. <c>ItemStockInventoryRepository</c>, one container per fulfilment code). Read directly
+    /// by that repository's <c>ResolveContainerName</c> override instead of being inferred by parsing
+    /// <see cref="Category"/> - <see cref="Category"/> is the Cosmos partition key value, not necessarily
+    /// shaped like the routing key. Ignored by every single-container repository.
+    /// </summary>
+    public string? FulfilmentCode { get; set; }
 }
 
 /// <summary>Projection variant of <see cref="QueryOptions{T}"/> - same filtering/paging/guardrail fields, plus a required <see cref="Selector"/>.</summary>
@@ -60,4 +69,13 @@ public class QueryOptions<T, TResult>
 
     /// <summary>Explicit opt-in to a cross-partition scan when <see cref="Category"/> is not supplied - makes the RU-cost tradeoff a visible decision, not an accident.</summary>
     public bool AllowCrossPartitionScan { get; set; }
+
+    /// <summary>
+    /// Container-routing key for a repository split across multiple containers (cosmos-db.instructions.md
+    /// §5a - e.g. <c>ItemStockInventoryRepository</c>, one container per fulfilment code). Read directly
+    /// by that repository's <c>ResolveContainerName</c> override instead of being inferred by parsing
+    /// <see cref="Category"/> - <see cref="Category"/> is the Cosmos partition key value, not necessarily
+    /// shaped like the routing key. Ignored by every single-container repository.
+    /// </summary>
+    public string? FulfilmentCode { get; set; }
 }

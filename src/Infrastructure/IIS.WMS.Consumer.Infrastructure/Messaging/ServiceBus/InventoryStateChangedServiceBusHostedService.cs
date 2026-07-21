@@ -10,17 +10,14 @@ using Microsoft.Extensions.Options;
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 
 /// <summary>
-/// Applies relayed inventory events to Cosmos DB via <see cref="IInventoryStateChangedHandler"/>,
-/// exactly the way an Api controller does (integration-resiliency.instructions.md §2). The sole
-/// consumer of the "inventory-state-changed" queue - replaces the old sealed
-/// <c>ServiceBusConsumerHostedService</c> now that the base class is generic and reusable. Idempotency
-/// relies on the aggregate's naturally-idempotent operations (deterministic create id,
-/// reservation-id-keyed reserve) rather than a separate dedupe record store - the alternative the doc
-/// allows when the target write is already idempotent.
-///
+/// Applies relayed inventory events via <see cref="IInventoryStateChangedHandler"/>, exactly the way
+/// an Api controller does (integration-resiliency.instructions.md §2). The sole consumer of the
+/// "inventory-state-changed" queue - replaces the old sealed <c>ServiceBusConsumerHostedService</c> now
+/// that the base class is generic and reusable.
+/// </summary>
 [LogLevelCriteria(LogCriteria.High)]
 [Module("Inventory")]
-public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusConsumerHostedService<InboundInventoryEventMessage>
+public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusConsumerHostedService<InventoryStateChangedEvent>
 {
     private readonly IServiceScopeFactory scopeFactory;
 
@@ -40,7 +37,7 @@ public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusCon
 
     /// <inheritdoc/>
     protected override async Task ProcessMessageAsync(
-        InboundInventoryEventMessage message, ICorrelationContext correlationContext, CancellationToken cancellationToken)
+        InventoryStateChangedEvent message, ICorrelationContext correlationContext, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var handler = scope.ServiceProvider.GetRequiredService<IInventoryStateChangedHandler>();

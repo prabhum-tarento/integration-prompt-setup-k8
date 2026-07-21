@@ -67,6 +67,14 @@ data:
   Kafka__BulkInventoryImport__ServiceBusQueueName: "inventory-bulk-import"
   Kafka__BulkInventoryImport__WorkerCount: "128"
   Kafka__BulkInventoryImport__ChannelCapacity: "20000"
+
+  # ServiceBus:QueueName - the queue InventoryStateChangedServiceBusHostedService actually
+  # listens on (MessagingServiceCollectionExtensions.RegisterInventoryEventsServiceBusConsumer
+  # resolves it from this top-level key, NOT from Kafka__InventoryStateChanged__ServiceBusQueueName
+  # above). MUST match that Kafka-side value - previously missing here, which left this Pod
+  # listening on appsettings.json's stale "test-cust-sync" placeholder instead of the queue the
+  # Kafka relay actually publishes to. See docs/InventoryStateChanged-OrderTracking-Relay.md.
+  ServiceBus__QueueName: "inventory-state-changed"
 ---
 # Plain Kubernetes Secret for the Kafka SASL and Schema Registry credentials - Key Vault /
 # Workload Identity sourcing skipped for now per request. This is still compliant with

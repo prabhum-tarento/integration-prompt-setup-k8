@@ -8,8 +8,7 @@ using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Common.Logging;
 using IIS.WMS.Common.Messaging;
 using IIS.WMS.Common.Messaging.ServiceBus;
-using IIS.WMS.Consumer.Application.InventoryEvents;
-using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
+using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Infrastructure.Messaging.ServiceBus.Handlers;
 using IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
@@ -26,86 +25,70 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 /// session-enabled Service Bus consumer's message-handling core, tested directly (per
 /// integration-resiliency.instructions.md §9) rather than through a real
 /// <see cref="ServiceBusSessionProcessor"/>, which cannot be subscribed to without a genuinely
-/// connected <see cref="ServiceBusClient"/>.
+/// connected <see cref="ServiceBusClient"/>. <see cref="IInventoryStateChangedHandler"/> is
+/// substituted throughout - business-logic dispatch (pick/unpick detection, OrderTracking relay
+/// building) is <see cref="InventoryStateChangedHandlerTests"/>'s concern, not this generic
+/// pipeline's (envelope parsing, blob claim-check, dead-lettering, correlation id resolution).
 /// </summary>
 public class ServiceBusConsumerHostedServiceTests
 {
     private static bool IsGuid(string? value) =>
         !string.IsNullOrEmpty(value) && Guid.TryParse(value.TrimStart('-'), out _);
 
-    [Fact(DisplayName = "A Create event dispatches to CreateAsync and the outcome is Completed")]
-    public async Task HandleMessageAsync_CreateEvent_DispatchesCreateAndReturnsCompleted()
+    [Fact(DisplayName = "A valid message dispatches to the handler and the outcome is Completed")]
+    public async Task HandleMessageAsync_ValidMessage_DispatchesToHandlerAndReturnsCompleted()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
         var healthStateRegistry = new ServiceBusHealthStateRegistry();
-        var sut = CreateSut(inventoryEventService, out _, out _, out _, healthStateRegistry: healthStateRegistry);
+        var sut = CreateSut(handler, out _, out _, out _, healthStateRegistry: healthStateRegistry);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
-        await inventoryEventService.Received(1).CreateAsync(
-            Arg.Is<CreateInventoryEventRequest>(r => r.WarehouseId == "WH1" && r.Sku == "SKU1" && r.InitialQuantity == 10),
-            Arg.Any<CancellationToken>());
+        await handler.Received(1).HandleAsync(Arg.Any<InventoryStateChangedEvent>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         Assert.True(healthStateRegistry.GetOrAdd("inventory-events").LastSuccessfulReceiveUtc > DateTimeOffset.UnixEpoch);
-    }
-
-    [Fact(DisplayName = "A Reserve event dispatches to ReserveStockAsync and the outcome is Completed")]
-    public async Task HandleMessageAsync_ReserveEvent_DispatchesReserveAndReturnsCompleted()
-    {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
-
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Reserve", eventId: "res-1", quantity: 3)));
-
-        var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
-
-        Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
-        await inventoryEventService.Received(1).ReserveStockAsync(
-            "WH1", "SKU1",
-            Arg.Is<ReserveStockRequest>(r => r.ReservationId == "res-1" && r.Quantity == 3),
-            Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "Dynamic validation returning false completes the message without dispatching")]
     public async Task HandleMessageAsync_DynamicValidationReturnsFalse_ReturnsCompletedWithoutDispatch()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
         var dynamicEventValidator = Substitute.For<IDynamicEventValidator>();
         dynamicEventValidator.ValidateAsync(
                 Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(),
                 Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
             .Returns(false);
-        var sut = CreateSut(inventoryEventService, out _, out _, out _, dynamicEventValidator: dynamicEventValidator);
+        var sut = CreateSut(handler, out _, out _, out _, dynamicEventValidator: dynamicEventValidator);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
-        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+        await handler.DidNotReceiveWithAnyArgs().HandleAsync(default!, default!, default);
     }
 
     [Fact(DisplayName = "Dynamic validation throwing dead-letters the message as DynamicValidationFailed and writes a dead-letter blob")]
     public async Task HandleMessageAsync_DynamicValidationThrows_ReturnsDeadLetteredDynamicValidationFailed()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
         var dynamicEventValidator = Substitute.For<IDynamicEventValidator>();
         dynamicEventValidator.ValidateAsync(
                 Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object>(), Arg.Any<HeaderLookup?>(),
                 Arg.Any<ILogger>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<bool>(new InvalidOperationException("Template blew up.")));
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _, dynamicEventValidator: dynamicEventValidator);
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _, dynamicEventValidator: dynamicEventValidator);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), correlationId: "corr-dv"));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(), correlationId: "corr-dv"));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.DeadLettered, outcome.Kind);
         Assert.Equal("DynamicValidationFailed", outcome.Reason);
         Assert.Equal("Template blew up.", outcome.Description);
-        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+        await handler.DidNotReceiveWithAnyArgs().HandleAsync(default!, default!, default);
         await hotFileStore.Received(1).UploadAsync(
             "consumer-dead-letter", Arg.Is<string>(name => name.StartsWith("corr-property/inventory-events/", StringComparison.Ordinal) && name.EndsWith(".json", StringComparison.Ordinal)),
             Arg.Any<Stream>(), Arg.Any<CancellationToken>());
@@ -114,38 +97,22 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "Dynamic validation returning true dispatches normally, unaffected by wiring")]
     public async Task HandleMessageAsync_DynamicValidationReturnsTrue_DispatchesNormally()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
-        await inventoryEventService.Received(1).CreateAsync(Arg.Any<CreateInventoryEventRequest>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact(DisplayName = "An unrecognized event type is dead-lettered")]
-    public async Task HandleMessageAsync_UnknownEventType_ReturnsDeadLettered()
-    {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
-
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "SomethingElse")));
-
-        var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
-
-        Assert.Equal(ServiceBusMessageOutcomeKind.DeadLettered, outcome.Kind);
-        Assert.Equal(nameof(InvalidOperationException), outcome.Reason);
-        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
-        await inventoryEventService.DidNotReceiveWithAnyArgs().ReserveStockAsync(default!, default!, default!, default);
+        await handler.Received(1).HandleAsync(Arg.Any<InventoryStateChangedEvent>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "Malformed envelope JSON is dead-lettered as a poison message and the raw bytes are written to the dead-letter blob store")]
     public async Task HandleMessageAsync_MalformedEnvelope_ReturnsDeadLetteredPoisonMessage()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _);
 
         var message = BuildReceivedMessage("{ not valid json");
 
@@ -161,8 +128,8 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "A JSON literal null ReflexSchema is dead-lettered as a poison message and the envelope JSON is written to the dead-letter blob store")]
     public async Task HandleMessageAsync_NullReflexSchema_ReturnsDeadLetteredPoisonMessage()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _);
 
         var message = BuildReceivedMessage(BuildEnvelopeJson(payload: null, correlationId: "corr-null"));
 
@@ -179,11 +146,11 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "A set BlobPath downloads and deserializes the blob content instead of ReflexSchema")]
     public async Task HandleMessageAsync_BlobPathSet_DeserializesBlobContentInsteadOfReflexSchema()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _);
 
         hotFileStore.DownloadAsync("large-payload", "corr-blob/inventory-events/blob.json", Arg.Any<CancellationToken>())
-            .Returns(new MemoryStream(Encoding.UTF8.GetBytes(BuildInboundJson(eventType: "Create"))));
+            .Returns(new MemoryStream(Encoding.UTF8.GetBytes(BuildInboundJson())));
 
         var envelopeJson = JsonSerializer.Serialize(new
         {
@@ -197,20 +164,20 @@ public class ServiceBusConsumerHostedServiceTests
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.Completed, outcome.Kind);
-        await inventoryEventService.Received(1).CreateAsync(
-            Arg.Is<CreateInventoryEventRequest>(r => r.WarehouseId == "WH1" && r.Sku == "SKU1" && r.InitialQuantity == 10),
-            Arg.Any<CancellationToken>());
+        await handler.Received(1).HandleAsync(
+            Arg.Is<InventoryStateChangedEvent>(e => e.Id == "state-1" && e.ReferenceId == "REF-1"),
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
         await hotFileStore.Received(1).DownloadAsync("large-payload", "corr-blob/inventory-events/blob.json", Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "A set BlobPath rehydrates ReflexSchema before the request-audit blob write, so the audit blob carries the real payload instead of the raw wire bytes")]
     public async Task HandleMessageAsync_BlobPathSet_WritesRehydratedContentToRequestAuditBlob()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out var coldFileStore);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out var hotFileStore, out var coldFileStore);
 
         hotFileStore.DownloadAsync("large-payload", "corr-blob-audit/inventory-events/blob.json", Arg.Any<CancellationToken>())
-            .Returns(new MemoryStream(Encoding.UTF8.GetBytes(BuildInboundJson(eventType: "Create"))));
+            .Returns(new MemoryStream(Encoding.UTF8.GetBytes(BuildInboundJson())));
 
         byte[]? uploadedBytes = null;
         coldFileStore.UploadAsync("request-audit", Arg.Any<string>(), Arg.Do<Stream>(s => uploadedBytes = ((MemoryStream)s).ToArray()), Arg.Any<CancellationToken>())
@@ -233,15 +200,15 @@ public class ServiceBusConsumerHostedServiceTests
         using var uploadedDocument = JsonDocument.Parse(uploadedBytes!);
         Assert.Equal("corr-blob-audit/inventory-events/blob.json", uploadedDocument.RootElement.GetProperty("BlobPath").GetString());
         var uploadedReflexSchema = uploadedDocument.RootElement.GetProperty("ReflexSchema");
-        Assert.Equal("WH1", uploadedReflexSchema.GetProperty("WarehouseId").GetString());
-        Assert.Equal("SKU1", uploadedReflexSchema.GetProperty("Sku").GetString());
+        Assert.Equal("state-1", uploadedReflexSchema.GetProperty("Id").GetString());
+        Assert.Equal("REF-1", uploadedReflexSchema.GetProperty("ReferenceId").GetString());
     }
 
     [Fact(DisplayName = "A BlobPath download failure is dead-lettered as a poison payload and the envelope JSON is written to the dead-letter blob store")]
     public async Task HandleMessageAsync_BlobPathDownloadThrows_ReturnsDeadLetteredPoisonMessage()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _);
 
         hotFileStore.DownloadAsync("large-payload", "corr-blob-fail/inventory-events/blob.json", Arg.Any<CancellationToken>())
             .Returns(Task.FromException<Stream>(new InvalidOperationException("Blob not found.")));
@@ -259,14 +226,14 @@ public class ServiceBusConsumerHostedServiceTests
 
         Assert.Equal(ServiceBusMessageOutcomeKind.DeadLettered, outcome.Kind);
         Assert.Equal("PoisonMessage", outcome.Reason);
-        await inventoryEventService.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+        await handler.DidNotReceiveWithAnyArgs().HandleAsync(default!, default!, default);
     }
 
     [Fact(DisplayName = "A missing ReflexSchema property (undefined JsonElement) is dead-lettered as a poison message")]
     public async Task HandleMessageAsync_MissingReflexSchema_ReturnsDeadLetteredPoisonMessage()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out _, out _);
 
         var message = BuildReceivedMessage(BuildEnvelopeJson(payload: null, omitReflexSchema: true));
 
@@ -277,30 +244,30 @@ public class ServiceBusConsumerHostedServiceTests
     }
 
     [Fact(DisplayName = "An exhausted concurrency retry loop (ConcurrencyException) is abandoned for redelivery")]
-    public async Task HandleMessageAsync_ConcurrencyExceptionFromReserve_ReturnsAbandoned()
+    public async Task HandleMessageAsync_HandlerThrowsConcurrencyException_ReturnsAbandoned()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        inventoryEventService.ReserveStockAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ReserveStockRequest>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<InventoryEventResponse>(new ConcurrencyException("WH1:SKU1", "etag-1")));
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        handler.HandleAsync(Arg.Any<InventoryStateChangedEvent>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new ConcurrencyException("WH1:SKU1", "etag-1")));
+        var sut = CreateSut(handler, out _, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Reserve")));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
         Assert.Equal(ServiceBusMessageOutcomeKind.Abandoned, outcome.Kind);
     }
 
-    [Fact(DisplayName = "A general processing failure from CreateAsync is dead-lettered with the full exception details, and the payload is written to the dead-letter blob store")]
-    public async Task HandleMessageAsync_GeneralExceptionFromCreate_ReturnsDeadLettered()
+    [Fact(DisplayName = "A general processing failure from the handler is dead-lettered with the full exception details, and the payload is written to the dead-letter blob store")]
+    public async Task HandleMessageAsync_HandlerThrowsGeneralException_ReturnsDeadLettered()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
         var exception = new InvalidOperationException("Cosmos is unavailable.");
-        inventoryEventService.CreateAsync(Arg.Any<CreateInventoryEventRequest>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<InventoryEventResponse>(exception));
-        var sut = CreateSut(inventoryEventService, out _, out var hotFileStore, out _);
+        handler.HandleAsync(Arg.Any<InventoryStateChangedEvent>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(exception));
+        var sut = CreateSut(handler, out _, out var hotFileStore, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), correlationId: "corr-fail"));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(), correlationId: "corr-fail"));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -312,15 +279,15 @@ public class ServiceBusConsumerHostedServiceTests
             Arg.Any<Stream>(), Arg.Any<CancellationToken>());
     }
 
-    [Fact(DisplayName = "An OperationCanceledException from CreateAsync is abandoned for redelivery, not propagated")]
-    public async Task HandleMessageAsync_OperationCanceledFromCreate_ReturnsAbandoned()
+    [Fact(DisplayName = "An OperationCanceledException from the handler is abandoned for redelivery, not propagated")]
+    public async Task HandleMessageAsync_HandlerThrowsOperationCanceled_ReturnsAbandoned()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        inventoryEventService.CreateAsync(Arg.Any<CreateInventoryEventRequest>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<InventoryEventResponse>(new OperationCanceledException()));
-        var sut = CreateSut(inventoryEventService, out _, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        handler.HandleAsync(Arg.Any<InventoryStateChangedEvent>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new OperationCanceledException()));
+        var sut = CreateSut(handler, out _, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()));
 
         var outcome = await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -330,10 +297,10 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "Every handled message writes a request-audit blob at the CorrelationId/ServiceBus/QueueName path")]
     public async Task HandleMessageAsync_AnyMessage_WritesRequestAuditBlob()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out _, out _, out var coldFileStore);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out _, out _, out var coldFileStore);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")), correlationIdProperty: "corr-audit");
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()), correlationIdProperty: "corr-audit");
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -346,11 +313,11 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "The CorrelationId application property, when present, wins over the envelope's own correlation id")]
     public async Task HandleMessageAsync_CorrelationIdPropertyPresent_UsesPropertyValue()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
         var message = BuildReceivedMessage(
-            BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), correlationId: "corr-envelope"),
+            BuildEnvelopeJson(BuildInboundJson(), correlationId: "corr-envelope"),
             correlationIdProperty: "corr-property");
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
@@ -362,11 +329,11 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "Without a CorrelationId application property, the envelope's own correlation id is used")]
     public async Task HandleMessageAsync_CorrelationIdPropertyAbsent_FallsBackToEnvelopeCorrelationId()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
         var message = BuildReceivedMessage(
-            BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), correlationId: "corr-envelope"),
+            BuildEnvelopeJson(BuildInboundJson(), correlationId: "corr-envelope"),
             correlationIdProperty: null);
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
@@ -378,11 +345,11 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "With neither a CorrelationId property nor an envelope correlation id, a fresh id is generated")]
     public async Task HandleMessageAsync_NoCorrelationIdAnywhere_GeneratesNewId()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
         var message = BuildReceivedMessage(
-            BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), correlationId: null),
+            BuildEnvelopeJson(BuildInboundJson(), correlationId: null),
             correlationIdProperty: null);
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
@@ -395,10 +362,10 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "The envelope's Type is carried into the correlation context's Types list when present")]
     public async Task HandleMessageAsync_EnvelopeTypePresent_PopulatesTypesList()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), type: "InventoryStateChanged"));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(), type: "InventoryStateChanged"));
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -411,10 +378,10 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "A missing envelope Type results in an empty Types list, and a missing AppId falls back to empty string")]
     public async Task HandleMessageAsync_EnvelopeTypeAndAppIdAbsent_PopulatesEmptyDefaults()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create"), appId: null, type: null));
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(), appId: null, type: null));
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -427,10 +394,10 @@ public class ServiceBusConsumerHostedServiceTests
     [Fact(DisplayName = "The message's DeliveryCount is carried into the correlation context")]
     public async Task HandleMessageAsync_AnyMessage_PassesDeliveryCountToCorrelationContext()
     {
-        var inventoryEventService = Substitute.For<IInventoryEventService>();
-        var sut = CreateSut(inventoryEventService, out var correlationContext, out _, out _);
+        var handler = Substitute.For<IInventoryStateChangedHandler>();
+        var sut = CreateSut(handler, out var correlationContext, out _, out _);
 
-        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson(eventType: "Create")), deliveryCount: 4);
+        var message = BuildReceivedMessage(BuildEnvelopeJson(BuildInboundJson()), deliveryCount: 4);
 
         await sut.HandleMessageAsync(message, CancellationToken.None);
 
@@ -439,15 +406,31 @@ public class ServiceBusConsumerHostedServiceTests
             Arg.Any<LogCriteria>(), Arg.Any<string>(), 4);
     }
 
-    private static string BuildInboundJson(
-        string eventId = "evt-1", string warehouseId = "WH1", string sku = "SKU1", int quantity = 10, string eventType = "Create") =>
+    private static string BuildInboundJson(string id = "state-1", string? referenceId = "REF-1") =>
         JsonSerializer.Serialize(new
         {
-            EventId = eventId,
-            WarehouseId = warehouseId,
-            Sku = sku,
-            Quantity = quantity,
-            EventType = eventType,
+            Channel = InventoryEventChannel.OwnOnline,
+            Id = id,
+            ChangeDate = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc),
+            Location = new { Id = "WH-1", Type = InventoryEventLocationType.Warehouse },
+            Entity = "ORG-1",
+            Type = InventoryEventChangeType.PickedB2C,
+            FromState = new { State = InventoryEventStockState.Available, Status = InventoryEventStockStatus.Pickable },
+            ToState = new { State = InventoryEventStockState.Available, Status = InventoryEventStockStatus.Prepared },
+            ItemLines = new[]
+            {
+                new
+                {
+                    LineNum = "1",
+                    ProductId = "SKU-1",
+                    ItemName = "Item 1",
+                    Quantity = 2,
+                    Units = "EA",
+                    CountryOfOrigin = "TH",
+                    Hallmarking = "925",
+                },
+            },
+            ReferenceId = referenceId,
         });
 
     private static string BuildEnvelopeJson(
@@ -482,7 +465,7 @@ public class ServiceBusConsumerHostedServiceTests
                 : new Dictionary<string, object> { ["CorrelationId"] = correlationIdProperty });
 
     private static InventoryStateChangedServiceBusHostedService CreateSut(
-        IInventoryEventService inventoryEventService,
+        IInventoryStateChangedHandler handler,
         out ICorrelationContext correlationContext,
         out IFileStore hotFileStore,
         out IFileStore coldFileStore,
@@ -499,12 +482,10 @@ public class ServiceBusConsumerHostedServiceTests
         hotFileStore = hotStore;
         coldFileStore = coldStore;
 
-        var handler = new InventoryStateChangedHandler(inventoryEventService, Substitute.For<ILogger<InventoryStateChangedHandler>>());
-
         var services = new ServiceCollection();
         services.AddSingleton(scopedCorrelationContext);
         services.AddSingleton(validator);
-        services.AddSingleton<IInventoryStateChangedHandler>(handler);
+        services.AddSingleton(handler);
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var dependencies = new ServiceBusConsumerDependencies(
