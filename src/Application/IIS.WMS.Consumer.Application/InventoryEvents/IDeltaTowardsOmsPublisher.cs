@@ -1,7 +1,7 @@
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
 /// <summary>
-/// §3.7 OMS delta synchronization publisher port (docs/InventoryStateChangedFullQueueTrigger.md) - ported
+/// §3.7 OMS delta synchronization publisher port (docs/events/shared/delta-towards-oms.md) - ported
 /// from the upstream Reflex facade's <c>manageInternalHallmarkingAllocatedEventHandlerAsync</c>/
 /// <c>getCountryCodeEventHandlerAsync</c> pair. Implemented in the Infrastructure layer
 /// (<c>DeltaTowardsOmsPublisher</c>) since it depends on Service Bus queue configuration
@@ -20,6 +20,10 @@ public interface IDeltaTowardsOmsPublisher
     /// <param name="countryOfOrigin">The item line's country of origin.</param>
     /// <param name="hallmarking">The item line's hallmarking value.</param>
     /// <param name="deltaTowardsOms">The signed B2C-available delta to report.</param>
+    /// <param name="eventId">The originating <c>InventoryStateChangedEvent.Id</c>, used to build a
+    /// deterministic <c>ReferenceId</c> (<c>locationId:productId:eventId</c>, per
+    /// docs/events/shared/delta-towards-oms.md) so a redelivered publish is de-duplicated downstream -
+    /// never a fresh <see cref="Guid"/>.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     Task PublishAsync(
         string productId,
@@ -28,5 +32,6 @@ public interface IDeltaTowardsOmsPublisher
         string countryOfOrigin,
         string hallmarking,
         int deltaTowardsOms,
+        string eventId,
         CancellationToken cancellationToken = default);
 }

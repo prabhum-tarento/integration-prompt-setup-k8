@@ -50,6 +50,9 @@ public sealed class ItemStockInventorySegmentationService(
             }
 
             var prevB2CAvailable = aggregate.B2CAvailable;
+            var prevB2BAvailable = aggregate.B2BAvailable;
+            var prevB2COriginal = aggregate.B2COriginal;
+            var prevB2CExtended = aggregate.B2CExtended;
             var isB2CChanged = false;
             List<PatchOperation> patchOperations;
 
@@ -59,7 +62,7 @@ public sealed class ItemStockInventorySegmentationService(
                 isB2CChanged = true;
                 patchOperations =
                 [
-                    PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+                    PatchOperation.Increment("/B2CAVL", aggregate.B2CAvailable - prevB2CAvailable),
                     PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
                 ];
             }
@@ -76,10 +79,10 @@ public sealed class ItemStockInventorySegmentationService(
                     patchOperations =
                     [
                         PatchOperation.Set("/IsExtended", aggregate.IsExtended),
-                        PatchOperation.Set("/B2COrg", aggregate.B2COriginal),
-                        PatchOperation.Set("/B2BAVL", aggregate.B2BAvailable),
-                        PatchOperation.Set("/B2CExtended", aggregate.B2CExtended),
-                        PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+                        PatchOperation.Increment("/B2COrg", aggregate.B2COriginal - prevB2COriginal),
+                        PatchOperation.Increment("/B2BAVL", aggregate.B2BAvailable - prevB2BAvailable),
+                        PatchOperation.Increment("/B2CExtended", aggregate.B2CExtended - prevB2CExtended),
+                        PatchOperation.Increment("/B2CAVL", aggregate.B2CAvailable - prevB2CAvailable),
                         PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
                     ];
                 }
@@ -88,7 +91,7 @@ public sealed class ItemStockInventorySegmentationService(
                     aggregate.DoFulfilmentLevelSegmentation(inboundQty, nowUtc);
                     patchOperations =
                     [
-                        PatchOperation.Set("/B2BAVL", aggregate.B2BAvailable),
+                        PatchOperation.Increment("/B2BAVL", aggregate.B2BAvailable - prevB2BAvailable),
                         PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
                     ];
                 }
@@ -135,7 +138,7 @@ public sealed class ItemStockInventorySegmentationService(
     }
 
     /// <summary>
-    /// §3.3 item-level segmentation rule write-back (docs/InventoryStateChangedFullQueueTrigger.md) -
+    /// §3.3 item-level segmentation rule write-back (docs/events/inventory.InventoryStateChanged.md) -
     /// mirrors the upstream Reflex facade's <c>ItemLevelSegmentationRepository.UpdateItemLevelFulfilmentAsync</c>
     /// exactly, including its unconditional <c>IsExtended = true</c> flip (Reflex hardcodes this
     /// regardless of the inventory record's own <see cref="ItemStockInventory.IsExtended"/> value). A

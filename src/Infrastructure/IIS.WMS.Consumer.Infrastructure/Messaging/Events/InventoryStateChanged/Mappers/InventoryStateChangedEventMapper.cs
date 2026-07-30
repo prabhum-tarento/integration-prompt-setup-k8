@@ -1,4 +1,4 @@
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 
 /// <summary>
 /// Hand-written mapping from the Avro-generated <see cref="net.pandora.nexus.@event.inventory.InventoryStateChanged"/> SpecificRecord

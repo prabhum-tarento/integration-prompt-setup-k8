@@ -11,7 +11,6 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;

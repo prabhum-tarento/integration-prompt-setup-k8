@@ -5,9 +5,9 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// mirrors <c>net.pandora.nexus.event.inventory.InventoryStateChanged</c> (the Avro-generated
 /// SpecificRecord from the NexusFacades.Common.AvroSchemas package) field-for-field, but as a plain
 /// type with no Avro codegen ties (no <c>Schema</c> property, no <c>ISpecificRecord</c>) - a future
-/// Avro schema change only ripples into <c>Kafka.InventoryStateChangedEventMapper</c>, not into the
+/// Avro schema change only ripples into <c>Mappers.InventoryStateChangedEventMapper</c>, not into the
 /// JSON audit trail/Service Bus payload shape this type defines. Mapped from the Avro type by
-/// <see cref="Kafka.InventoryStateChangedEventMapper"/> (hand-written, no mapping library - see that
+/// <see cref="Mappers.InventoryStateChangedEventMapper"/> (hand-written, no mapping library - see that
 /// class's remarks).
 /// </summary>
 public sealed record InventoryStateChangedEvent(

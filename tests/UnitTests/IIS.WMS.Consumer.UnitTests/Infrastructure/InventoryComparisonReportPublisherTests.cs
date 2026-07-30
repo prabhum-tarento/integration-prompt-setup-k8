@@ -5,7 +5,7 @@ using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -14,7 +14,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// §3.8 ICR snapshot publish tests for <see cref="InventoryComparisonReportPublisher"/>
-/// (docs/InventoryStateChangedFullQueueTrigger.md), with the repository and relay publisher mocked.
+/// (docs/events/inventory.InventoryStateChanged.md), with the repository and relay publisher mocked.
 /// </summary>
 public class InventoryComparisonReportPublisherTests
 {

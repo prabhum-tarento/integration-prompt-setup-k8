@@ -2,7 +2,7 @@ namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
 /// <summary>
 /// §3.8 Inventory Comparison Report (ICR) snapshot publisher port
-/// (docs/InventoryStateChangedFullQueueTrigger.md) - ported from the upstream Reflex facade's
+/// (docs/events/inventory.InventoryStateChanged.md) - ported from the upstream Reflex facade's
 /// <c>inventoryComparisonReportEventHandlerAsync</c>. Implemented in the Infrastructure layer
 /// (<c>InventoryComparisonReportPublisher</c>) since it depends on Service Bus queue configuration
 /// (<c>InventoryPublishOptions</c>) - this port only exposes Domain/Application-shaped parameters.

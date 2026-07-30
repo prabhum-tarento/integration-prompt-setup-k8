@@ -4,7 +4,7 @@ using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Enums;
 using IIS.WMS.Consumer.Infrastructure;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -13,7 +13,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// §3.6 B2B adjusted/moved publish tests for <see cref="InventoryAdjustedOrMovedPublisher"/>
-/// (docs/InventoryStateChangedFullQueueTrigger.md), with the relay publisher mocked.
+/// (docs/events/inventory.InventoryStateChanged.md), with the relay publisher mocked.
 /// </summary>
 public class InventoryAdjustedOrMovedPublisherTests
 {

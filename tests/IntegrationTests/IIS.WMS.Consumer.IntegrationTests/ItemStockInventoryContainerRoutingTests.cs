@@ -14,7 +14,7 @@ namespace IIS.WMS.Consumer.IntegrationTests;
 /// (<see cref="ItemStockInventoryRepository.ResolveContainerName(string?)"/>) against the in-memory Cosmos fake -
 /// that one repository instance transparently reads/writes distinct containers for distinct fulfilment
 /// codes, and that a cross-partition call (no category) is rejected rather than silently scanning one
-/// container. See docs/InventoryStateChanged-OrderTracking-Relay.md for the multi-container rationale.
+/// container. See docs/ai/cosmos-db.instructions.md for the multi-container rationale.
 /// </summary>
 public sealed class ItemStockInventoryContainerRoutingTests
 {

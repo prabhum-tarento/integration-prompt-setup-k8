@@ -19,7 +19,7 @@ public interface IItemStockInventoryExtendedRepository
 
     /// <summary>
     /// Creates a new extended-state record - used by the §3.5 to-state create-if-missing path
-    /// (docs/InventoryStateChangedFullQueueTrigger.md). Redelivery-safe: a Cosmos conflict on an
+    /// (docs/events/inventory.InventoryStateChanged.md). Redelivery-safe: a Cosmos conflict on an
     /// already-created id is resolved by re-reading and returning the existing item rather than throwing.
     /// </summary>
     Task<ItemStockInventoryExtended> CreateAsync(

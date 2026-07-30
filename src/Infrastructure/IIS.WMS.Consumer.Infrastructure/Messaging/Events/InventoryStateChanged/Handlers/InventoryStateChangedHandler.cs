@@ -3,8 +3,11 @@ using System.Runtime.ExceptionServices;
 using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
+using IIS.WMS.Consumer.Application.OrderTracking;
 using IIS.WMS.Consumer.Application.OrderTracking.Dtos;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -16,17 +19,17 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// <c>InventoryStateChangedOrchestrator</c>/Activity Trigger dispatch (this service has no Durable Task
 /// engine; the Kafka-to-Service-Bus relay pipeline itself, running as its own KEDA-scaled AKS Deployment
 /// per kubernetes-deployment-best-practices.instructions.md, is this service's equivalent
-/// durability/retry mechanism - see docs/InventoryStateChanged-OrderTracking-Relay.md). Detects a
+/// durability/retry mechanism - see docs/events/inventory.InventoryStateChanged.md). Detects a
 /// pick/unpick transition and applies the corresponding inventory mutations per item line via
 /// <see cref="IItemStockInventoryExtensionService"/> (ported from Reflex's
 /// <c>InventoryPickEventHandler</c>/<c>InventoryUnpickEventHandler</c> with extension calculation);
 /// any other transition instead runs §3.3/§3.5/§3.6 (segmentation, extended-inventory segmentation, and
-/// B2B adjusted/moved publishing - docs/InventoryStateChangedFullQueueTrigger.md). §3.7 (OMS delta) and
-/// §3.8 (ICR snapshot) run per item line regardless of which of the three branches applied - mirroring
-/// the reference trigger, whose own OMS-delta/ICR-snapshot checks sit outside/after the three-way
-/// pick/unpick/generic branch (<c>InventoryStateChangedFullQueueTrigger.cs</c> lines ~189-241), and the
+/// B2B adjusted/moved publishing). §3.7 (OMS delta) and §3.8 (ICR snapshot) run per item line
+/// regardless of which of the three branches applied - mirroring the reference trigger, whose own
+/// OMS-delta/ICR-snapshot checks sit outside/after the three-way pick/unpick/generic branch, and the
 /// doc's own §2 flow diagram, which lists OMS Delta Sync (step 8, "Post Pick/Unpick/Segmentation") and
-/// ICR Snapshot (step 9) as applying after steps 5/6/7 collectively, not only after step 7.
+/// ICR Snapshot (step 9) as applying after steps 5/6/7 collectively, not only after step 7. §3.9 (order
+/// tracking) runs once per message, only on a pick/unpick transition.
 /// </summary>
 /// <param name="itemStockInventoryExtensionService">Applies pick/unpick mutations and recalculates B2C extension metrics.</param>
 /// <param name="segmentationService">§3.3 inventory segmentation/extension.</param>
@@ -34,9 +37,10 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// <param name="inventoryAdjustedOrMovedPublisher">§3.6 B2B adjusted/moved event publisher.</param>
 /// <param name="deltaTowardsOmsPublisher">§3.7 OMS delta publisher.</param>
 /// <param name="inventoryComparisonReportPublisher">§3.8 ICR snapshot publisher.</param>
+/// <param name="orderTrackingPublisher">§3.9 order-tracking publisher.</param>
 /// <param name="featureFlagsOptions">Gates for the §3.6/3.7/3.8 downstream publishes.</param>
 /// <param name="consumerOptions">Carries <see cref="InventoryStateChangedServiceBusConsumerOptions.MaxItemLineParallelism"/>, the bounded fan-out for per-item-line processing.</param>
-/// <param name="logger">Logger for the OrderTracking relay's disabled-state notice, pick/unpick rejects, and OMS delta tracking.</param>
+/// <param name="logger">Logger for pick/unpick rejects and OMS delta tracking.</param>
 public sealed class InventoryStateChangedHandler(
     IItemStockInventoryExtensionService itemStockInventoryExtensionService,
     IItemStockInventorySegmentationService segmentationService,
@@ -44,6 +48,7 @@ public sealed class InventoryStateChangedHandler(
     IInventoryAdjustedOrMovedPublisher inventoryAdjustedOrMovedPublisher,
     IDeltaTowardsOmsPublisher deltaTowardsOmsPublisher,
     IInventoryComparisonReportPublisher inventoryComparisonReportPublisher,
+    IOrderTrackingPublisher orderTrackingPublisher,
     IOptions<FeatureFlagsOptions> featureFlagsOptions,
     IOptions<InventoryStateChangedServiceBusConsumerOptions> consumerOptions,
     ILogger<InventoryStateChangedHandler> logger)
@@ -61,7 +66,6 @@ public sealed class InventoryStateChangedHandler(
             return;
         }
 
-
         var request = new OrderTrackingRelayRequest(
             ReferenceId: message.Id,
             Channel: message.Channel.ToString(),
@@ -77,14 +81,7 @@ public sealed class InventoryStateChangedHandler(
                 HallMarkType: item.Hallmarking,
                 Qty: item.Quantity))]);
 
-        // TODO(ai): no OrderTracking Service Bus queue is configured anywhere in this repo yet (mirrors
-        // the upstream Reflex trigger, whose own downstream send is likewise commented out today). Once
-        // one is defined, publish via IServiceBusRelayPublisher.PublishAsync(new ServiceBusRelayMessage(...),
-        // cancellationToken) instead of only logging - see docs/InventoryStateChanged-OrderTracking-Relay.md.
-        logger.LogInformation(
-            "OrderTracking relay is disabled - no target queue configured. Would have relayed {OrderStatus}/{OrderType} " +
-            "for ReferenceId {ReferenceId}, OrderId {OrderId}, FulfilmentUnitId {FulfilmentUnitId}, CorrelationId {CorrelationId}.",
-            request.OrderStatus, request.OrderType, request.ReferenceId, request.OrderId, request.FulfilmentUnitId, correlationId);
+        await orderTrackingPublisher.PublishAsync(request, cancellationToken);
     }
 
     /// <summary>
@@ -283,7 +280,7 @@ public sealed class InventoryStateChangedHandler(
             {
                 await deltaTowardsOmsPublisher.PublishAsync(
                     item.ProductId, message.Location.Id, message.Location.Type.ToString(),
-                    item.CountryOfOrigin, item.Hallmarking, deltaResult.DeltaTowardsOms, cancellationToken);
+                    item.CountryOfOrigin, item.Hallmarking, deltaResult.DeltaTowardsOms, message.Id, cancellationToken);
             }
         }
 

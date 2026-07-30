@@ -8,7 +8,7 @@ using IIS.WMS.Consumer.Domain.Enums;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 
 /// <inheritdoc cref="IInventoryComparisonReportPublisher"/>
 internal sealed class InventoryComparisonReportPublisher(

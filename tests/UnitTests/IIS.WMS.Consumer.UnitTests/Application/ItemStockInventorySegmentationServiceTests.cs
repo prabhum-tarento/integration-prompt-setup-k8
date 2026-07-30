@@ -10,7 +10,7 @@ namespace IIS.WMS.Consumer.UnitTests.Application;
 
 /// <summary>
 /// §3.3 segmentation/extension orchestration tests for <see cref="ItemStockInventorySegmentationService"/>
-/// (docs/InventoryStateChangedFullQueueTrigger.md), with the repositories mocked.
+/// (docs/events/inventory.InventoryStateChanged.md), with the repositories mocked.
 /// </summary>
 public class ItemStockInventorySegmentationServiceTests
 {

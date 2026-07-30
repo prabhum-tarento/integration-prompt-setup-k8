@@ -26,7 +26,7 @@ public interface IItemStockInventoryRepository
 
     /// <summary>
     /// Creates a new item - used by the §3.3 segmentation create-if-missing path
-    /// (docs/InventoryStateChangedFullQueueTrigger.md). Redelivery-safe: a Cosmos conflict on an
+    /// (docs/events/inventory.InventoryStateChanged.md). Redelivery-safe: a Cosmos conflict on an
     /// already-created id is resolved by re-reading and returning the existing item rather than throwing.
     /// </summary>
     /// <param name="entity">Record to create.</param>

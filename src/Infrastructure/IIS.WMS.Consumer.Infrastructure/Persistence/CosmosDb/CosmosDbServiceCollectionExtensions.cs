@@ -63,6 +63,7 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddScoped<IFulfilmentLevelSegmentationRepository, FulfilmentLevelSegmentationRepository>();
         services.AddScoped<IItemLevelSegmentationRepository, ItemLevelSegmentationRepository>();
         services.AddScoped<IFulfilmentUnitRepository, FulfilmentUnitRepository>();
+        services.AddScoped<ICountryRepository, CountryRepository>();
         services.AddScoped<IItemStockInventoryExtendedRepository, ItemStockInventoryExtendedRepository>();
         services.AddScoped<IMessageArchiveRepository, MessageArchiveRepository>();
 

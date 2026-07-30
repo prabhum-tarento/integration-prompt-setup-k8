@@ -22,7 +22,7 @@ public sealed class ItemStockInventoryExtensionCalculationService(
     {
         // Store leverage only gates whether an item-level rule exists for this combination - the
         // recalculated formula below (ported verbatim from Reflex's FormulaHelper.CalculateActualB2BAvailable,
-        // docs/InventoryStateChangedFullQueueTrigger.md §3.4) takes no leverage-percentage input.
+        // docs/events/inventory.InventoryStateChanged.md §3.4) takes no leverage-percentage input.
         await GetStoreLeverageAsync(itemStockInventory, cancellationToken);
 
         itemStockInventory.CalculateB2CExtended();

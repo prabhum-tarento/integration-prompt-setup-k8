@@ -1,6 +1,6 @@
 namespace IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 
-/// <summary>§3.6 B2B adjusted/moved event payload published onto <c>InventoryPublishOptions.SapAdjustedOrMovedQueueName</c> (docs/InventoryStateChangedFullQueueTrigger.md).</summary>
+/// <summary>§3.6 B2B adjusted/moved event payload published onto <c>InventoryPublishOptions.SapAdjustedOrMovedQueueName</c> (docs/events/inventory.InventoryStateChanged.md).</summary>
 public sealed class InventoryAdjustedOrMovedPublishRequest
 {
     public string Channel { get; set; } = default!;

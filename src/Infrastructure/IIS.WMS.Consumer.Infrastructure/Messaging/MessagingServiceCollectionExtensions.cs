@@ -3,6 +3,8 @@ using FluentValidation;
 using IIS.WMS.Common.Messaging.ServiceBus;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.Messaging;
+using IIS.WMS.Consumer.Application.OrderTracking;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.Validators;
@@ -10,7 +12,6 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
@@ -291,6 +292,7 @@ public static class MessagingServiceCollectionExtensions
         services.AddScoped<IInventoryAdjustedOrMovedPublisher, InventoryAdjustedOrMovedPublisher>();
         services.AddScoped<IDeltaTowardsOmsPublisher, DeltaTowardsOmsPublisher>();
         services.AddScoped<IInventoryComparisonReportPublisher, InventoryComparisonReportPublisher>();
+        services.AddScoped<IOrderTrackingPublisher, OrderTrackingPublisher>();
 
         services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
     }

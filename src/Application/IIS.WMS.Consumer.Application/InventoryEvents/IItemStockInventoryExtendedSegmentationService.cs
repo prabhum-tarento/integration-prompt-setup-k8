@@ -3,7 +3,7 @@ using IIS.WMS.Consumer.Domain.Enums;
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
 /// <summary>
-/// §3.5 extended-inventory segmentation (docs/InventoryStateChangedFullQueueTrigger.md) - ported from
+/// §3.5 extended-inventory segmentation (docs/events/inventory.InventoryStateChanged.md) - ported from
 /// the upstream Reflex facade's <c>ExtendedInventorySegmentationEventHandler</c>. Tracks quantity
 /// sitting in a non-standard (State, Status) pair, distinct from the baseline
 /// <see cref="Domain.Aggregates.ItemStockInventory"/> record. Runs unconditionally alongside §3.3,

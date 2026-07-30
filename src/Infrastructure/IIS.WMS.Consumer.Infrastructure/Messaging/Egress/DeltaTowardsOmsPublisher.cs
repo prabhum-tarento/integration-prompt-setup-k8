@@ -7,11 +7,12 @@ using IIS.WMS.Consumer.Domain.Enums;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 
 /// <inheritdoc cref="IDeltaTowardsOmsPublisher"/>
 internal sealed class DeltaTowardsOmsPublisher(
     IFulfilmentUnitRepository fulfilmentUnitRepository,
+    ICountryRepository countryRepository,
     IServiceBusRelayPublisher relayPublisher,
     IOptions<InventoryPublishOptions> publishOptions,
     ICorrelationContext correlationContext,
@@ -29,14 +30,26 @@ internal sealed class DeltaTowardsOmsPublisher(
         string countryOfOrigin,
         string hallmarking,
         int deltaTowardsOms,
+        string eventId,
         CancellationToken cancellationToken = default)
     {
         var fulfilmentUnit = await fulfilmentUnitRepository.GetByFulfilmentIdAsync(locationId, cancellationToken);
         var market = fulfilmentUnit?.CountryCode ?? UnknownMarket;
 
+        if (market != UnknownMarket)
+        {
+            var countryMaster = await countryRepository.GetByCodeAsync(market, cancellationToken);
+            if (countryMaster is null || !countryMaster.IsActive)
+            {
+                logger.LogWarning(
+                    "Market {Market} resolved from FulfilmentUnit {LocationId} has no active CountryMaster record.",
+                    market, locationId);
+            }
+        }
+
         var request = new DeltaTowardsOmsPublishRequest
         {
-            ReferenceId = Guid.NewGuid().ToString(),
+            ReferenceId = $"{locationId}:{productId}:{eventId}",
             ProductId = productId,
             Location = new PublishLocation(locationId, locationType),
             Reason = "ADJUSTMENT",

@@ -91,7 +91,7 @@ public sealed class ItemStockInventory : AggregateRoot
     /// Creates a new zero-initialized record for a fulfilment location/item/hallmark/COO combination
     /// that has no existing <c>ItemStockInventory</c> row yet - mirrors the upstream Reflex facade's
     /// <c>InventorySegmentationAndExtensionHandler</c> create-if-missing branch (see
-    /// docs/InventoryStateChangedFullQueueTrigger.md §3.3), which zero-initializes every quantity
+    /// docs/events/inventory.InventoryStateChanged.md §3.3), which zero-initializes every quantity
     /// field rather than leaving the row absent.
     /// </summary>
     public static ItemStockInventory CreateDefault(
@@ -185,7 +185,7 @@ public sealed class ItemStockInventory : AggregateRoot
     /// an extended oversell instead borrows the shortfall from <see cref="B2BUsedShare"/>, throwing
     /// <see cref="ItemStockShareExhaustedException"/> if that would also go negative. The
     /// B2CExtended/B2CAVL recalculation Reflex performs afterward via
-    /// <c>CalculateB2CExtensionAsync</c> is not ported - see docs/InventoryStateChanged-OrderTracking-Relay.md.
+    /// <c>CalculateB2CExtensionAsync</c> is not ported - see docs/events/shared/b2c-extension-calculation.md.
     /// </summary>
     public void PickB2C(int quantity, DateTime nowUtc)
     {
@@ -247,8 +247,8 @@ public sealed class ItemStockInventory : AggregateRoot
 
     /// <summary>
     /// Recalculates <see cref="B2CExtended"/> as the actual B2B available quantity - mirrors the
-    /// upstream Reflex facade's <c>FormulaHelper.CalculateActualB2BAvailable</c> exactly (docs/
-    /// InventoryStateChangedFullQueueTrigger.md §3.4): <c>B2BAvailable - (B2BAllocated + B2BUsedShare
+    /// upstream Reflex facade's <c>FormulaHelper.CalculateActualB2BAvailable</c> exactly
+    /// (docs/events/inventory.InventoryStateChanged.md §3.4): <c>B2BAvailable - (B2BAllocated + B2BUsedShare
     /// + B2BPrepared)</c>, clamped at zero. There is no store-leverage multiplier in this formula -
     /// leverage only gates *whether* extension applies at all (see <see cref="ActivateExtension"/>),
     /// resolved upstream of this call.
@@ -279,7 +279,7 @@ public sealed class ItemStockInventory : AggregateRoot
     /// <summary>
     /// Marks this record as participating in B2C extension borrowing - mirrors the upstream Reflex
     /// facade's <c>itemStockInventoryDTO.IsExtended = true;</c> flip immediately before
-    /// <c>DoItemLevelExtension</c> (docs/InventoryStateChangedFullQueueTrigger.md §3.3). A one-way
+    /// <c>DoItemLevelExtension</c> (docs/events/inventory.InventoryStateChanged.md §3.3). A one-way
     /// flag flip; there is no corresponding deactivation path in the ported trigger.
     /// </summary>
     public void ActivateExtension() => IsExtended = true;
@@ -314,7 +314,7 @@ public sealed class ItemStockInventory : AggregateRoot
     /// upstream Reflex facade's <c>SegmentInventoryHelper.DoFulfilmentLevelSegmentation</c> exactly:
     /// all inbound movement (positive or negative) lands on <see cref="B2BAvailable"/>, clamped to
     /// zero on oversell rather than rejected. Does not touch <see cref="B2CAvailable"/> - this path
-    /// never changes the OMS-facing delta (docs/InventoryStateChangedFullQueueTrigger.md §3.3).
+    /// never changes the OMS-facing delta (docs/events/inventory.InventoryStateChanged.md §3.3).
     /// </summary>
     public void DoFulfilmentLevelSegmentation(int inboundQty, DateTime nowUtc)
     {

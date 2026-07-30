@@ -2,7 +2,7 @@ namespace IIS.WMS.Consumer.Infrastructure;
 
 /// <summary>
 /// Bound from the <c>InventoryPublish</c> configuration section - the Service Bus queue names the
-/// §3.6/3.7/3.8 publishers relay onto (docs/InventoryStateChangedFullQueueTrigger.md). Reflex's
+/// §3.6/3.7/3.8/3.9 publishers relay onto (docs/events/inventory.InventoryStateChanged.md). Reflex's
 /// equivalent sends are commented out and never define real queue names; this service publishes for
 /// real, so these are required, not optional, configuration.
 /// </summary>
@@ -19,4 +19,7 @@ public sealed class InventoryPublishOptions
 
     /// <summary>Queue §3.8 Inventory Comparison Report snapshots publish onto.</summary>
     public string IcrSnapshotQueueName { get; init; } = default!;
+
+    /// <summary>Queue §3.9 order-tracking requests publish onto.</summary>
+    public string OrderTrackingQueueName { get; init; } = default!;
 }

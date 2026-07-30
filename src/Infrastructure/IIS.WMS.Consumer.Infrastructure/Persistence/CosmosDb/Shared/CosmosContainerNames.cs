@@ -7,7 +7,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 /// </summary>
 public static class CosmosContainerNames
 {
-    /// <summary>Base name for the per-fulfilment-code ItemStockInventory containers - see docs/InventoryStateChanged-OrderTracking-Relay.md for why this is split by <see cref="ItemStockInventorySuffix"/> rather than one shared container.</summary>
+    /// <summary>Base name for the per-fulfilment-code ItemStockInventory containers - see docs/ai/cosmos-db.instructions.md for why this is split by <see cref="ItemStockInventorySuffix"/> rather than one shared container.</summary>
     public const string ItemStockInventory = "ItemStockInventory";
 
     public const string AuditLog = "AuditLog";

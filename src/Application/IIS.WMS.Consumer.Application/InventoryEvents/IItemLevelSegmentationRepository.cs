@@ -9,7 +9,7 @@ public interface IItemLevelSegmentationRepository
     /// <summary>
     /// Writes back the rule's "updated through inventory" fields (<c>CurrentOmniStock</c>/<c>CurrentEcomStock</c>/
     /// <c>StoreShare</c>/<c>EcomStatus</c>/<c>IsExtended</c>/<c>LastModified</c>) after a §3.3 item-level
-    /// segmentation/extension pass (docs/InventoryStateChangedFullQueueTrigger.md). ETag-guarded, matching
+    /// segmentation/extension pass (docs/events/inventory.InventoryStateChanged.md). ETag-guarded, matching
     /// every other mutation in this repo (cosmos-db.instructions.md §6); throws
     /// <see cref="IIS.WMS.Common.Exceptions.ConcurrencyException"/> on a mismatch.
     /// </summary>

@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly.Registry;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 
 /// <summary>
 /// Shared <see cref="IServiceBusRelayPublisher"/> implementation - the one place a

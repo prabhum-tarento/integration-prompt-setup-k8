@@ -36,9 +36,9 @@ public sealed class ItemStockInventoryService(
                     aggregate.PickB2C(quantity, nowUtc);
                 }
             },
-            buildPatchOperations: aggregate => channel == ItemStockPickChannel.B2B
-                ? BuildB2BPickPatch(aggregate)
-                : BuildB2CPickPatch(aggregate),
+            buildPatchOperations: (before, aggregate) => channel == ItemStockPickChannel.B2B
+                ? BuildB2BPickPatch(before, aggregate)
+                : BuildB2CPickPatch(before, aggregate),
             cancellationToken);
 
     /// <inheritdoc />
@@ -48,30 +48,32 @@ public sealed class ItemStockInventoryService(
         ApplyAsync(
             fulfilmentId, itemCode, countryOfOrigin, hallmark,
             aggregate => aggregate.Unpick(quantity, timeProvider.GetUtcNow().UtcDateTime),
-            buildPatchOperations: aggregate =>
+            buildPatchOperations: (before, aggregate) =>
             [
-                PatchOperation.Set("/B2BPrepared", aggregate.B2BPrepared),
-                PatchOperation.Set("/B2BAllocated", aggregate.B2BAllocated),
+                PatchOperation.Increment("/B2BPrepared", aggregate.B2BPrepared - before.B2BPrepared),
+                PatchOperation.Increment("/B2BAllocated", aggregate.B2BAllocated - before.B2BAllocated),
                 PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
             ],
             cancellationToken);
 
     /// <summary>
     /// The exact field set <see cref="ItemStockInventory.PickB2B"/> mutates: allocated/prepared/modified
-    /// always, plus used-share only when extension is active - see docs/InventoryStateChangedFullQueueTrigger.md.
+    /// always, plus used-share only when extension is active. Emits atomic <c>PatchOperation.Increment</c>
+    /// deltas (never a last-write-wins absolute <c>PatchOperation.Set</c>) per
+    /// [delta-towards-oms.md](../../../../docs/events/shared/delta-towards-oms.md) and cosmos-db.instructions.md §10.
     /// </summary>
-    private static List<PatchOperation> BuildB2BPickPatch(ItemStockInventory aggregate)
+    private static List<PatchOperation> BuildB2BPickPatch(QuantitySnapshot before, ItemStockInventory aggregate)
     {
         List<PatchOperation> operations =
         [
-            PatchOperation.Set("/B2BAllocated", aggregate.B2BAllocated),
-            PatchOperation.Set("/B2BPrepared", aggregate.B2BPrepared),
+            PatchOperation.Increment("/B2BAllocated", aggregate.B2BAllocated - before.B2BAllocated),
+            PatchOperation.Increment("/B2BPrepared", aggregate.B2BPrepared - before.B2BPrepared),
             PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
         ];
 
         if (aggregate.IsExtended)
         {
-            operations.Add(PatchOperation.Set("/B2BUsedShare", aggregate.B2BUsedShare));
+            operations.Add(PatchOperation.Increment("/B2BUsedShare", aggregate.B2BUsedShare - before.B2BUsedShare));
         }
 
         return operations;
@@ -79,16 +81,29 @@ public sealed class ItemStockInventoryService(
 
     /// <summary>
     /// The exact field set <see cref="ItemStockInventory.PickB2C"/> mutates: prepared always, allocated
-    /// always, modified always, and used-share only on the extended-oversell branch - see
-    /// docs/InventoryStateChangedFullQueueTrigger.md.
+    /// always, modified always, and used-share only on the extended-oversell branch. Emits atomic
+    /// <c>PatchOperation.Increment</c> deltas - see <see cref="BuildB2BPickPatch"/>.
     /// </summary>
-    private static IReadOnlyList<PatchOperation> BuildB2CPickPatch(ItemStockInventory aggregate) =>
+    private static IReadOnlyList<PatchOperation> BuildB2CPickPatch(QuantitySnapshot before, ItemStockInventory aggregate) =>
     [
-        PatchOperation.Set("/B2CPrepared", aggregate.B2CPrepared),
-        PatchOperation.Set("/B2CAllocated", aggregate.B2CAllocated),
-        PatchOperation.Set("/B2BUsedShare", aggregate.B2BUsedShare),
+        PatchOperation.Increment("/B2CPrepared", aggregate.B2CPrepared - before.B2CPrepared),
+        PatchOperation.Increment("/B2CAllocated", aggregate.B2CAllocated - before.B2CAllocated),
+        PatchOperation.Increment("/B2BUsedShare", aggregate.B2BUsedShare - before.B2BUsedShare),
         PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
     ];
+
+    /// <summary>
+    /// Quantity fields read before <c>mutate</c> runs, so the patch builders below can emit an atomic
+    /// <c>PatchOperation.Increment</c> delta (post minus pre) instead of the post-mutation absolute
+    /// value - never last-write-wins for a quantity/allocation field (cosmos-db.instructions.md §9/§10).
+    /// </summary>
+    private readonly record struct QuantitySnapshot(
+        int B2BAllocated, int B2BPrepared, int B2BUsedShare, int B2CAllocated, int B2CPrepared)
+    {
+        public static QuantitySnapshot Capture(ItemStockInventory aggregate) => new(
+            aggregate.B2BAllocated, aggregate.B2BPrepared, aggregate.B2BUsedShare,
+            aggregate.B2CAllocated, aggregate.B2CPrepared);
+    }
 
     /// <summary>
     /// The canonical re-read-and-reapply retry loop (integration-resiliency.instructions.md §2):
@@ -96,14 +111,15 @@ public sealed class ItemStockInventoryService(
     /// fresh state, and only retries on a genuine <see cref="ConcurrencyException"/> - this is the
     /// fix for the "PreCondition failed" issue this port addresses, since no prior mutation path
     /// existed to have this loop in the first place. <paramref name="buildPatchOperations"/> builds the
-    /// minimal Patch operation list for whatever <paramref name="mutate"/> just changed - a full
+    /// minimal Increment-based Patch operation list for whatever <paramref name="mutate"/> just changed,
+    /// from the pre-mutation <see cref="QuantitySnapshot"/> and the now-mutated aggregate - a full
     /// <c>ReplaceAsync</c> would overwrite fields other applications sharing this container concurrently
     /// wrote (cosmos-db.instructions.md §10).
     /// </summary>
     private async Task ApplyAsync(
         string fulfilmentId, string itemCode, string countryOfOrigin, string hallmark,
         Action<ItemStockInventory> mutate,
-        Func<ItemStockInventory, IReadOnlyList<PatchOperation>> buildPatchOperations,
+        Func<QuantitySnapshot, ItemStockInventory, IReadOnlyList<PatchOperation>> buildPatchOperations,
         CancellationToken cancellationToken)
     {
         var id = ItemStockInventory.BuildId(fulfilmentId, itemCode, hallmark, countryOfOrigin);
@@ -119,6 +135,8 @@ public sealed class ItemStockInventoryService(
 
                 return;
             }
+
+            var before = QuantitySnapshot.Capture(aggregate);
 
             try
             {
@@ -140,7 +158,7 @@ public sealed class ItemStockInventoryService(
             try
             {
                 await repository.PatchAsync(
-                    aggregate.Id, aggregate.Category, aggregate.ETag!, buildPatchOperations(aggregate), cancellationToken);
+                    aggregate.Id, aggregate.Category, aggregate.ETag!, buildPatchOperations(before, aggregate), cancellationToken);
                 await domainEventDispatcher.DispatchAsync(aggregate.DomainEvents, cancellationToken);
 
                 logger.LogInformation("Applied mutation to ItemStockInventory {Id}.", id);

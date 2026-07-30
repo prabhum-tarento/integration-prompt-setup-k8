@@ -3,6 +3,7 @@ using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Mapper;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
@@ -19,16 +20,13 @@ public sealed class CountryRepository : CosmosRepository<CountryMaster, CountryD
     {
     }
 
-    private static string Category(string region) => $"Country_{region}";
-    private static string Category(CountryMaster entity) => Category(entity.RegionCode);
+    private static string Category(string code) => $"Country_{code}";
 
-    protected override CountryDocument ToDocument(CountryMaster domain)
-    {
-        throw new NotImplementedException();
-    }
+    /// <inheritdoc/>
+    public Task<CountryMaster?> GetByCodeAsync(string countryCode, CancellationToken cancellationToken = default) =>
+        GetAsync(countryCode, Category(countryCode), cancellationToken);
 
-    protected override CountryMaster ToDomain(CountryDocument document)
-    {
-        throw new NotImplementedException();
-    }
+    protected override CountryDocument ToDocument(CountryMaster domain) => CountryMapper.ToDocument(domain);
+
+    protected override CountryMaster ToDomain(CountryDocument document) => CountryMapper.ToDomain(document);
 }

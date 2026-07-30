@@ -4,7 +4,7 @@ using IIS.WMS.Consumer.Domain.Enums;
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
 /// <summary>
-/// §3.6 B2B adjusted/moved event publisher port (docs/InventoryStateChangedFullQueueTrigger.md) - ported
+/// §3.6 B2B adjusted/moved event publisher port (docs/events/inventory.InventoryStateChanged.md) - ported
 /// from the upstream Reflex facade's <c>InventoryAdjustedOrMovedEventHandler</c>. Implemented in the
 /// Infrastructure layer (<c>InventoryAdjustedOrMovedPublisher</c>) since the real implementation depends
 /// on Service Bus queue configuration (<c>InventoryPublishOptions</c>) - this port only exposes

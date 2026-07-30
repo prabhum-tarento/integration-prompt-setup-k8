@@ -2,7 +2,7 @@ using IIS.WMS.Consumer.Domain.Aggregates;
 
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
-/// <summary>Port for <see cref="FulfilmentUnit"/> master-data lookups (§3.7 OMS delta market resolution, docs/InventoryStateChangedFullQueueTrigger.md).</summary>
+/// <summary>Port for <see cref="FulfilmentUnit"/> master-data lookups (§3.7 OMS delta market resolution, docs/events/inventory.InventoryStateChanged.md).</summary>
 public interface IFulfilmentUnitRepository
 {
     /// <summary>Reads the fulfilment unit record for a fulfilment id, or <see langword="null"/> if it doesn't exist.</summary>

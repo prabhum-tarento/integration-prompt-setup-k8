@@ -437,7 +437,7 @@ manual settlement.
   `IInventoryStateChangedHandler.HandleAsync`, which detects the pick/unpick
   transition and calls `IItemStockInventoryService` (never the repository
   directly) — see
-  [InventoryStateChanged-OrderTracking-Relay.md](../InventoryStateChanged-OrderTracking-Relay.md)
+  [inventory.InventoryStateChanged.md](../events/inventory.InventoryStateChanged.md)
   for the full mutation/retry-loop mechanics this handler drives.
 - **Idempotency**: before applying a message, check whether its message ID
   has already been processed (a small dedupe record in Cosmos, or rely on

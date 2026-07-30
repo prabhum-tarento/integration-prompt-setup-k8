@@ -1,6 +1,6 @@
 using net.pandora.nexus.@event.inventory;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 
 /// <summary>
 /// Hand-written mapping from the Avro-generated <see cref="InventoryAdjusted"/> SpecificRecord

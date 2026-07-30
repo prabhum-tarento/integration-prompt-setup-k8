@@ -1,6 +1,6 @@
 using DomainEnums = IIS.WMS.Consumer.Domain.Enums;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 
 /// <summary>
 /// Converts this consumer's own wire-contract state/status enums

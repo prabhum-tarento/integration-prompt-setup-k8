@@ -1,4 +1,4 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.ServiceBus;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 

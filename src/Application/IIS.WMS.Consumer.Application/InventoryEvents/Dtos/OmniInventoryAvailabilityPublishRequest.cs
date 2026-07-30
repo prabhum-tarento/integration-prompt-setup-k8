@@ -1,6 +1,6 @@
 namespace IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 
-/// <summary>§3.8 Inventory Comparison Report snapshot payload published onto <c>InventoryPublishOptions.IcrSnapshotQueueName</c> (docs/InventoryStateChangedFullQueueTrigger.md).</summary>
+/// <summary>§3.8 Inventory Comparison Report snapshot payload published onto <c>InventoryPublishOptions.IcrSnapshotQueueName</c> (docs/events/inventory.InventoryStateChanged.md).</summary>
 public sealed class OmniInventoryAvailabilityPublishRequest
 {
     public DateTime ReportDate { get; set; }

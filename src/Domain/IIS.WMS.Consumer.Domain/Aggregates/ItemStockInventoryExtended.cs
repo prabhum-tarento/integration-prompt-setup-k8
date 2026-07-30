@@ -3,7 +3,7 @@ using IIS.WMS.Consumer.Domain.Enums;
 namespace IIS.WMS.Consumer.Domain.Aggregates;
 
 /// <summary>
-/// §3.5 extended-state inventory snapshot (docs/InventoryStateChangedFullQueueTrigger.md) - tracks a
+/// §3.5 extended-state inventory snapshot (docs/events/inventory.InventoryStateChanged.md) - tracks a
 /// quantity sitting in a non-standard (State, Status) pair, keyed distinctly per pair rather than
 /// merged with the baseline <see cref="ItemStockInventory"/> record.
 /// </summary>

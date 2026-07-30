@@ -1,6 +1,6 @@
 namespace IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 
-/// <summary>§3.7 OMS delta synchronization payload published onto <c>InventoryPublishOptions.OmsDeltaQueueName</c> (docs/InventoryStateChangedFullQueueTrigger.md).</summary>
+/// <summary>§3.7 OMS delta synchronization payload published onto <c>InventoryPublishOptions.OmsDeltaQueueName</c> (docs/events/inventory.InventoryStateChanged.md).</summary>
 public sealed class DeltaTowardsOmsPublishRequest
 {
     public string ReferenceId { get; set; } = default!;

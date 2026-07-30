@@ -1,8 +1,8 @@
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 
 /// <summary>
 /// Maps an <see cref="InventoryEventChangeType"/> to the signed direction §3.3/§3.5 apply an item
-/// line's quantity with (docs/InventoryStateChangedFullQueueTrigger.md §4 Formula 1). This repo's
+/// line's quantity with (docs/events/inventory.InventoryStateChanged.md §4 Formula 1). This repo's
 /// wire contract carries no <c>MoveSign</c> string field (Reflex's own <c>MoveSign + Quantity</c>
 /// string-concatenation trick is Reflex-only) - the sign is instead derived from the change type
 /// itself, per the mapping agreed for this port.

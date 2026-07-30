@@ -9,7 +9,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
 /// repo's integration tests already use for <c>VirtualServiceBusSender</c>
 /// (integration-resiliency.instructions.md §9), mirrored here for a unit test that has no
 /// <c>IIS.WMS.Consumer.IntegrationTests</c> project reference to reuse that type directly. Records
-/// every message/batch <see cref="ServiceBusRelayPublisher"/> sends instead of making a real network
+/// every message/batch <c>ServiceBusRelayPublisher</c> sends instead of making a real network
 /// call, and can be configured (<see cref="OnSend"/>) to throw so a test can exercise the caller's
 /// Polly <c>service-bus-publish</c> retry/exhaustion behavior (integration-resiliency.instructions.md §3).
 /// </summary>
@@ -26,7 +26,7 @@ public sealed class FakeServiceBusSender(string queueName) : ServiceBusSender
     /// <summary>The message count of every batch actually sent via <see cref="SendMessagesAsync(ServiceBusMessageBatch, CancellationToken)"/>, in send order.</summary>
     public List<int> SentBatchSizes { get; } = [];
 
-    /// <summary>How many times <see cref="DisposeAsync"/> has been called - lets a test assert <see cref="ServiceBusRelayPublisher.ClearServiceBusSendersAsync"/> disposed a cached sender exactly once, not once per caller.</summary>
+    /// <summary>How many times <see cref="DisposeAsync"/> has been called - lets a test assert <c>ServiceBusRelayPublisher.ClearServiceBusSendersAsync</c> disposed a cached sender exactly once, not once per caller.</summary>
     public int DisposeCount { get; private set; }
 
     /// <summary>Whether <see cref="DisposeAsync"/> has been called at least once.</summary>
@@ -34,7 +34,7 @@ public sealed class FakeServiceBusSender(string queueName) : ServiceBusSender
 
     /// <summary>
     /// Messages a batch this sender creates accepts before <c>TryAddMessage</c> starts returning
-    /// <see langword="false"/> - lower this to force <see cref="ServiceBusRelayPublisher"/>'s
+    /// <see langword="false"/> - lower this to force <c>ServiceBusRelayPublisher</c>'s
     /// batch-chunking path, or set to 0 to force its "doesn't fit even alone" failure path.
     /// </summary>
     public int MaxMessagesPerBatch { get; set; } = 1_000;

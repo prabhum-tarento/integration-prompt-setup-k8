@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// <see cref="InventoryEventChannel"/>, <see cref="InventoryEventLocation"/>,
 /// <see cref="InventoryEventChangeType"/>, and <see cref="InventoryEventItemLine"/> (and its own
 /// nested weight/money types) since both Avro events share those exact shapes. Mapped from the Avro
-/// type by <see cref="Kafka.InventoryAdjustedEventMapper"/> (hand-written, no mapping library - see
+/// type by <see cref="Mappers.InventoryAdjustedEventMapper"/> (hand-written, no mapping library - see
 /// that class's remarks).
 /// </summary>
 public sealed record InventoryAdjustedEvent(

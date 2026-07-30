@@ -1,4 +1,4 @@
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 
 /// <summary>
 /// The two <see cref="InventoryStateChangedEvent"/> transitions this consumer treats as pick/unpick -
@@ -25,7 +25,7 @@ internal static class InventoryStateTransitionRules
         && (value.ToState.Status == InventoryEventStockStatus.Held || value.ToState.Status == InventoryEventStockStatus.Pickable);
 
     /// <summary>
-    /// §3.3 segmentation trigger (docs/InventoryStateChangedFullQueueTrigger.md) - either side of the
+    /// §3.3 segmentation trigger (docs/events/inventory.InventoryStateChanged.md) - either side of the
     /// transition is Available/Pickable. Independent of <see cref="IsPickableToPrepared"/>/
     /// <see cref="IsUnpickTransition"/>: the orchestrator only runs this branch in the else-case
     /// (neither pick nor unpick), per the trigger's own sequencing.

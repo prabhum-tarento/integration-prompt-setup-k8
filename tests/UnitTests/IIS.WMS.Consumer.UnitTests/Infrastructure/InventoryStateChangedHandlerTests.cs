@@ -1,9 +1,12 @@
 using IIS.WMS.Common.Exceptions;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
+using IIS.WMS.Consumer.Application.OrderTracking;
+using IIS.WMS.Consumer.Application.OrderTracking.Dtos;
 using IIS.WMS.Consumer.Infrastructure;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -16,7 +19,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 /// Tests for <see cref="InventoryStateTransitionRules"/> and <see cref="InventoryStateChangedHandler"/> -
 /// ported from the upstream Reflex facade's <c>InventoryStateChangedQueueTrigger</c>
 /// isPickEvent/isUnpickEvent detection and its <c>InventoryPickEventHandler</c>/
-/// <c>InventoryUnpickEventHandler</c> dispatch (see docs/InventoryStateChanged-OrderTracking-Relay.md).
+/// <c>InventoryUnpickEventHandler</c> dispatch (see docs/events/inventory.InventoryStateChanged.md).
 /// </summary>
 public class InventoryStateChangedHandlerTests
 {
@@ -89,6 +92,7 @@ public class InventoryStateChangedHandlerTests
             Substitute.For<IInventoryAdjustedOrMovedPublisher>(),
             Substitute.For<IDeltaTowardsOmsPublisher>(),
             Substitute.For<IInventoryComparisonReportPublisher>(),
+            Substitute.For<IOrderTrackingPublisher>(),
             featureFlagsOptions,
             consumerOptions,
             Substitute.For<ILogger<InventoryStateChangedHandler>>());
@@ -100,6 +104,7 @@ public class InventoryStateChangedHandlerTests
         out IInventoryAdjustedOrMovedPublisher inventoryAdjustedOrMovedPublisher,
         out IDeltaTowardsOmsPublisher deltaTowardsOmsPublisher,
         out IInventoryComparisonReportPublisher inventoryComparisonReportPublisher,
+        out IOrderTrackingPublisher orderTrackingPublisher,
         FeatureFlagsOptions? featureFlags = null,
         ItemStockInventoryDeltaResult? segmentationResult = null)
     {
@@ -120,6 +125,7 @@ public class InventoryStateChangedHandlerTests
         inventoryAdjustedOrMovedPublisher = Substitute.For<IInventoryAdjustedOrMovedPublisher>();
         deltaTowardsOmsPublisher = Substitute.For<IDeltaTowardsOmsPublisher>();
         inventoryComparisonReportPublisher = Substitute.For<IInventoryComparisonReportPublisher>();
+        orderTrackingPublisher = Substitute.For<IOrderTrackingPublisher>();
 
         var featureFlagsOptions = Substitute.For<IOptions<FeatureFlagsOptions>>();
         featureFlagsOptions.Value.Returns(featureFlags ?? new FeatureFlagsOptions());
@@ -134,6 +140,7 @@ public class InventoryStateChangedHandlerTests
             inventoryAdjustedOrMovedPublisher,
             deltaTowardsOmsPublisher,
             inventoryComparisonReportPublisher,
+            orderTrackingPublisher,
             featureFlagsOptions,
             consumerOptions,
             Substitute.For<ILogger<InventoryStateChangedHandler>>());
@@ -294,7 +301,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Pickable,
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable);
         var sut = CreateHandler(
-            out var segmentationService, out _, out _, out _, out _);
+            out var segmentationService, out _, out _, out _, out _, out _);
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
@@ -309,7 +316,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Held,
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held);
         var sut = CreateHandler(
-            out var segmentationService, out _, out _, out _, out _);
+            out var segmentationService, out _, out _, out _, out _, out _);
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
@@ -324,7 +331,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Held,
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held);
         var sut = CreateHandler(
-            out _, out var extendedSegmentationService, out _, out _, out _);
+            out _, out var extendedSegmentationService, out _, out _, out _, out _);
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
@@ -343,7 +350,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held,
             locationId: "WH-1");
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _,
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsSap = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -363,7 +370,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held,
             locationId: FulfilmentLocationIds.Edc);
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _,
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsSap = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -381,7 +388,7 @@ public class InventoryStateChangedHandlerTests
             locationId: FulfilmentLocationIds.Caecom,
             locationType: InventoryEventLocationType.ThirdPartyLogistics);
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _,
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsAx123Pl = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -400,7 +407,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held,
             locationId: FulfilmentLocationIds.Adc);
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _,
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableAdcDeltaTowardsAx12 = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -419,7 +426,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held,
             locationId: "WH-1");
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _,
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableAdcDeltaTowardsAx12 = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -436,7 +443,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Inspection, InventoryEventStockStatus.Held,
             locationId: "WH-1");
         var sut = CreateHandler(
-            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _);
+            out _, out _, out var inventoryAdjustedOrMovedPublisher, out _, out _, out _);
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
@@ -452,14 +459,14 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable,
             locationId: "WH-1", locationType: InventoryEventLocationType.Warehouse);
         var sut = CreateHandler(
-            out _, out _, out _, out var deltaTowardsOmsPublisher, out _,
+            out _, out _, out _, out var deltaTowardsOmsPublisher, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsOms = true },
             segmentationResult: new ItemStockInventoryDeltaResult { IsB2CChanged = true, DeltaTowardsOms = 260 });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
         await deltaTowardsOmsPublisher.Received(1).PublishAsync(
-            "SKU-1", "WH-1", "Warehouse", "TH", "925", 260, Arg.Any<CancellationToken>());
+            "SKU-1", "WH-1", "Warehouse", "TH", "925", 260, "state-1", Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "HandleAsync §3.7 publishes the OMS delta via the 3PL flag when the location type is ThirdPartyLogistics")]
@@ -470,14 +477,14 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable,
             locationId: FulfilmentLocationIds.Caecom, locationType: InventoryEventLocationType.ThirdPartyLogistics);
         var sut = CreateHandler(
-            out _, out _, out _, out var deltaTowardsOmsPublisher, out _,
+            out _, out _, out _, out var deltaTowardsOmsPublisher, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsOms3Pl = true },
             segmentationResult: new ItemStockInventoryDeltaResult { IsB2CChanged = true, DeltaTowardsOms = 100 });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
         await deltaTowardsOmsPublisher.Received(1).PublishAsync(
-            "SKU-1", FulfilmentLocationIds.Caecom, "ThirdPartyLogistics", "TH", "925", 100, Arg.Any<CancellationToken>());
+            "SKU-1", FulfilmentLocationIds.Caecom, "ThirdPartyLogistics", "TH", "925", 100, "state-1", Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "HandleAsync §3.7 does not publish the OMS delta when IsB2CChanged is false, even if EnableDeltaTowardsOms is set")]
@@ -487,14 +494,14 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Pickable,
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable);
         var sut = CreateHandler(
-            out _, out _, out _, out var deltaTowardsOmsPublisher, out _,
+            out _, out _, out _, out var deltaTowardsOmsPublisher, out _, out _,
             featureFlags: new FeatureFlagsOptions { EnableDeltaTowardsOms = true },
             segmentationResult: new ItemStockInventoryDeltaResult { IsB2CChanged = false, DeltaTowardsOms = 0 });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
         await deltaTowardsOmsPublisher.DidNotReceiveWithAnyArgs().PublishAsync(
-            default!, default!, default!, default!, default!, default, default);
+            default!, default!, default!, default!, default!, default, default!, default);
     }
 
     [Fact(DisplayName = "HandleAsync §3.7 does not publish the OMS delta when IsB2CChanged is true but the relevant flag is disabled")]
@@ -504,14 +511,14 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Pickable,
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable);
         var sut = CreateHandler(
-            out _, out _, out _, out var deltaTowardsOmsPublisher, out _,
+            out _, out _, out _, out var deltaTowardsOmsPublisher, out _, out _,
             featureFlags: new FeatureFlagsOptions(),
             segmentationResult: new ItemStockInventoryDeltaResult { IsB2CChanged = true, DeltaTowardsOms = 260 });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
 
         await deltaTowardsOmsPublisher.DidNotReceiveWithAnyArgs().PublishAsync(
-            default!, default!, default!, default!, default!, default, default);
+            default!, default!, default!, default!, default!, default, default!, default);
     }
 
     [Fact(DisplayName = "HandleAsync §3.8 publishes the ICR snapshot per item line whenever EnableSnapshotForIcr is set, regardless of segmentation result")]
@@ -522,7 +529,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable,
             locationId: FulfilmentLocationIds.Caecom);
         var sut = CreateHandler(
-            out _, out _, out _, out _, out var inventoryComparisonReportPublisher,
+            out _, out _, out _, out _, out var inventoryComparisonReportPublisher, out _,
             featureFlags: new FeatureFlagsOptions { EnableSnapshotForIcr = true });
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -538,7 +545,7 @@ public class InventoryStateChangedHandlerTests
             InventoryEventStockState.Blocked, InventoryEventStockStatus.Pickable,
             InventoryEventStockState.Available, InventoryEventStockStatus.Pickable);
         var sut = CreateHandler(
-            out _, out _, out _, out _, out var inventoryComparisonReportPublisher,
+            out _, out _, out _, out _, out var inventoryComparisonReportPublisher, out _,
             featureFlags: new FeatureFlagsOptions());
 
         await sut.HandleAsync(target, "corr-1", CancellationToken.None);
@@ -615,5 +622,83 @@ public class InventoryStateChangedHandlerTests
 
         await Assert.ThrowsAsync<ConcurrencyException>(
             () => sut.HandleAsync(target, "corr-1", CancellationToken.None));
+    }
+
+    [Fact(DisplayName = "HandleAsync §3.9 publishes an order-tracking request on a pick transition")]
+    public async Task HandleAsync_PickTransition_PublishesOrderTrackingRequest()
+    {
+        var target = CreateEvent(
+            InventoryEventStockState.Available, InventoryEventStockStatus.Pickable,
+            InventoryEventStockState.Available, InventoryEventStockStatus.Prepared,
+            type: InventoryEventChangeType.PickedB2C);
+        var sut = CreateHandler(
+            out _, out _, out _, out _, out _, out var orderTrackingPublisher);
+
+        await sut.HandleAsync(target, "corr-1", CancellationToken.None);
+
+        await orderTrackingPublisher.Received(1).PublishAsync(
+            Arg.Is<OrderTrackingRelayRequest>(r =>
+                r.ReferenceId == "state-1" &&
+                r.Channel == "OwnOnline" &&
+                r.FulfilmentUnitId == "WH-1" &&
+                r.FulfilmentUnitType == "Warehouse" &&
+                r.FunctionName == nameof(InventoryStateChangedHandler) &&
+                r.OrderId == "REF-1" &&
+                r.OrderStatus == OrderTrackingStatus.PICKED &&
+                r.OrderType == OrderType.SALES.ToString() &&
+                r.Lines.Count == 1 &&
+                r.Lines[0].ItemCode == "SKU-1" &&
+                r.Lines[0].CountryOfOrigin == "TH" &&
+                r.Lines[0].HallMarkType == "925" &&
+                r.Lines[0].Qty == 2),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact(DisplayName = "HandleAsync §3.9 publishes an order-tracking request with OrderType TRANSFER on a B2B pick transition")]
+    public async Task HandleAsync_B2BPickTransition_PublishesOrderTrackingRequestWithTransferOrderType()
+    {
+        var target = CreateEvent(
+            InventoryEventStockState.Available, InventoryEventStockStatus.Pickable,
+            InventoryEventStockState.Available, InventoryEventStockStatus.Prepared,
+            type: InventoryEventChangeType.PickedB2B);
+        var sut = CreateHandler(
+            out _, out _, out _, out _, out _, out var orderTrackingPublisher);
+
+        await sut.HandleAsync(target, "corr-1", CancellationToken.None);
+
+        await orderTrackingPublisher.Received(1).PublishAsync(
+            Arg.Is<OrderTrackingRelayRequest>(r => r.OrderType == OrderType.TRANSFER.ToString()),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact(DisplayName = "HandleAsync §3.9 publishes an order-tracking request on an unpick transition")]
+    public async Task HandleAsync_UnpickTransition_PublishesOrderTrackingRequest()
+    {
+        var target = CreateEvent(
+            InventoryEventStockState.Available, InventoryEventStockStatus.Prepared,
+            InventoryEventStockState.Available, InventoryEventStockStatus.Held,
+            type: InventoryEventChangeType.Dgp);
+        var sut = CreateHandler(
+            out _, out _, out _, out _, out _, out var orderTrackingPublisher);
+
+        await sut.HandleAsync(target, "corr-1", CancellationToken.None);
+
+        await orderTrackingPublisher.Received(1).PublishAsync(
+            Arg.Is<OrderTrackingRelayRequest>(r => r.OrderStatus == OrderTrackingStatus.PICKED),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact(DisplayName = "HandleAsync §3.9 does not publish an order-tracking request on a generic (non-pick/unpick) transition")]
+    public async Task HandleAsync_GenericTransition_SkipsOrderTrackingPublish()
+    {
+        var target = CreateEvent(
+            InventoryEventStockState.Blocked, InventoryEventStockStatus.Held,
+            InventoryEventStockState.Inspection, InventoryEventStockStatus.Held);
+        var sut = CreateHandler(
+            out _, out _, out _, out _, out _, out var orderTrackingPublisher);
+
+        await sut.HandleAsync(target, "corr-1", CancellationToken.None);
+
+        await orderTrackingPublisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, default);
     }
 }

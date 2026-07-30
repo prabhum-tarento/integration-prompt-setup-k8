@@ -3,7 +3,7 @@ namespace IIS.WMS.Consumer.Infrastructure;
 /// <summary>
 /// Bound from the <c>FeatureFlags</c> configuration section - gates the §3.6/3.7/3.8 downstream
 /// publishes ported from the upstream Reflex facade's <c>ApplicationConfig</c> flags of the same
-/// names (docs/InventoryStateChangedFullQueueTrigger.md). Unlike Reflex, where the corresponding
+/// names (docs/events/inventory.InventoryStateChanged.md). Unlike Reflex, where the corresponding
 /// sends are commented out entirely, this service publishes for real when a flag is enabled.
 /// </summary>
 public sealed class FeatureFlagsOptions

@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.UnitTests.Application;
 
 /// <summary>
 /// §3.4 B2C extension calculation tests for <see cref="ItemStockInventoryExtensionCalculationService"/>
-/// (docs/InventoryStateChangedFullQueueTrigger.md), with the segmentation repositories mocked.
+/// (docs/events/inventory.InventoryStateChanged.md), with the segmentation repositories mocked.
 /// </summary>
 public class ItemStockInventoryExtensionCalculationServiceTests
 {

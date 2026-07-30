@@ -1,4 +1,5 @@
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 using net.pandora.nexus.@event.inventory;
 using net.pandora.nexus.shared;
 

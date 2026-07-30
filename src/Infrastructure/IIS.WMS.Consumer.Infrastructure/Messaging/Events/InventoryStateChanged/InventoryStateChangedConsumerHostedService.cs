@@ -1,4 +1,6 @@
 using IIS.WMS.Common.Logging;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Validators;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using net.pandora.nexus.@event.inventory;

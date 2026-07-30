@@ -47,8 +47,7 @@ namespace IIS.WMS.Consumer.IntegrationTests;
 /// has no message-level idempotency check - a redelivered pick/unpick message is applied a second time,
 /// not a no-op. A duplicate/redelivered-message test case (docs/ai/integration-resiliency.instructions.md §9)
 /// is deliberately not included here: writing one would either lock in double-application as "correct" or
-/// silently assert something the code doesn't actually guarantee. See
-/// docs/InventoryStateChanged-OrderTracking-Relay.md for the follow-up note.
+/// silently assert something the code doesn't actually guarantee.
 /// </remarks>
 public sealed class InventoryEventPipelineTests : IAsyncLifetime
 {
@@ -179,9 +178,8 @@ public sealed class InventoryEventPipelineTests : IAsyncLifetime
                 ["Kafka:BootstrapServers"] = "localhost:9092",
 
                 // The only queue this suite drives - must match the real production
-                // "ServiceBus:QueueName" the Kafka relay actually publishes to (see
-                // k8s/kafka-consumer/configmap.yaml and docs/InventoryStateChanged-OrderTracking-Relay.md
-                // for the queue-name-mismatch bug this fixed).
+                // "ServiceBus:QueueName" the Kafka relay actually publishes to
+                // (see k8s/kafka-consumer/configmap.yaml).
                 ["ServiceBus:QueueName"] = QueueName,
                 ["ServiceBus:ConnectionString"] = "Endpoint=sb://localhost/;SharedAccessKeyName=x;SharedAccessKey=x",
                 ["CosmosDb:AccountEndpoint"] = "https://localhost:8081",

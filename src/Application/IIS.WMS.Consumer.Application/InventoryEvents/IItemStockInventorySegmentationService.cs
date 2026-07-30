@@ -3,7 +3,7 @@ using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
 /// <summary>
-/// §3.3 segmentation/extension orchestration (docs/InventoryStateChangedFullQueueTrigger.md) - ported
+/// §3.3 segmentation/extension orchestration (docs/events/inventory.InventoryStateChanged.md) - ported
 /// from the upstream Reflex facade's <c>InventorySegmentationAndExtensionHandler</c>/
 /// <c>updateItemLevelSegmentationHandlerAsync</c>. Unlike <see cref="IItemStockInventoryService"/>, a
 /// missing <see cref="Domain.Aggregates.ItemStockInventory"/> record is not a reject - one is created

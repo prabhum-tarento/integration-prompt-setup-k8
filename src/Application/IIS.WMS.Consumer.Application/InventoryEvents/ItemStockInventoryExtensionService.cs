@@ -34,6 +34,7 @@ public sealed class ItemStockInventoryExtensionService(
         if (aggregate?.IsExtended == true)
         {
             var prevB2CAvailable = aggregate.B2CAvailable;
+            var prevB2CExtended = aggregate.B2CExtended;
             await extensionCalculationService.CalculateB2CExtensionAsync(
                 prevB2CAvailable, aggregate, deltaResult, cancellationToken);
 
@@ -42,8 +43,8 @@ public sealed class ItemStockInventoryExtensionService(
                 await repository.PatchAsync(
                     aggregate.Id, aggregate.Category, aggregate.ETag!,
                     [
-                        PatchOperation.Set("/B2CExtended", aggregate.B2CExtended),
-                        PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+                        PatchOperation.Increment("/B2CExtended", aggregate.B2CExtended - prevB2CExtended),
+                        PatchOperation.Increment("/B2CAVL", aggregate.B2CAvailable - prevB2CAvailable),
                     ],
                     cancellationToken);
                 logger.LogInformation(
@@ -71,6 +72,7 @@ public sealed class ItemStockInventoryExtensionService(
         if (aggregate?.IsExtended == true)
         {
             var prevB2CAvailable = aggregate.B2CAvailable;
+            var prevB2CExtended = aggregate.B2CExtended;
             await extensionCalculationService.CalculateB2CExtensionAsync(
                 prevB2CAvailable, aggregate, deltaResult, cancellationToken);
 
@@ -79,8 +81,8 @@ public sealed class ItemStockInventoryExtensionService(
                 await repository.PatchAsync(
                     aggregate.Id, aggregate.Category, aggregate.ETag!,
                     [
-                        PatchOperation.Set("/B2CExtended", aggregate.B2CExtended),
-                        PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+                        PatchOperation.Increment("/B2CExtended", aggregate.B2CExtended - prevB2CExtended),
+                        PatchOperation.Increment("/B2CAVL", aggregate.B2CAvailable - prevB2CAvailable),
                     ],
                     cancellationToken);
                 logger.LogInformation(
@@ -107,6 +109,7 @@ public sealed class ItemStockInventoryExtensionService(
         if (aggregate?.IsExtended == true)
         {
             var prevB2CAvailable = aggregate.B2CAvailable;
+            var prevB2CExtended = aggregate.B2CExtended;
             await extensionCalculationService.CalculateB2CExtensionAsync(
                 prevB2CAvailable, aggregate, deltaResult, cancellationToken);
 
@@ -115,8 +118,8 @@ public sealed class ItemStockInventoryExtensionService(
                 await repository.PatchAsync(
                     aggregate.Id, aggregate.Category, aggregate.ETag!,
                     [
-                        PatchOperation.Set("/B2CExtended", aggregate.B2CExtended),
-                        PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+                        PatchOperation.Increment("/B2CExtended", aggregate.B2CExtended - prevB2CExtended),
+                        PatchOperation.Increment("/B2CAVL", aggregate.B2CAvailable - prevB2CAvailable),
                     ],
                     cancellationToken);
                 logger.LogInformation(

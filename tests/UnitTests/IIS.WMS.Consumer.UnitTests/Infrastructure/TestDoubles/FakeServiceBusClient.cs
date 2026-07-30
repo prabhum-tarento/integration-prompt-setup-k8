@@ -10,7 +10,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure.TestDoubles;
 /// directly. Hands back a <see cref="FakeServiceBusSender"/> per queue instead of connecting to a real
 /// namespace - used both to satisfy the <see cref="ServiceBusClient"/> constructor parameter every
 /// hosted service under test takes (never exercised, since these tests call <c>HandleMessageAsync</c>
-/// directly rather than <c>ExecuteAsync</c>) and, for <see cref="ServiceBusRelayPublisher"/>, as the
+/// directly rather than <c>ExecuteAsync</c>) and, for <c>ServiceBusRelayPublisher</c>, as the
 /// sender factory its tests assert against.
 /// </summary>
 public sealed class FakeServiceBusClient : ServiceBusClient
