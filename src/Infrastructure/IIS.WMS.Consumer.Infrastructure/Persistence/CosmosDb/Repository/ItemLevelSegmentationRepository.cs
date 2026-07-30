@@ -1,9 +1,10 @@
 using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Mapper;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
@@ -34,6 +35,11 @@ public class ItemLevelSegmentationRepository : CosmosRepository<ItemLevelSegment
         var id = $"{itemCode}_{coo}";
         return await GetAsync(category, id);
     }
+
+    /// <inheritdoc />
+    public async Task<ItemLevelSegmentation> UpdateItemLevelFulfilmentAsync(
+        ItemLevelSegmentation entity, CancellationToken cancellationToken = default) =>
+        await ReplaceAsync(entity, entity.ETag!, cancellationToken);
 
     /// <inheritdoc />
     protected override ItemLevelSegmentationDocument ToDocument(ItemLevelSegmentation domain) =>

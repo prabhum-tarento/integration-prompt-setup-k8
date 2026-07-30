@@ -80,10 +80,6 @@ builder.Services.AddSingleton(sp =>
         ConsistencyLevel = ConsistencyLevel.Session,
         MaxRetryAttemptsOnRateLimitedRequests = 9,
         MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-        SerializerOptions = new CosmosSerializationOptions
-        {
-            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
-        },
     };
 
     // Local dev only: the Cosmos DB Emulator's well-known fixed key, read
@@ -106,18 +102,21 @@ builder.Services.AddSingleton(sp =>
   a session see their own writes, without paying for Strong consistency's
   latency/cost. Do not lower to Eventual for any path that reads back a
   quantity it just wrote (e.g., a reservation confirmation).
-* **`SerializerOptions.PropertyNamingPolicy = CamelCase` is required, not
-  optional.** Every entity in §3 is declared with PascalCase C# properties
-  (`Category`, `WarehouseId`, …), but §1's config declares
-  `PartitionKeyPath: "/category"` — lowercase. The Cosmos SDK's default
-  serializer writes the property name exactly as declared unless this
-  option is set; without it, `Category` would serialize as `"Category"`
-  in the stored JSON and silently miss the container's actual partition key
-  path. Setting this once here, on the single registered `CosmosClient`,
-  makes every entity's camelCase JSON shape consistent with §1's config
-  without needing a per-property `[JsonProperty]` override — the only
-  property that keeps an explicit override is `ETag`, because Cosmos's
-  system property is `_etag`, a name the naming policy doesn't produce.
+* **No global naming policy is applied — every entity's actual PascalCase
+  C# property names (`WarehouseId`, `OnHandQuantity`, `B2BAllocated`, …) are
+  persisted as-is.** The Cosmos SDK's default serializer writes each
+  property name exactly as declared, so this is automatic and requires no
+  `SerializerOptions` configuration on the registered `CosmosClient`. The
+  only three properties every entity forces to a specific lowercase/fixed
+  name are `Id`, `Category`, and `ETag` — because §1's config declares
+  `PartitionKeyPath: "/category"` (lowercase) and Cosmos's system properties
+  are always `id`/`_etag` — and each gets there via an explicit
+  `[JsonProperty("id")]`/`[JsonProperty("category")]`/`[JsonProperty("_etag")]`
+  attribute declared directly on the concrete document type, not inherited
+  from an interface and not a naming-policy side effect. **Author-a-new-document-type
+  checklist:** every new Cosmos document type must declare all three
+  attributes itself (see §3's example) — there is no longer a single place
+  that makes this automatic for a new type the way the old global policy did.
 * Create the client once; never per-request or inside a controller.
 * The retry options above absorb transient `429` throttling on the Cosmos
   call itself. They are deliberately separate from the Polly pipeline in
@@ -176,13 +175,16 @@ Every Cosmos entity:
 ```csharp
 public sealed class InventoryEvent
 {
+    [JsonProperty("id")]
     public string Id { get; init; } = default!;
+
     public string WarehouseId { get; init; } = default!;
     public string Sku { get; init; } = default!;
 
     // Composite partition key per §4 — kept as its own property (not
     // derived at query time) so every write and query uses the identical
     // value. Populate as $"{WarehouseId}:{Sku}" when constructing the entity.
+    [JsonProperty("category")]
     public string Category { get; init; } = default!;
 
     public int OnHandQuantity { get; set; }
@@ -584,8 +586,8 @@ await repository.PatchAsync(
     inventoryEvent.Category,
     inventoryEvent.ETag!,
     [
-        PatchOperation.Increment("/onHandQuantity", -1),
-        PatchOperation.Set("/modifiedUtc", DateTime.UtcNow),
+        PatchOperation.Increment("/OnHandQuantity", -1),
+        PatchOperation.Set("/ModifiedUtc", DateTime.UtcNow),
     ],
     cancellationToken);
 ```

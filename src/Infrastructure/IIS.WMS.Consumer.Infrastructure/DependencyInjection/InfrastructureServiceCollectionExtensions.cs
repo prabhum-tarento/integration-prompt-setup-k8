@@ -5,6 +5,7 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.NexusServices;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -21,6 +22,8 @@ public static class InfrastructureServiceCollectionExtensions
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         services.Configure<ApplicationOptions>(configuration.GetSection(ApplicationOptions.SectionName));
+        services.Configure<FeatureFlagsOptions>(configuration.GetSection(FeatureFlagsOptions.SectionName));
+        services.Configure<InventoryPublishOptions>(configuration.GetSection(InventoryPublishOptions.SectionName));
 
         services.AddResiliencePipelines();
         services.AddCosmosDb(configuration);

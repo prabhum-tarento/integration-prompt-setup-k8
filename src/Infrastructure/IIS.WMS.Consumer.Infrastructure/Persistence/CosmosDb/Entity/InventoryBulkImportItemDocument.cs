@@ -11,6 +11,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 public sealed class InventoryBulkImportItemDocument : ICosmosDocument
 {
     /// <summary>Deterministic item id - <c>WarehouseId:Sku</c>.</summary>
+    [JsonProperty("id")]
     public string Id { get; init; } = default!;
 
     /// <summary>Warehouse this balance belongs to.</summary>
@@ -20,6 +21,7 @@ public sealed class InventoryBulkImportItemDocument : ICosmosDocument
     public string Sku { get; init; } = default!;
 
     /// <summary>Cosmos partition key value - identical to <see cref="Id"/> for this entity.</summary>
+    [JsonProperty("category")]
     public string Category { get; init; } = default!;
 
     /// <summary>On-hand quantity as reported by the upstream system.</summary>
@@ -31,7 +33,7 @@ public sealed class InventoryBulkImportItemDocument : ICosmosDocument
     /// <summary>Timestamp the upstream system last updated this figure.</summary>
     public DateTime SourceLastUpdatedUtc { get; set; }
 
-    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c> since the camelCase naming policy elsewhere can't produce that name.</summary>
+    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c>, the fixed name Cosmos's system property always uses.</summary>
     [JsonProperty("_etag")]
     public string? ETag { get; init; }
 }

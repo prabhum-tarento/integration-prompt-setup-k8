@@ -1,6 +1,6 @@
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Mapper;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

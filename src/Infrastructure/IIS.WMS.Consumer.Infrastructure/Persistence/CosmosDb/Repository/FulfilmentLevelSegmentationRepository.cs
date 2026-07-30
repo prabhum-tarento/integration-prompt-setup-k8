@@ -3,6 +3,7 @@ using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 

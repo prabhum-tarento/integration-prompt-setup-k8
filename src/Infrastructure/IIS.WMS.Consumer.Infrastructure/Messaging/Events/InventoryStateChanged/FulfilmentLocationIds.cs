@@ -11,4 +11,7 @@ internal static class FulfilmentLocationIds
     public const string Edc = "EDC";
     public const string Tdc = "TDC";
     public const string Adc = "ADC";
+
+    /// <summary>Third-party-logistics fulfilment location - drives the §3.6/§3.8 location-type branches (docs/InventoryStateChangedFullQueueTrigger.md).</summary>
+    public const string Caecom = "CAECOM";
 }

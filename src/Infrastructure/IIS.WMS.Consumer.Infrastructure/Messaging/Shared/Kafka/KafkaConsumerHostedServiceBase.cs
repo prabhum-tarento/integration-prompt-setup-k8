@@ -1141,7 +1141,7 @@ public abstract class KafkaConsumerHostedServiceBase : BackgroundService
 
     /// <summary>
     /// Writes <paramref name="content"/> to blob storage at
-    /// <c>{correlationId}/{ConsumerName}/{schemaName}/{timestamp}_{guid}.{extension}</c> - disposes
+    /// <c>{correlationId}/{ConsumerName}_{schemaName}_{timestamp}_{guid}.{extension}</c> - disposes
     /// <paramref name="content"/> once written. Best-effort: a Blob Storage outage (after the upload
     /// pipeline's own retries are exhausted) is logged and swallowed rather than blocking the dedup
     /// check or the relay itself; the audit trail is a diagnostic aid, not the durability boundary
@@ -1150,7 +1150,7 @@ public abstract class KafkaConsumerHostedServiceBase : BackgroundService
     private async Task WriteBlobAsync(
         IFileStore fileStore, string containerName, string schemaName, string correlationId, string extension, Stream content, CancellationToken cancellationToken)
     {
-        var blobName = $"{correlationId}/{schemaName}/{ConsumerName}/{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.{extension}";
+        var blobName = $"{correlationId}/{schemaName}_{ConsumerName}_{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}.{extension}";
 
         await using (content)
         {

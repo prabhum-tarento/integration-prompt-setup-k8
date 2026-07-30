@@ -3,7 +3,6 @@ using Azure.Messaging.ServiceBus.Administration;
 using Azure.Storage.Blobs;
 using IIS.WMS.Common.BlobStorage;
 using IIS.WMS.Consumer.Application.InventoryEvents;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.IntegrationTests.TestDoubles;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
@@ -13,6 +12,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 
 namespace IIS.WMS.Consumer.IntegrationTests;
 

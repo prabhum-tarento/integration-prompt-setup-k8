@@ -1,9 +1,13 @@
-﻿namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+﻿using Newtonsoft.Json;
+
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 public class ItemLevelSegmentationDocument : ICosmosDocument
 {
+    [JsonProperty("id")]
     public string Id { get; set; } = default!;
 
+    [JsonProperty("category")]
     public string Category { get; set; } = default!;
     public string FulfilmentCode { get; set; } = default!;
     public string HallmarkCode { get; set; } = default!;
@@ -26,5 +30,6 @@ public class ItemLevelSegmentationDocument : ICosmosDocument
 
     public bool IsActive { get; set; }
     #endregion
+    [JsonProperty("_etag")]
     public string? ETag { get; set; }
 }

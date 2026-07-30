@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using Microsoft.Azure.Cosmos;
 
 namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles.Cosmos;

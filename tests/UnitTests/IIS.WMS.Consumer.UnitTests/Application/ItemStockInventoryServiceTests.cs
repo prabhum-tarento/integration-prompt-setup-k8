@@ -4,6 +4,7 @@ using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.InventoryEvents.Dtos;
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Domain.Common;
+using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -45,17 +46,19 @@ public class ItemStockInventoryServiceTests
         return aggregate;
     }
 
-    [Fact(DisplayName = "ApplyPickAsync replaces the aggregate and dispatches its domain events on success")]
-    public async Task ApplyPickAsync_SufficientAllocated_ReplacesAggregateAndDispatchesDomainEvents()
+    [Fact(DisplayName = "ApplyPickAsync patches the aggregate and dispatches its domain events on success")]
+    public async Task ApplyPickAsync_SufficientAllocated_PatchesAggregateAndDispatchesDomainEvents()
     {
         var aggregate = CreateAggregate("etag-1", b2bAllocated: 10);
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns(aggregate);
-        repository.ReplaceAsync(aggregate, "etag-1", Arg.Any<CancellationToken>()).Returns(aggregate);
+        repository.PatchAsync(Id, Id, "etag-1", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>())
+            .Returns(aggregate);
 
         await sut.ApplyPickAsync("WH1", "SKU1", "TH", "925", ItemStockPickChannel.B2B, 4, CancellationToken.None);
 
         Assert.Equal(6, aggregate.B2BAllocated);
-        await repository.Received(1).ReplaceAsync(aggregate, "etag-1", Arg.Any<CancellationToken>());
+        await repository.Received(1).PatchAsync(
+            Id, Id, "etag-1", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>());
         await domainEventDispatcher.Received(1).DispatchAsync(
             Arg.Is<IReadOnlyCollection<IDomainEvent>>(events => events.Count == 1), Arg.Any<CancellationToken>());
     }
@@ -67,9 +70,10 @@ public class ItemStockInventoryServiceTests
         var freshAggregate = CreateAggregate("fresh-etag", b2bAllocated: 10);
 
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns(staleAggregate, freshAggregate);
-        repository.ReplaceAsync(staleAggregate, "stale-etag", Arg.Any<CancellationToken>())
+        repository.PatchAsync(Id, Id, "stale-etag", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>())
             .Throws(new ConcurrencyException(Id, "stale-etag"));
-        repository.ReplaceAsync(freshAggregate, "fresh-etag", Arg.Any<CancellationToken>()).Returns(freshAggregate);
+        repository.PatchAsync(Id, Id, "fresh-etag", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>())
+            .Returns(freshAggregate);
 
         await sut.ApplyPickAsync("WH1", "SKU1", "TH", "925", ItemStockPickChannel.B2B, 4, CancellationToken.None);
 
@@ -82,7 +86,9 @@ public class ItemStockInventoryServiceTests
     {
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>())
             .Returns(_ => CreateAggregate("etag-x", b2bAllocated: 10));
-        repository.ReplaceAsync(Arg.Any<ItemStockInventory>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        repository.PatchAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>())
             .Throws(new ConcurrencyException(Id, "etag-x"));
 
         await Assert.ThrowsAsync<ConcurrencyException>(
@@ -92,52 +98,54 @@ public class ItemStockInventoryServiceTests
     }
 
     [Fact(DisplayName = "ApplyPickAsync logs and returns without mutating when no record exists")]
-    public async Task ApplyPickAsync_NoMatchingRecord_DoesNotReplaceOrDispatch()
+    public async Task ApplyPickAsync_NoMatchingRecord_DoesNotPatchOrDispatch()
     {
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns((ItemStockInventory?)null);
 
         await sut.ApplyPickAsync("WH1", "SKU1", "TH", "925", ItemStockPickChannel.B2B, 4, CancellationToken.None);
 
-        await repository.DidNotReceiveWithAnyArgs().ReplaceAsync(default!, default!, default);
+        await repository.DidNotReceiveWithAnyArgs().PatchAsync(default!, default!, default!, default!, default);
         await domainEventDispatcher.DidNotReceiveWithAnyArgs().DispatchAsync(default!, default);
     }
 
     [Fact(DisplayName = "ApplyPickAsync swallows a non-extended oversell instead of rethrowing")]
-    public async Task ApplyPickAsync_NonExtendedOversell_LogsAndReturnsWithoutReplacing()
+    public async Task ApplyPickAsync_NonExtendedOversell_LogsAndReturnsWithoutPatching()
     {
         var aggregate = CreateAggregate("etag-1", b2cAllocated: 2);
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns(aggregate);
 
         await sut.ApplyPickAsync("WH1", "SKU1", "TH", "925", ItemStockPickChannel.B2C, 5, CancellationToken.None);
 
-        await repository.DidNotReceiveWithAnyArgs().ReplaceAsync(default!, default!, default);
+        await repository.DidNotReceiveWithAnyArgs().PatchAsync(default!, default!, default!, default!, default);
     }
 
-    [Fact(DisplayName = "ApplyUnpickAsync replaces the aggregate and dispatches its domain events on success")]
-    public async Task ApplyUnpickAsync_PreparedQuantityAvailable_ReplacesAggregateAndDispatchesDomainEvents()
+    [Fact(DisplayName = "ApplyUnpickAsync patches the aggregate and dispatches its domain events on success")]
+    public async Task ApplyUnpickAsync_PreparedQuantityAvailable_PatchesAggregateAndDispatchesDomainEvents()
     {
         var aggregate = CreateAggregate("etag-1", b2bAllocated: 10);
         aggregate.PickB2B(6, Now.UtcDateTime);
         aggregate.ClearDomainEvents();
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns(aggregate);
-        repository.ReplaceAsync(aggregate, "etag-1", Arg.Any<CancellationToken>()).Returns(aggregate);
+        repository.PatchAsync(Id, Id, "etag-1", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>())
+            .Returns(aggregate);
 
         await sut.ApplyUnpickAsync("WH1", "SKU1", "TH", "925", 4, CancellationToken.None);
 
         Assert.Equal(2, aggregate.B2BPrepared);
-        await repository.Received(1).ReplaceAsync(aggregate, "etag-1", Arg.Any<CancellationToken>());
+        await repository.Received(1).PatchAsync(
+            Id, Id, "etag-1", Arg.Any<IReadOnlyList<PatchOperation>>(), Arg.Any<CancellationToken>());
         await domainEventDispatcher.Received(1).DispatchAsync(
             Arg.Is<IReadOnlyCollection<IDomainEvent>>(events => events.Count == 1), Arg.Any<CancellationToken>());
     }
 
     [Fact(DisplayName = "ApplyUnpickAsync swallows the reject when nothing is prepared instead of rethrowing")]
-    public async Task ApplyUnpickAsync_NothingPrepared_LogsAndReturnsWithoutReplacing()
+    public async Task ApplyUnpickAsync_NothingPrepared_LogsAndReturnsWithoutPatching()
     {
         var aggregate = CreateAggregate("etag-1");
         repository.GetAsync(Id, Id, Arg.Any<CancellationToken>()).Returns(aggregate);
 
         await sut.ApplyUnpickAsync("WH1", "SKU1", "TH", "925", 4, CancellationToken.None);
 
-        await repository.DidNotReceiveWithAnyArgs().ReplaceAsync(default!, default!, default);
+        await repository.DidNotReceiveWithAnyArgs().PatchAsync(default!, default!, default!, default!, default);
     }
 }

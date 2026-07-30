@@ -1,6 +1,5 @@
 namespace IIS.WMS.Consumer.Domain.Aggregates;
 
-/// <summary>Fulfilment-level segmentation rule: store/e-commerce share and leverage thresholds for one fulfilment/hallmark/item/country-of-origin combination.</summary>
 public class FulfilmentLevelSegmentation
 {
     /// <summary>Fulfilment code, part of this rule's partition key.</summary>

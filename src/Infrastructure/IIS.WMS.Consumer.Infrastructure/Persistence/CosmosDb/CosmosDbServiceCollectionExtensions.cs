@@ -3,6 +3,7 @@ using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,6 +62,8 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddScoped<IItemStockInventoryRepository, ItemStockInventoryRepository>();
         services.AddScoped<IFulfilmentLevelSegmentationRepository, FulfilmentLevelSegmentationRepository>();
         services.AddScoped<IItemLevelSegmentationRepository, ItemLevelSegmentationRepository>();
+        services.AddScoped<IFulfilmentUnitRepository, FulfilmentUnitRepository>();
+        services.AddScoped<IItemStockInventoryExtendedRepository, ItemStockInventoryExtendedRepository>();
         services.AddScoped<IMessageArchiveRepository, MessageArchiveRepository>();
 
         // Bulk-import client: same account/database, but AllowBulkExecution = true and connection
@@ -108,10 +111,6 @@ public static class CosmosDbServiceCollectionExtensions
             AllowBulkExecution = allowBulkExecution,
             MaxRetryAttemptsOnRateLimitedRequests = 9,
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-            SerializerOptions = new CosmosSerializationOptions
-            {
-                PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
-            },
         };
 
         if (env.IsDevelopment())

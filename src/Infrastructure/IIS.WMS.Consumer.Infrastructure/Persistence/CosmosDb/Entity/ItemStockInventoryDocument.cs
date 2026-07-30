@@ -1,9 +1,13 @@
-﻿namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+﻿using Newtonsoft.Json;
+
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 
 public class ItemStockInventoryDocument : ICosmosDocument
 {
+    [JsonProperty("id")]
     public string Id { get; set; } = default!;
 
+    [JsonProperty("category")]
     public string Category { get; set; } = default!;
     public string ItemCode { get; set; } = default!;
     public string FulfilmentId { get; set; } = default!;
@@ -28,5 +32,6 @@ public class ItemStockInventoryDocument : ICosmosDocument
     public string Timestamp { get; set; } = default!;
     public bool? IsPOSM { get; set; }
 
+    [JsonProperty("_etag")]
     public string? ETag { get; set; }
 }

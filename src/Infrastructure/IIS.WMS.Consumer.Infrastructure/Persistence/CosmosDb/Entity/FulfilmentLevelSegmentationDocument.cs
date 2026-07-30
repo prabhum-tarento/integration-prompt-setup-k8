@@ -1,12 +1,15 @@
-namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using Newtonsoft.Json;
 
+namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 /// <summary>Cosmos DB persistence shape for a fulfilment-level segmentation rule (cosmos-db.instructions.md §3).</summary>
 public class FulfilmentLevelSegmentationDocument : ICosmosDocument
 {
     /// <summary>Deterministic item id.</summary>
+    [JsonProperty("id")]
     public string Id { get; set; } = default!;
 
     /// <summary>Cosmos partition key value - <c>SEG_FU_{FulfilmentCode}_{HallmarkCode}</c>.</summary>
+    [JsonProperty("category")]
     public string Category { get; set; } = default!;
 
     /// <summary>Fulfilment code, part of this rule's partition key.</summary>
@@ -37,5 +40,6 @@ public class FulfilmentLevelSegmentationDocument : ICosmosDocument
     public bool IsActive { get; set; }
 
     /// <summary>Cosmos's system-managed optimistic-concurrency token.</summary>
+    [JsonProperty("_etag")]
     public string? ETag { get; set; }
 }

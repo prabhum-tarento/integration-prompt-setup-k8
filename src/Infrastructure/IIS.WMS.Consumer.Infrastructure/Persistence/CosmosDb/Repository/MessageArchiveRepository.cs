@@ -1,9 +1,10 @@
 using IIS.WMS.Common.Correlation;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Domain.Aggregates;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Mapper;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;

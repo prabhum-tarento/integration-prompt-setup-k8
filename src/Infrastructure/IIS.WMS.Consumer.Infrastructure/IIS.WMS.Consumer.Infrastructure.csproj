@@ -36,8 +36,4 @@
     <InternalsVisibleTo Include="IIS.WMS.Consumer.IntegrationTests" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Persistence\CosmosDb\Mapper\" />
-  </ItemGroup>
-
 </Project>

@@ -1,3 +1,4 @@
+using System.Net.NetworkInformation;
 using IIS.WMS.Consumer.Domain.Common;
 using IIS.WMS.Consumer.Domain.Events;
 using IIS.WMS.Consumer.Domain.Exceptions;
@@ -54,8 +55,8 @@ public sealed class ItemStockInventory : AggregateRoot
 
     public int B2CThreshold { get; private set; }
 
-    /// <summary>Whether this record participates in B2C extension borrowing against <see cref="B2BUsedShare"/>. Extension recalculation itself is not ported - see docs/InventoryStateChanged-OrderTracking-Relay.md.</summary>
-    public bool IsExtended { get; private init; }
+    /// <summary>Whether this record participates in B2C extension borrowing against <see cref="B2BUsedShare"/>.</summary>
+    public bool IsExtended { get; private set; }
 
     /// <summary>Remaining B2B share a B2C oversell may borrow against, when <see cref="IsExtended"/>.</summary>
     public int B2BUsedShare { get; private set; }
@@ -85,6 +86,24 @@ public sealed class ItemStockInventory : AggregateRoot
     /// <summary>Builds the deterministic id/partition key for one fulfilment location's item/hallmark/COO combination.</summary>
     public static string BuildId(string fulfilmentId, string itemCode, string hallmark, string countryOfOrigin) =>
         $"{fulfilmentId}:{itemCode}:{hallmark}:{countryOfOrigin}".ToUpperInvariant();
+
+    /// <summary>
+    /// Creates a new zero-initialized record for a fulfilment location/item/hallmark/COO combination
+    /// that has no existing <c>ItemStockInventory</c> row yet - mirrors the upstream Reflex facade's
+    /// <c>InventorySegmentationAndExtensionHandler</c> create-if-missing branch (see
+    /// docs/InventoryStateChangedFullQueueTrigger.md §3.3), which zero-initializes every quantity
+    /// field rather than leaving the row absent.
+    /// </summary>
+    public static ItemStockInventory CreateDefault(
+        string fulfilmentId, string itemCode, string hallmark, string countryOfOrigin, DateTime nowUtc) => new()
+    {
+        Id = BuildId(fulfilmentId, itemCode, hallmark, countryOfOrigin),
+        FulfilmentId = fulfilmentId,
+        ItemCode = itemCode,
+        CountryOfOrigin = countryOfOrigin,
+        Hallmark = hallmark,
+        ModifiedUtc = nowUtc,
+    };
 
     /// <summary>Rehydrates an aggregate from persisted state - the repository mapper's entry point, not for new aggregates.</summary>
     public static ItemStockInventory Rehydrate(
@@ -204,10 +223,11 @@ public sealed class ItemStockInventory : AggregateRoot
     }
 
     /// <summary>
-    /// Applies an unpick (<c>Dgp</c>): moves <paramref name="quantity"/> out of B2B prepared.
-    /// Mirrors Reflex's <c>InventoryUnpickEventHandler</c> <c>DGP</c> branch - rejects outright
-    /// (rather than clamping) when nothing is prepared, since an unpick with no prior pick is a
-    /// genuine invariant violation, not tolerable drift.
+    /// Applies an unpick (<c>Dgp</c>): reverses a prior pick by moving <paramref name="quantity"/>
+    /// out of B2B prepared and back into B2B allocated. Mirrors Reflex's
+    /// <c>InventoryUnpickEventHandler</c> <c>DGP</c> branch - rejects outright (rather than clamping)
+    /// when nothing is prepared, since an unpick with no prior pick is a genuine invariant
+    /// violation, not tolerable drift.
     /// </summary>
     public void Unpick(int quantity, DateTime nowUtc)
     {
@@ -219,8 +239,154 @@ public sealed class ItemStockInventory : AggregateRoot
         }
 
         B2BPrepared -= quantity;
+        B2BAllocated += quantity;
         ModifiedUtc = nowUtc;
 
         RaiseDomainEvent(new ItemStockUnpicked(Id, FulfilmentId, ItemCode, quantity));
+    }
+
+    /// <summary>
+    /// Recalculates <see cref="B2CExtended"/> as the actual B2B available quantity - mirrors the
+    /// upstream Reflex facade's <c>FormulaHelper.CalculateActualB2BAvailable</c> exactly (docs/
+    /// InventoryStateChangedFullQueueTrigger.md §3.4): <c>B2BAvailable - (B2BAllocated + B2BUsedShare
+    /// + B2BPrepared)</c>, clamped at zero. There is no store-leverage multiplier in this formula -
+    /// leverage only gates *whether* extension applies at all (see <see cref="ActivateExtension"/>),
+    /// resolved upstream of this call.
+    /// </summary>
+    public void CalculateB2CExtended()
+    {
+        B2CExtended = Math.Max(0, B2BAvailable - (B2BAllocated + B2BUsedShare + B2BPrepared));
+    }
+
+    /// <summary>
+    /// Recalculates B2C available quantity by combining the original B2C allocation with
+    /// any B2C extension amount. Returns the new calculated value without modifying the aggregate.
+    /// </summary>
+    public int CalculateB2CAvailable()
+    {
+        return B2COriginal + B2CExtended;
+    }
+
+    /// <summary>
+    /// Updates the B2C available quantity after extension recalculation. Called by the
+    /// extension calculation helper when the result differs from the previous value.
+    /// </summary>
+    public void UpdateB2CAvailable(int newB2CAvailable)
+    {
+        B2CAvailable = newB2CAvailable;
+    }
+
+    /// <summary>
+    /// Marks this record as participating in B2C extension borrowing - mirrors the upstream Reflex
+    /// facade's <c>itemStockInventoryDTO.IsExtended = true;</c> flip immediately before
+    /// <c>DoItemLevelExtension</c> (docs/InventoryStateChangedFullQueueTrigger.md §3.3). A one-way
+    /// flag flip; there is no corresponding deactivation path in the ported trigger.
+    /// </summary>
+    public void ActivateExtension() => IsExtended = true;
+
+    /// <summary>
+    /// §3.3 fulfilment-level B2C-only segmentation for third-party-logistics locations - mirrors
+    /// the upstream Reflex facade's <c>SegmentInventoryHelper.DoFulfilmentLevelB2CSegmentation</c>
+    /// exactly, including its clamp-to-zero (never reject) behavior on a negative inbound quantity
+    /// that would oversell <see cref="B2CAvailable"/>.
+    /// </summary>
+    public void DoFulfilmentLevelB2CSegmentation(int inboundQty, DateTime nowUtc)
+    {
+        if (inboundQty < 0)
+        {
+            var actualB2CAvailable = B2CAvailable - (B2CAllocated + B2CPrepared);
+            var abs = Math.Abs(inboundQty);
+
+            B2CAvailable = actualB2CAvailable - abs >= 0
+                ? B2CAvailable - abs
+                : Math.Max(0, B2CAvailable - abs);
+        }
+        else if (inboundQty > 0)
+        {
+            B2CAvailable += inboundQty;
+        }
+
+        ModifiedUtc = nowUtc;
+    }
+
+    /// <summary>
+    /// §3.3 fulfilment-level segmentation for the non-extended, non-3PL fallback path - mirrors the
+    /// upstream Reflex facade's <c>SegmentInventoryHelper.DoFulfilmentLevelSegmentation</c> exactly:
+    /// all inbound movement (positive or negative) lands on <see cref="B2BAvailable"/>, clamped to
+    /// zero on oversell rather than rejected. Does not touch <see cref="B2CAvailable"/> - this path
+    /// never changes the OMS-facing delta (docs/InventoryStateChangedFullQueueTrigger.md §3.3).
+    /// </summary>
+    public void DoFulfilmentLevelSegmentation(int inboundQty, DateTime nowUtc)
+    {
+        if (inboundQty < 0)
+        {
+            var actualB2BAvailable = B2BAvailable - (B2BAllocated + B2BUsedShare + B2BPrepared);
+            var abs = Math.Abs(inboundQty);
+
+            B2BAvailable = actualB2BAvailable - abs >= 0
+                ? B2BAvailable - abs
+                : Math.Max(0, B2BAvailable - abs);
+        }
+        else if (inboundQty > 0)
+        {
+            B2BAvailable += inboundQty;
+        }
+
+        ModifiedUtc = nowUtc;
+    }
+
+    /// <summary>
+    /// §3.3 item-level extension - mirrors the upstream Reflex facade's
+    /// <c>ExtendInventoryHelper.DoItemLevelExtension</c> exactly. Only applies when
+    /// <see cref="IsExtended"/> (set via <see cref="ActivateExtension"/> immediately before this
+    /// call, per the ported trigger's own sequencing) - a no-op otherwise, matching Reflex's
+    /// early-exit. <paramref name="ecomShare"/> is the item-level segmentation rule's configured
+    /// e-commerce share threshold.
+    /// </summary>
+    public void DoItemLevelExtension(int inboundQty, int ecomShare, DateTime nowUtc)
+    {
+        if (!IsExtended)
+        {
+            return;
+        }
+
+        if (inboundQty > 0)
+        {
+            var actualB2COriginal = B2COriginal - B2CAllocated - B2CPrepared;
+
+            if (ecomShare - actualB2COriginal >= inboundQty)
+            {
+                B2COriginal += inboundQty;
+            }
+            else
+            {
+                var b2cShare = ecomShare - actualB2COriginal;
+                B2BAvailable += inboundQty - b2cShare;
+                B2COriginal += b2cShare;
+                CalculateB2CExtended();
+            }
+        }
+        else
+        {
+            var abs = Math.Abs(inboundQty);
+            var actualB2BAvailable = B2BAvailable - (B2BAllocated + B2BUsedShare + B2BPrepared);
+
+            if (actualB2BAvailable - abs >= 0)
+            {
+                B2BAvailable -= abs;
+                CalculateB2CExtended();
+            }
+            else
+            {
+                var b2cShare = abs - actualB2BAvailable;
+                var b2bShare = abs - b2cShare;
+                B2COriginal -= b2cShare;
+                B2BAvailable -= b2bShare;
+                CalculateB2CExtended();
+            }
+        }
+
+        B2CAvailable = B2CExtended + B2COriginal;
+        ModifiedUtc = nowUtc;
     }
 }

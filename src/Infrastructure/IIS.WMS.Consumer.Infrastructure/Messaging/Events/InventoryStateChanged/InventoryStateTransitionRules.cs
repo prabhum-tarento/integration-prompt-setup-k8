@@ -23,4 +23,17 @@ internal static class InventoryStateTransitionRules
         value.FromState.State == InventoryEventStockState.Available && value.FromState.Status == InventoryEventStockStatus.Prepared
         && value.ToState.State == InventoryEventStockState.Available
         && (value.ToState.Status == InventoryEventStockStatus.Held || value.ToState.Status == InventoryEventStockStatus.Pickable);
+
+    /// <summary>
+    /// §3.3 segmentation trigger (docs/InventoryStateChangedFullQueueTrigger.md) - either side of the
+    /// transition is Available/Pickable. Independent of <see cref="IsPickableToPrepared"/>/
+    /// <see cref="IsUnpickTransition"/>: the orchestrator only runs this branch in the else-case
+    /// (neither pick nor unpick), per the trigger's own sequencing.
+    /// </summary>
+    public static bool IsSegmentationTrigger(InventoryStateChangedEvent value) =>
+        IsAvailablePickable(value.FromState) || IsAvailablePickable(value.ToState);
+
+    /// <summary>Whether a state/status snapshot is the baseline Available/Pickable pair - drives both the §3.3 segmentation trigger and the §3.5 extended-segmentation trigger (its negation).</summary>
+    public static bool IsAvailablePickable(InventoryEventStateSnapshot snapshot) =>
+        snapshot.State == InventoryEventStockState.Available && snapshot.Status == InventoryEventStockStatus.Pickable;
 }

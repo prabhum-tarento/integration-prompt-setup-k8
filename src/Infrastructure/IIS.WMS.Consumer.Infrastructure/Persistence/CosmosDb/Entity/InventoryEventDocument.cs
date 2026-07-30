@@ -10,6 +10,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 public sealed class InventoryEventDocument : ICosmosDocument
 {
     /// <summary>Deterministic item id - <c>WarehouseId:Sku</c>.</summary>
+    [JsonProperty("id")]
     public string Id { get; init; } = default!;
 
     /// <summary>Warehouse this balance belongs to.</summary>
@@ -21,6 +22,7 @@ public sealed class InventoryEventDocument : ICosmosDocument
     // Composite partition key per §4 - kept as its own property (not derived at query time) so
     // every write and query uses the identical value.
     /// <summary>Cosmos partition key value - identical to <see cref="Id"/> for this entity.</summary>
+    [JsonProperty("category")]
     public string Category { get; init; } = default!;
 
     /// <summary>Current on-hand quantity, net of active reservations.</summary>
@@ -35,7 +37,7 @@ public sealed class InventoryEventDocument : ICosmosDocument
     /// <summary>UTC timestamp of the most recent state change.</summary>
     public DateTime ModifiedUtc { get; set; }
 
-    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c> since the camelCase naming policy elsewhere can't produce that name.</summary>
+    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c>, the fixed name Cosmos's system property always uses.</summary>
     [JsonProperty("_etag")]
     public string? ETag { get; init; }
 }

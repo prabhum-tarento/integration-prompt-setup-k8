@@ -17,6 +17,14 @@ public sealed class InventoryStateChangedServiceBusConsumerOptions : ServiceBusC
     public const string SectionName = "ServiceBus:InventoryStateChanged";
 
     /// <summary>
+    /// Bounded fan-out (integration-resiliency.instructions.md §6) for
+    /// <see cref="Handlers.InventoryStateChangedHandler"/>'s per-item-line Cosmos DB operations - size
+    /// alongside <see cref="ServiceBusConsumerOptionsBase.MaxConcurrentSessions"/> per the doc's
+    /// RU-budget formula (replicas × MaxConcurrentSessions × this value × avgRuPerWrite ≤ provisionedRUs).
+    /// </summary>
+    public int MaxItemLineParallelism { get; init; } = 8;
+
+    /// <summary>
     /// Fills <see cref="ServiceBusConsumerOptionsBase.MaxConcurrentSessions"/> and
     /// <see cref="ServiceBusConsumerOptionsBase.MaxConcurrentCallsPerSession"/> from
     /// <paramref name="serviceBusLevelOptions"/> wherever this (queue-level) instance left them unset -

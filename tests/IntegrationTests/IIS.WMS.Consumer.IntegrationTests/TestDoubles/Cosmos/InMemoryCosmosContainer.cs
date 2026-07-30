@@ -3,9 +3,7 @@ using System.Net;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Scripts;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Newtonsoft.Json.Serialization;
 
 namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles.Cosmos;
 
@@ -22,21 +20,17 @@ namespace IIS.WMS.Consumer.IntegrationTests.TestDoubles.Cosmos;
 /// </summary>
 /// <remarks>
 /// Documents are stored as <see cref="JObject"/> (Newtonsoft.Json - already a dependency of
-/// <c>IIS.WMS.Consumer.Infrastructure</c>, not a new package) serialized with a camelCase contract
+/// <c>IIS.WMS.Consumer.Infrastructure</c>, not a new package) serialized with Newtonsoft's default
 /// resolver, matching the property-name convention this repo's <c>PatchOperation</c> paths use (e.g.
-/// <c>/onHandQuantity</c>) even though the C# document types themselves are PascalCase - this is what
-/// makes <see cref="PatchItemAsync{T}"/>'s path-based operations resolve against the right JSON property.
-/// <c>[JsonProperty("_etag")]</c> on each document's <c>ETag</c> property still wins over the resolver
-/// (an explicit name always overrides a naming strategy), so round-tripping preserves the real Cosmos
-/// system-property name.
+/// <c>/OnHandQuantity</c>) - the literal PascalCase C# property name, since the real Cosmos client no
+/// longer applies a naming policy either. This is what makes <see cref="PatchItemAsync{T}"/>'s
+/// path-based operations resolve against the right JSON property. <c>[JsonProperty("id")]</c>/
+/// <c>[JsonProperty("category")]</c>/<c>[JsonProperty("_etag")]</c> on each document's <c>Id</c>/
+/// <c>Category</c>/<c>ETag</c> properties still win over the default resolver (an explicit name always
+/// overrides it), so round-tripping preserves the real Cosmos system-property names.
 /// </remarks>
 public sealed class InMemoryCosmosContainer : Container
 {
-    private static readonly JsonSerializerSettings SerializerSettings = new()
-    {
-        ContractResolver = new CamelCasePropertyNamesContractResolver(),
-    };
-
     private readonly string containerId;
     private readonly ConcurrentDictionary<string, JObject> store = new();
     private int etagCounter;
@@ -295,18 +289,18 @@ public sealed class InMemoryCosmosContainer : Container
 
     private static JObject Serialize<T>(T item, string etag)
     {
-        var jobject = JObject.FromObject(item!, JsonSerializer.Create(SerializerSettings));
+        var jobject = JObject.FromObject(item!);
         jobject["_etag"] = etag;
         return jobject;
     }
 
-    private static T Deserialize<T>(JObject jobject) => jobject.ToObject<T>(JsonSerializer.Create(SerializerSettings))!;
+    private static T Deserialize<T>(JObject jobject) => jobject.ToObject<T>()!;
 
     private static ItemResponse<T> BuildItemResponse<T>(JObject jobject, HttpStatusCode statusCode) =>
         new InMemoryItemResponse<T>(Deserialize<T>(jobject), statusCode);
 
     // ------------------------------------------------------------------ //
-    // Patch application - Cosmos Patch API path semantics against the camelCase JObject above
+    // Patch application - Cosmos Patch API path semantics against the PascalCase JObject above
     // ------------------------------------------------------------------ //
 
     private static readonly char[] PathSeparator = ['/'];

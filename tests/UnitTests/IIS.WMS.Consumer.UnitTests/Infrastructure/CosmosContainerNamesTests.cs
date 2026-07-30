@@ -1,4 +1,4 @@
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 
 namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 

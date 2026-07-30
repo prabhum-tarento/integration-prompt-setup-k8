@@ -14,21 +14,23 @@ public class ItemStockInventoryTests
     private static readonly DateTime Now = new(2026, 7, 8, 12, 0, 0, DateTimeKind.Utc);
 
     private static ItemStockInventory CreateAggregate(
-        int b2bAllocated = 10, int b2cAllocated = 10, bool isExtended = false, int b2bUsedShare = 0) =>
+        int b2bAllocated = 10, int b2cAllocated = 10, bool isExtended = false, int b2bUsedShare = 0,
+        int b2bAvailable = 20, int b2cAvailable = 20, int b2cOriginal = 20, int b2cExtended = 0,
+        int b2cPrepared = 0, int b2bPrepared = 0) =>
         ItemStockInventory.Rehydrate(
             id: "WH1:SKU1:925:TH",
             fulfilmentId: "WH1",
             itemCode: "SKU1",
             countryOfOrigin: "TH",
             hallmark: "925",
-            b2bAvailable: 20,
-            b2cAvailable: 20,
-            b2cOriginal: 20,
-            b2cExtended: 0,
+            b2bAvailable: b2bAvailable,
+            b2cAvailable: b2cAvailable,
+            b2cOriginal: b2cOriginal,
+            b2cExtended: b2cExtended,
             b2cAllocated: b2cAllocated,
             b2bAllocated: b2bAllocated,
-            b2cPrepared: 0,
-            b2bPrepared: 0,
+            b2cPrepared: b2cPrepared,
+            b2bPrepared: b2bPrepared,
             internalHallmarkAllocated: 0,
             inTransit: 0,
             b2cThreshold: 0,
@@ -118,8 +120,8 @@ public class ItemStockInventoryTests
         Assert.Empty(aggregate.DomainEvents);
     }
 
-    [Fact(DisplayName = "Unpick decrements B2BPrepared and raises ItemStockUnpicked")]
-    public void Unpick_PreparedQuantityAvailable_DecrementsB2BPreparedAndRaisesItemStockUnpicked()
+    [Fact(DisplayName = "Unpick decrements B2BPrepared, re-increments B2BAllocated, and raises ItemStockUnpicked")]
+    public void Unpick_PreparedQuantityAvailable_DecrementsB2BPreparedIncrementsB2BAllocatedAndRaisesItemStockUnpicked()
     {
         var aggregate = CreateAggregate(b2bAllocated: 10);
         aggregate.PickB2B(6, Now);
@@ -127,6 +129,7 @@ public class ItemStockInventoryTests
         aggregate.Unpick(4, Now);
 
         Assert.Equal(2, aggregate.B2BPrepared);
+        Assert.Equal(8, aggregate.B2BAllocated);
         Assert.Contains(aggregate.DomainEvents, e => e is ItemStockUnpicked);
     }
 
@@ -154,5 +157,181 @@ public class ItemStockInventoryTests
         var id = ItemStockInventory.BuildId("wh1", "sku1", "925", "th");
 
         Assert.Equal("WH1:SKU1:925:TH", id);
+    }
+
+    [Fact(DisplayName = "ActivateExtension sets IsExtended to true")]
+    public void ActivateExtension_Called_SetsIsExtendedTrue()
+    {
+        var aggregate = CreateAggregate(isExtended: false);
+
+        aggregate.ActivateExtension();
+
+        Assert.True(aggregate.IsExtended);
+    }
+
+    [Fact(DisplayName = "CreateDefault zero-initializes all quantity fields and stamps identity/ModifiedUtc")]
+    public void CreateDefault_GivenComponents_ReturnsZeroInitializedAggregate()
+    {
+        var aggregate = ItemStockInventory.CreateDefault("WH1", "SKU1", "925", "TH", Now);
+
+        Assert.Equal("WH1:SKU1:925:TH", aggregate.Id);
+        Assert.Equal("WH1", aggregate.FulfilmentId);
+        Assert.Equal("SKU1", aggregate.ItemCode);
+        Assert.Equal("925", aggregate.Hallmark);
+        Assert.Equal("TH", aggregate.CountryOfOrigin);
+        Assert.Equal(Now, aggregate.ModifiedUtc);
+        Assert.False(aggregate.IsExtended);
+        Assert.Equal(0, aggregate.B2BAvailable);
+        Assert.Equal(0, aggregate.B2CAvailable);
+        Assert.Equal(0, aggregate.B2COriginal);
+        Assert.Equal(0, aggregate.B2CExtended);
+        Assert.Equal(0, aggregate.B2CAllocated);
+        Assert.Equal(0, aggregate.B2BAllocated);
+        Assert.Equal(0, aggregate.B2CPrepared);
+        Assert.Equal(0, aggregate.B2BPrepared);
+        Assert.Equal(0, aggregate.B2BUsedShare);
+    }
+
+    [Fact(DisplayName = "CalculateB2CExtended matches the doc's §3.4 worked example (B2BAVL=500, B2BAllocated=200, B2BUsedShare=40)")]
+    public void CalculateB2CExtended_DocWorkedExample_ComputesExpectedValue()
+    {
+        var aggregate = CreateAggregate(b2bAvailable: 500, b2bAllocated: 200, b2bUsedShare: 40, b2bPrepared: 0);
+
+        aggregate.CalculateB2CExtended();
+
+        Assert.Equal(260, aggregate.B2CExtended);
+    }
+
+    [Fact(DisplayName = "CalculateB2CExtended clamps to zero when B2B commitments exceed B2BAvailable")]
+    public void CalculateB2CExtended_CommitmentsExceedAvailable_ClampsToZero()
+    {
+        var aggregate = CreateAggregate(b2bAvailable: 10, b2bAllocated: 20, b2bUsedShare: 0, b2bPrepared: 0);
+
+        aggregate.CalculateB2CExtended();
+
+        Assert.Equal(0, aggregate.B2CExtended);
+    }
+
+    [Fact(DisplayName = "DoFulfilmentLevelB2CSegmentation adds a positive inbound quantity directly to B2CAvailable")]
+    public void DoFulfilmentLevelB2CSegmentation_PositiveInboundQty_AddsToB2CAvailable()
+    {
+        var aggregate = CreateAggregate(b2cAvailable: 20, b2cAllocated: 0, b2cPrepared: 0);
+
+        aggregate.DoFulfilmentLevelB2CSegmentation(5, Now);
+
+        Assert.Equal(25, aggregate.B2CAvailable);
+        Assert.Equal(Now, aggregate.ModifiedUtc);
+    }
+
+    [Fact(DisplayName = "DoFulfilmentLevelB2CSegmentation subtracts a negative inbound quantity that fits within the actual available amount")]
+    public void DoFulfilmentLevelB2CSegmentation_NegativeInboundQtyWithinActualAvailable_SubtractsExactly()
+    {
+        var aggregate = CreateAggregate(b2cAvailable: 20, b2cAllocated: 5, b2cPrepared: 5);
+
+        aggregate.DoFulfilmentLevelB2CSegmentation(-6, Now);
+
+        Assert.Equal(14, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoFulfilmentLevelB2CSegmentation clamps B2CAvailable to zero on an oversell rather than rejecting")]
+    public void DoFulfilmentLevelB2CSegmentation_NegativeInboundQtyOversells_ClampsToZero()
+    {
+        var aggregate = CreateAggregate(b2cAvailable: 20, b2cAllocated: 5, b2cPrepared: 5);
+
+        aggregate.DoFulfilmentLevelB2CSegmentation(-25, Now);
+
+        Assert.Equal(0, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoFulfilmentLevelSegmentation adds a positive inbound quantity to B2BAvailable and leaves B2CAvailable untouched")]
+    public void DoFulfilmentLevelSegmentation_PositiveInboundQty_AddsToB2BAvailableOnly()
+    {
+        var aggregate = CreateAggregate(b2bAvailable: 20, b2bAllocated: 0, b2bUsedShare: 0, b2bPrepared: 0, b2cAvailable: 20);
+
+        aggregate.DoFulfilmentLevelSegmentation(5, Now);
+
+        Assert.Equal(25, aggregate.B2BAvailable);
+        Assert.Equal(20, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoFulfilmentLevelSegmentation clamps B2BAvailable to zero on an oversell and leaves B2CAvailable untouched")]
+    public void DoFulfilmentLevelSegmentation_NegativeInboundQtyOversells_ClampsB2BAvailableToZeroOnly()
+    {
+        var aggregate = CreateAggregate(b2bAvailable: 20, b2bAllocated: 5, b2bUsedShare: 0, b2bPrepared: 5, b2cAvailable: 20);
+
+        aggregate.DoFulfilmentLevelSegmentation(-25, Now);
+
+        Assert.Equal(0, aggregate.B2BAvailable);
+        Assert.Equal(20, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoItemLevelExtension is a no-op when IsExtended is false")]
+    public void DoItemLevelExtension_NotExtended_DoesNothing()
+    {
+        var aggregate = CreateAggregate(isExtended: false, b2cOriginal: 100, b2bAvailable: 50);
+
+        aggregate.DoItemLevelExtension(8, 90, Now.AddHours(1));
+
+        Assert.Equal(100, aggregate.B2COriginal);
+        Assert.Equal(50, aggregate.B2BAvailable);
+        Assert.Equal(Now, aggregate.ModifiedUtc);
+    }
+
+    [Fact(DisplayName = "DoItemLevelExtension adds a positive inbound quantity directly to B2COriginal when it fits within the ecom share")]
+    public void DoItemLevelExtension_PositiveInboundQtyFitsWithinEcomShare_AddsToB2COriginal()
+    {
+        var aggregate = CreateAggregate(
+            isExtended: true, b2cOriginal: 100, b2cAllocated: 10, b2cPrepared: 10, b2cExtended: 0);
+
+        aggregate.DoItemLevelExtension(8, 90, Now);
+
+        Assert.Equal(108, aggregate.B2COriginal);
+        Assert.Equal(0, aggregate.B2CExtended);
+        Assert.Equal(108, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoItemLevelExtension splits a positive inbound quantity across B2COriginal and B2BAvailable when it exceeds the ecom share")]
+    public void DoItemLevelExtension_PositiveInboundQtyExceedsEcomShare_SplitsAcrossB2COriginalAndB2BAvailable()
+    {
+        var aggregate = CreateAggregate(
+            isExtended: true, b2cOriginal: 100, b2cAllocated: 10, b2cPrepared: 10, b2cExtended: 0,
+            b2bAvailable: 50, b2bAllocated: 10, b2bUsedShare: 0, b2bPrepared: 0);
+
+        aggregate.DoItemLevelExtension(12, 85, Now);
+
+        Assert.Equal(105, aggregate.B2COriginal);
+        Assert.Equal(57, aggregate.B2BAvailable);
+        Assert.Equal(47, aggregate.B2CExtended);
+        Assert.Equal(152, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoItemLevelExtension subtracts a negative inbound quantity directly from B2BAvailable when fully absorbed")]
+    public void DoItemLevelExtension_NegativeInboundQtyFullyAbsorbedByB2BAvailable_SubtractsFromB2BAvailable()
+    {
+        var aggregate = CreateAggregate(
+            isExtended: true, b2cOriginal: 100, b2cExtended: 0,
+            b2bAvailable: 50, b2bAllocated: 10, b2bUsedShare: 0, b2bPrepared: 0);
+
+        aggregate.DoItemLevelExtension(-15, 0, Now);
+
+        Assert.Equal(35, aggregate.B2BAvailable);
+        Assert.Equal(100, aggregate.B2COriginal);
+        Assert.Equal(25, aggregate.B2CExtended);
+        Assert.Equal(125, aggregate.B2CAvailable);
+    }
+
+    [Fact(DisplayName = "DoItemLevelExtension splits a negative inbound quantity between B2COriginal and B2BAvailable when it exceeds the actual B2BAvailable")]
+    public void DoItemLevelExtension_NegativeInboundQtyExceedsActualB2BAvailable_SplitsBetweenB2COriginalAndB2BAvailable()
+    {
+        var aggregate = CreateAggregate(
+            isExtended: true, b2cOriginal: 100, b2cExtended: 0,
+            b2bAvailable: 50, b2bAllocated: 10, b2bUsedShare: 0, b2bPrepared: 0);
+
+        aggregate.DoItemLevelExtension(-45, 0, Now);
+
+        Assert.Equal(95, aggregate.B2COriginal);
+        Assert.Equal(10, aggregate.B2BAvailable);
+        Assert.Equal(0, aggregate.B2CExtended);
+        Assert.Equal(95, aggregate.B2CAvailable);
     }
 }

@@ -1,3 +1,4 @@
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
@@ -10,9 +11,11 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 public sealed class AuditEntryDocument : ICosmosDocument
 {
     /// <summary>Deterministic-enough item id - <c>{EntityId}:{NewGuid}</c>.</summary>
+    [JsonProperty("id")]
     public string Id { get; init; } = default!;
 
     /// <summary><c>{ContainerName}_{EntityPartitionKey}</c> - also this entity's Cosmos partition key.</summary>
+    [JsonProperty("category")]
     public string Category { get; init; } = default!;
 
     /// <summary>Name of the Cosmos container the mutated entity lives in.</summary>
@@ -42,6 +45,7 @@ public sealed class AuditEntryDocument : ICosmosDocument
     /// <summary>UTC timestamp the mutation was captured.</summary>
     public DateTime TimestampUtc { get; init; }
 
-    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c> since the camelCase naming policy elsewhere can't produce that name.</summary>
+    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c>, the fixed name Cosmos's system property always uses.</summary>
+    [JsonProperty("_etag")]
     public string? ETag { get; init; }
 }

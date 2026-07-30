@@ -11,9 +11,11 @@ namespace IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Entity;
 public sealed class OrderArchiveDocument : ICosmosDocument
 {
     /// <summary>Deterministic item id - <c>{SchemaName}_{CorrelationId}</c>.</summary>
+    [JsonProperty("id")]
     public string Id { get; init; } = default!;
 
     /// <summary>Caller-supplied category this record was archived under - also this entity's Cosmos partition key.</summary>
+    [JsonProperty("category")]
     public string Category { get; init; } = default!;
 
     /// <summary>
@@ -29,7 +31,7 @@ public sealed class OrderArchiveDocument : ICosmosDocument
     /// <summary>UTC timestamp this record was archived.</summary>
     public DateTime Timestamp { get; init; }
 
-    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c> since the camelCase naming policy elsewhere can't produce that name.</summary>
+    /// <summary>Cosmos's system-managed optimistic-concurrency token. Mapped from <c>_etag</c>, the fixed name Cosmos's system property always uses.</summary>
     [JsonProperty("_etag")]
     public string? ETag { get; init; }
 }

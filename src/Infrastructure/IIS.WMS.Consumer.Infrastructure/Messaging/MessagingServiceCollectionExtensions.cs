@@ -1,7 +1,7 @@
 using Confluent.Kafka;
 using FluentValidation;
 using IIS.WMS.Common.Messaging.ServiceBus;
-using IIS.WMS.Consumer.Application.Common;
+using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
@@ -286,7 +286,11 @@ public static class MessagingServiceCollectionExtensions
         // every other constructor parameter is filled from the container as usual.
         services.AddHostedService(sp => ActivatorUtilities.CreateInstance<InventoryStateChangedServiceBusHostedService>(
             sp, serviceBusQueueName));
+
         services.AddScoped<IInventoryStateChangedHandler, InventoryStateChangedHandler>();
+        services.AddScoped<IInventoryAdjustedOrMovedPublisher, InventoryAdjustedOrMovedPublisher>();
+        services.AddScoped<IDeltaTowardsOmsPublisher, DeltaTowardsOmsPublisher>();
+        services.AddScoped<IInventoryComparisonReportPublisher, InventoryComparisonReportPublisher>();
 
         services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
     }

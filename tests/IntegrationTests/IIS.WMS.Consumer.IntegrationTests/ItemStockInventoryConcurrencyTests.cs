@@ -6,9 +6,9 @@ using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Audit;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 using IIS.WMS.Consumer.Domain.Common;
-using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb;
 using IIS.WMS.Consumer.IntegrationTests.TestDoubles.Cosmos;
 using Microsoft.Extensions.Logging.Abstractions;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 
 namespace IIS.WMS.Consumer.IntegrationTests;
 

@@ -26,6 +26,10 @@ public static class ApplicationServiceCollectionExtensions
         services.AddScoped<IDomainEventDispatcher, DomainEventDispatcher>();
         services.AddScoped<IInventoryEventService, InventoryEventService>();
         services.AddScoped<IItemStockInventoryService, ItemStockInventoryService>();
+        services.AddScoped<IItemStockInventoryExtensionCalculationService, ItemStockInventoryExtensionCalculationService>();
+        services.AddScoped<IItemStockInventoryExtensionService, ItemStockInventoryExtensionService>();
+        services.AddScoped<IItemStockInventorySegmentationService, ItemStockInventorySegmentationService>();
+        services.AddScoped<IItemStockInventoryExtendedSegmentationService, ItemStockInventoryExtendedSegmentationService>();
         services.AddScoped<IBulkInventoryImportService, BulkInventoryImportService>();
 
         return services;
