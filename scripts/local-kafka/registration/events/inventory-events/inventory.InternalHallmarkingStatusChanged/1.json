@@ -1,0 +1,34 @@
+{
+    "headers": {
+        "Content-Type": "application/json",
+        "Correlation-Id": "4e4b0ec5-502c-4596-a0e3-aac2d0d03bc0",
+        "Deduplication-Id": "1114f914105353d68fdebff62615db57a922e6d1a6c4f131b1a52b3b1491fa4f",
+        "Type": "inventory.InternalHallmarkingStatusChanged",
+        "App-Id": "inventory-service"
+    },
+    "body": {
+        "channel": "OTHER_STORES",
+        "status": "CHANGED",
+        "id": "798896C01513529216",
+        "changeDate": "2026-07-30T13:01:50.000Z",
+        "location": {
+            "id": "EDC",
+            "type": "WAREHOUSE"
+        },
+        "entity": "",
+        "type": "MPR",
+        "inventoryState": {
+            "state": "AVAILABLE",
+            "status": "HALLMARKING"
+        },
+        "itemLine": {
+            "lineNum": "1",
+            "productId": "798896C01",
+            "quantity": 90,
+            "countryOfOrigin": "TH",
+            "hallmarkingFrom": "NON",
+            "hallmarkingTo": "EUR",
+            "reasonCode": "OTHER"
+        }
+    }
+}

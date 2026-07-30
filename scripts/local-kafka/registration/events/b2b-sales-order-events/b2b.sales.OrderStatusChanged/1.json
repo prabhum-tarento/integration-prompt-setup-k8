@@ -1,0 +1,22 @@
+{
+    "headers": {
+        "Correlation-Id": "fd8f2565-d5e9-4cce-80be-53143580f4b1",
+        "Deduplication-Id": "7ac7bb88ee504b9868ff0be46521503e6f2284626431499ce58fc0f2654a9906",
+        "Type": "b2b.sales.OrderStatusChanged",
+        "App-Id": "iis-wms"
+    },
+    "body": {
+  "channel": "OTHER_STORES",
+  "market": null,
+  "sellingLegalEntity": null,
+  "orderId": "2000082447",
+  "backOrderId": null,
+  "pickingRouteId": "2000082447",
+  "status": "NOT_RUN",
+  "warehouseCode": "EDC",
+  "isReturn": null,
+  "changeDate": "2026-07-30T12:58:36.000Z",
+  "cancelReason": null,
+  "sourceOrderReferenceId": null
+}
+}

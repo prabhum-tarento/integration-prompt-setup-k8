@@ -1,0 +1,45 @@
+{
+    "headers": {
+        "Correlation-Id": "915c2b13-6a76-45ee-b2ab-b3f4fbd3ba74",
+        "Deduplication-Id": "c9d07ed2530789ff67b3124f2614216c000f4000ca2eeb9a6915e78d60fafacd",
+        "Type": "inventory.StockOnHandUpdated",
+        "App-Id": "iis-wms"
+    },
+    "body": {
+        "channel": "OTHER_STORES",
+        "referenceId": "2101049_163888C00-58",
+        "updatedDate": "2026-04-23T13:56:00.000Z",
+        "location": {
+            "id": "BR10050029",
+            "type": "THIRD_PARTY_LOGISTICS"
+        },
+        "entity": null,
+        "market": "BR",
+        "productId": "163888C00-58",
+        "productUnits": "Pieces",
+        "barcode": "",
+        "quantityDetails": [
+            {
+                "quantity": 20,
+                "state": {
+                    "state": "AVAILABLETOSELL",
+                    "status": "PICKABLE"
+                },
+                "countryOfOrigin": "UNKNOWN",
+                "hallmarking": "NON",
+                "domain": "B2C"
+            },
+            {
+                "quantity": 10,
+                "state": {
+                    "state": "AVAILABLE",
+                    "status": "PREPARED"
+                },
+                "countryOfOrigin": "UNKNOWN",
+                "hallmarking": "NON",
+                "domain": "B2C"
+            }
+        ],
+        "reason": "UNKNOWN"
+    }
+}

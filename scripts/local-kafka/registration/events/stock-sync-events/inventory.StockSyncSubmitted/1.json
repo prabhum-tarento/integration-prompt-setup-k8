@@ -1,0 +1,61 @@
+{
+  "headers": {
+    "Correlation-Id": "afa76235-0896-4b29-96e1-c896bf808f53",
+    "Deduplication-Id": "084846709dfd0bb0d70aee2bf52e62782ad8013b6a778084959039b3145ae8dd",
+    "Type": "inventory.StockSyncSubmitted",
+    "App-Id": "iis-wms"
+  },
+  "body": {
+    "channel": "OTHER_STORES",
+    "syncDate": "2026-07-30T07:34:57.000Z",
+    "location": {
+      "id": "CAECOM",
+      "type": "THIRD_PARTY_LOGISTICS"
+    },
+    "entity": null,
+    "productId": "799660C02",
+    "productUnits": "Pieces",
+    "quantityDetails": [
+      {
+        "quantity": 64,
+        "state": {
+          "state": "AVAILABLE",
+          "status": "PICKABLE"
+        },
+        "domain": "B2C",
+        "countryOfOrigin": "UNKNOWN",
+        "hallmarking": "NON"
+      },
+      {
+        "quantity": 0,
+        "state": {
+          "state": "AVAILABLE",
+          "status": "PREPARED"
+        },
+        "domain": "B2C",
+        "countryOfOrigin": "UNKNOWN",
+        "hallmarking": "NON"
+      },
+      {
+        "quantity": 0,
+        "state": {
+          "state": "AVAILABLE",
+          "status": "HELD"
+        },
+        "domain": "B2C",
+        "countryOfOrigin": "UNKNOWN",
+        "hallmarking": "NON"
+      },
+      {
+        "quantity": 82,
+        "state": {
+          "state": "INSPECTION",
+          "status": "PICKABLE"
+        },
+        "domain": "B2C",
+        "countryOfOrigin": "UNKNOWN",
+        "hallmarking": "NON"
+      }
+    ]
+  }
+}

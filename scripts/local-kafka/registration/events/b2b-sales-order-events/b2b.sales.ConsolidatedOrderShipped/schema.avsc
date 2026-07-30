@@ -1,0 +1,966 @@
+{
+  "type": "record",
+  "name": "ConsolidatedOrderShipped",
+  "namespace": "net.pandora.nexus.event.b2b.sales",
+  "doc": "ConsolidatedOrderShipped event.",
+  "fields": [
+    {
+      "name": "channel",
+      "type": {
+        "type": "enum",
+        "name": "Channel",
+        "namespace": "net.pandora.nexus.shared",
+        "doc": "Grouping of trading places for sale of jewelry to customers and consumers based on characteristics like store ownership. e.g Pandora owned and operated and store type e.g Concept Stores or E-com. * OWN_PHYSICAL: O&O Physical. The group of all Operated and Owned physical Stores including concept stores, SiS and Outlets, etc. that Pandora independently owns, manages and controls the day-to-day operations, without undue influence by an outside entity or person that may have an ownership and/or financial interest in the management. * OWN_ONLINE: O&O Online. The group of all Operated and Owned ecommerce stores. * PARTNER_ONLINE: Non-O&O Online. A special group of 3rd Party brand websites and marketplaces, that are non Pandora owned and operated. * FRANCHISE: Non-O&O CS & Online. A Franchise is a type of license that allows the franchisee to operate under Pandora's business name. It is the legal situation that defines Ownership Type: in order to be categorized as a Franchise, the entity would need to have a Franchise contract. Includes all Concept Stores and Online Stores, that are non Pandora owned and operated Stores except Distributor Stores and Wholesale Stores. NOTE: the old integrations temporary include Distributor Stores and Wholesale Stores in FRANCHISE channel and should switch to the new channels in the future. * DISTRIBUTOR: Non-O&O CS & Online. A Distributor is a partner who has exclusive rights to distribute in a defined region or market where Pandora does not operate. It is the legal situation that defines Ownership Type: in order to be categorized as a Distributor, the entity would need to have a Distributor contract. Includes all Concept Stores and Online Stores, that are non Pandora owned and operated Stores except Wholesale Stores and Franchise Stores. NOTE: the old integrations temporary include Distributor Stores and Wholesale Stores in FRANCHISE channel and should switch to the new channels in the future. * WHOLESALE: Non-O&O CS & Online. A 3rd party company that sells Pandora products in their own store/website (along other brands) or by acting as an intermediary. Includes all Concept Stores, Multibrand stores and Online Stores, that are non Pandora owned and operated Stores except Distributor Stores and Franchise Stores. NOTE: the old integrations temporary include Distributor Stores and Wholesale Stores in FRANCHISE channel and should switch to the new channels in the future. * OTHER_STORES: Non-O&O Other. All non-Pandora owned and operated Stores that do not fall under available classification. * PRODUCTION: The group for the production/manufacturing of Pandora jewelry. * EMPLOYEE: The group related to employees' actions and human resource management events. Use case: Employee purchase in Thailand. * MARKETING: The group for consumer behavior and marketing towards customers. * PROCUREMENT: The group for purchases made by Pandora to enable work within the company. * FINANCE: The group for financial information and finance reporting which cannot be linked to sales-related channels. * INTERCOMPANY_DISTRIBUTION: The group for Pandora own distribution centers and sub-centers replenishment process from manufacturing and between DCs. Usually related to Pandora intercompany sales and purchases as well as transfers, before the sales channel can be determined. Examples of use cases: manufacturing to DC transfer, DC to DC transfer, DC to partner, partner to DC, 3PL to DC. * WHOLESALE_EDI: Non-O&O CS & Online. A 3rd party EDI company that sells Pandora products in their own store/website (along other brands) or by acting as an intermediary. Includes all Concept Stores, Multibrand stores and Online Stores, that are non Pandora owned and operated Stores except Distributor Stores, Franchise Stores and Other non-EDI Wholesale Stores. NOTE: the old integrations temporary include Distributor Stores and Wholesale Stores in FRANCHISE channel and should switch to the new channels in the future.",
+        "symbols": [
+          "UNKNOWN",
+          "OWN_PHYSICAL",
+          "OWN_ONLINE",
+          "PARTNER_ONLINE",
+          "FRANCHISE",
+          "DISTRIBUTOR",
+          "WHOLESALE",
+          "OTHER_STORES",
+          "PRODUCTION",
+          "EMPLOYEE",
+          "MARKETING",
+          "PROCUREMENT",
+          "FINANCE",
+          "INTERCOMPANY_DISTRIBUTION",
+          "WHOLESALE_EDI"
+        ],
+        "default": "UNKNOWN"
+      },
+      "doc": "Grouping of trading places for sale of jewelry to customers and consumers based on characteristics like store ownership. E.g Non-O&O Other. All non Pandora owned and operated Stores including all Wholesales and Distributor Stores."
+    },
+    {
+      "name": "market",
+      "type": [
+        "null",
+        {
+          "type": "enum",
+          "name": "CountryCode",
+          "namespace": "net.pandora.nexus.shared",
+          "doc": "Country Codes represented in [ISO 3166-2 alpha-2 format](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2). AN code is temporarily added as a transitional code.",
+          "symbols": [
+            "AD",
+            "AE",
+            "AF",
+            "AG",
+            "AI",
+            "AL",
+            "AM",
+            "AN",
+            "AO",
+            "AQ",
+            "AR",
+            "AS",
+            "AT",
+            "AU",
+            "AW",
+            "AX",
+            "AZ",
+            "BA",
+            "BB",
+            "BD",
+            "BE",
+            "BF",
+            "BG",
+            "BH",
+            "BI",
+            "BJ",
+            "BL",
+            "BM",
+            "BN",
+            "BO",
+            "BQ",
+            "BR",
+            "BS",
+            "BT",
+            "BV",
+            "BW",
+            "BY",
+            "BZ",
+            "CA",
+            "CC",
+            "CD",
+            "CF",
+            "CG",
+            "CH",
+            "CI",
+            "CK",
+            "CL",
+            "CM",
+            "CN",
+            "CO",
+            "CR",
+            "CU",
+            "CV",
+            "CW",
+            "CX",
+            "CY",
+            "CZ",
+            "DE",
+            "DJ",
+            "DK",
+            "DM",
+            "DO",
+            "DZ",
+            "EC",
+            "EE",
+            "EG",
+            "EH",
+            "ER",
+            "ES",
+            "ET",
+            "FI",
+            "FJ",
+            "FK",
+            "FM",
+            "FO",
+            "FR",
+            "GA",
+            "GB",
+            "GD",
+            "GE",
+            "GF",
+            "GG",
+            "GH",
+            "GI",
+            "GL",
+            "GM",
+            "GN",
+            "GP",
+            "GQ",
+            "GR",
+            "GS",
+            "GT",
+            "GU",
+            "GW",
+            "GY",
+            "HK",
+            "HM",
+            "HN",
+            "HR",
+            "HT",
+            "HU",
+            "IC",
+            "ID",
+            "IE",
+            "IL",
+            "IM",
+            "IN",
+            "IO",
+            "IQ",
+            "IR",
+            "IS",
+            "IT",
+            "JE",
+            "JM",
+            "JO",
+            "JP",
+            "KE",
+            "KG",
+            "KH",
+            "KI",
+            "KM",
+            "KN",
+            "KP",
+            "KR",
+            "KW",
+            "KY",
+            "KZ",
+            "LA",
+            "LB",
+            "LC",
+            "LI",
+            "LK",
+            "LR",
+            "LS",
+            "LT",
+            "LU",
+            "LV",
+            "LY",
+            "MA",
+            "MC",
+            "MD",
+            "ME",
+            "MF",
+            "MG",
+            "MH",
+            "MK",
+            "ML",
+            "MM",
+            "MN",
+            "MO",
+            "MP",
+            "MQ",
+            "MR",
+            "MS",
+            "MT",
+            "MU",
+            "MV",
+            "MW",
+            "MX",
+            "MY",
+            "MZ",
+            "NA",
+            "NC",
+            "NE",
+            "NF",
+            "NG",
+            "NI",
+            "NL",
+            "NO",
+            "NP",
+            "NR",
+            "NU",
+            "NZ",
+            "OM",
+            "PA",
+            "PE",
+            "PF",
+            "PG",
+            "PH",
+            "PK",
+            "PL",
+            "PM",
+            "PN",
+            "PR",
+            "PS",
+            "PT",
+            "PW",
+            "PY",
+            "QA",
+            "RE",
+            "RO",
+            "RS",
+            "RU",
+            "RW",
+            "SA",
+            "SB",
+            "SC",
+            "SD",
+            "SE",
+            "SG",
+            "SH",
+            "SI",
+            "SJ",
+            "SK",
+            "SL",
+            "SM",
+            "SN",
+            "SO",
+            "SR",
+            "SS",
+            "ST",
+            "SV",
+            "SX",
+            "SY",
+            "SZ",
+            "TC",
+            "TD",
+            "TF",
+            "TG",
+            "TH",
+            "TJ",
+            "TK",
+            "TL",
+            "TM",
+            "TN",
+            "TO",
+            "TR",
+            "TT",
+            "TV",
+            "TW",
+            "TZ",
+            "UA",
+            "UG",
+            "UM",
+            "US",
+            "UY",
+            "UZ",
+            "VA",
+            "VC",
+            "VE",
+            "VG",
+            "VI",
+            "VN",
+            "VU",
+            "WF",
+            "WS",
+            "XK",
+            "XS",
+            "YE",
+            "YT",
+            "ZA",
+            "ZM",
+            "ZW",
+            "UNKNOWN"
+          ],
+          "default": "UNKNOWN"
+        }
+      ],
+      "doc": "Order market (country). Used for filtering orders for various reporting",
+      "default": null
+    },
+    {
+      "name": "parentOrderId",
+      "type": "string",
+      "doc": "Parent Sales Order identifier under which several orders were consolidated into a common shipment (chosen among them)"
+    },
+    {
+      "name": "shipment",
+      "type": {
+        "type": "record",
+        "name": "Shipment",
+        "doc": "B2B sales shipment",
+        "fields": [
+          {
+            "name": "id",
+            "type": "string",
+            "doc": "Unique identifier for the shipment. Also referred to as preparation identifier in warehouse processes."
+          },
+          {
+            "name": "warehouseCode",
+            "type": "string",
+            "doc": "Shipment warehouse"
+          },
+          {
+            "name": "confirmationType",
+            "type": {
+              "type": "enum",
+              "name": "ConfirmationType",
+              "doc": "A type of shipment confirmation",
+              "symbols": [
+                "UNKNOWN",
+                "PRELIMINARY",
+                "STANDARD",
+                "STANDARD_FOLLOWING_PRELIMINARY",
+                "PRELIMINARY_INVOICE",
+                "PRELIMINARY_EXPORT"
+              ],
+              "default": "UNKNOWN"
+            },
+            "doc": "Represents the type of shipment confirmation"
+          },
+          {
+            "name": "shipDate",
+            "type": {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            },
+            "doc": "Actual shipment date"
+          },
+          {
+            "name": "deliveryMode",
+            "type": "string",
+            "doc": "The Mode of delivery (e.g. \"DHL\")"
+          },
+          {
+            "name": "deliveryReason",
+            "type": "string",
+            "doc": "Delivery reason (e.g. \"BBX\")"
+          },
+          {
+            "name": "shipmentLines",
+            "type": {
+              "type": "array",
+              "items": {
+                "type": "record",
+                "name": "ShipmentLine",
+                "doc": "B2B shipment line",
+                "fields": [
+                  {
+                    "name": "lineNum",
+                    "type": "string",
+                    "doc": "Unique identifier for the shipment line item"
+                  },
+                  {
+                    "name": "pickingRouteId",
+                    "type": "string",
+                    "doc": "Unique identifier for the warehouse picking route"
+                  },
+                  {
+                    "name": "preparationLineNum",
+                    "type": "long",
+                    "doc": "Unique identifier for lineNum, orderId and trackingNumber"
+                  },
+                  {
+                    "name": "trackingNumber",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Unique Identifier for the shipment (to match with CartonDetail)",
+                    "default": null
+                  },
+                  {
+                    "name": "orderId",
+                    "type": "string",
+                    "doc": "Initial Sales Order identifier linked to the line"
+                  },
+                  {
+                    "name": "lotId",
+                    "type": "string",
+                    "doc": "Unique identifier of the item line in source system"
+                  },
+                  {
+                    "name": "productId",
+                    "type": "string",
+                    "doc": "The product identifier"
+                  },
+                  {
+                    "name": "quantity",
+                    "type": "int",
+                    "doc": "Line quantity"
+                  },
+                  {
+                    "name": "hallmarking",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Market-specific hallmarking type of the item. NON refers to absent hallmarking",
+                    "default": null
+                  },
+                  {
+                    "name": "allocatedFromB2BBucketQuantity",
+                    "type": [
+                      "null",
+                      "int"
+                    ],
+                    "doc": "This is the quantity that was taken from the B2B bucket for allocating to the order",
+                    "default": null
+                  },
+                  {
+                    "name": "allocatedFromB2CBucketQuantity",
+                    "type": [
+                      "null",
+                      "int"
+                    ],
+                    "doc": "It represents the quantity that was taken from the B2C bucket for allocating to the order",
+                    "default": null
+                  },
+                  {
+                    "name": "isBonded",
+                    "type": [
+                      "null",
+                      "boolean"
+                    ],
+                    "doc": "It represents whether quantity is shipped from the bonded warehouse inventory",
+                    "default": null
+                  },
+                  {
+                    "name": "countryOfOrigin",
+                    "type": [
+                      "null",
+                      "net.pandora.nexus.shared.CountryCode"
+                    ],
+                    "doc": "The country of purchase origin",
+                    "default": null
+                  },
+                  {
+                    "name": "weight",
+                    "type": {
+                      "type": "record",
+                      "name": "Weight",
+                      "namespace": "net.pandora.nexus.shared",
+                      "doc": "Standard type for specifying weight.",
+                      "fields": [
+                        {
+                          "name": "unit",
+                          "type": {
+                            "type": "enum",
+                            "name": "WeightUnit",
+                            "doc": "Standard units of weight measurement.",
+                            "symbols": [
+                              "UNKNOWN",
+                              "MILLIGRAM",
+                              "GRAM",
+                              "KILOGRAM",
+                              "CARAT"
+                            ],
+                            "default": "UNKNOWN"
+                          },
+                          "doc": "Unit of this weight measurement."
+                        },
+                        {
+                          "name": "quantity",
+                          "type": "int",
+                          "doc": "Number of the associated units in this measurement."
+                        }
+                      ]
+                    },
+                    "doc": "Represents weight of the item"
+                  },
+                  {
+                    "name": "inventoryRegistrationId",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Registration number issued by the customs authority after the registration of the corresponding inbound shipment is completed",
+                    "default": null
+                  },
+                  {
+                    "name": "customsRegistrationLineNum",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Line number in the registration document issued by the customs authority after the registration of the corresponding inbound shipment is completed",
+                    "default": null
+                  },
+                  {
+                    "name": "itemCategoryLocalized",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Local translation of the item category, required by local customs for registration of inbound shipments in bonded warehouse",
+                    "default": null
+                  },
+                  {
+                    "name": "itemMaterialName",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "English translation of the metal used in the item, required by local customs for registration of inbound shipments in bonded warehouse",
+                    "default": null
+                  },
+                  {
+                    "name": "itemMaterialNameLocalized",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Local translation of the metal used in the item, required by local customs for registration of inbound shipments in bonded warehouse",
+                    "default": null
+                  },
+                  {
+                    "name": "mainInventoryRegistrationId",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Registration number issued by the main customs authority after the registration of the corresponding inbound shipment is completed",
+                    "default": null
+                  },
+                  {
+                    "name": "mainCustomsRegistrationLineNum",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Line number in the registration document issued by the main customs authority after the registration of the corresponding inbound shipment is completed",
+                    "default": null
+                  }
+                ]
+              }
+            },
+            "doc": "Shipment lines",
+            "default": []
+          },
+          {
+            "name": "packingSlipId",
+            "type": "string",
+            "doc": "Represents Packing Slip identifier"
+          },
+          {
+            "name": "cartonDetails",
+            "type": {
+              "type": "array",
+              "items": {
+                "type": "record",
+                "name": "CartonDetail",
+                "doc": "Represents information about parcel.",
+                "fields": [
+                  {
+                    "name": "cartonId",
+                    "type": "string",
+                    "doc": "Unique Identifier for the shipment carton."
+                  },
+                  {
+                    "name": "externalTrackingNumber",
+                    "type": [
+                      "null",
+                      "string"
+                    ],
+                    "doc": "Consignment unit identifier, also used as external tracking identifier by transport/shipping courier companies such as DHL, UPS, etc.",
+                    "default": null
+                  },
+                  {
+                    "name": "weight",
+                    "type": "net.pandora.nexus.shared.Weight",
+                    "doc": "Represents parcel weight"
+                  },
+                  {
+                    "name": "height",
+                    "type": {
+                      "type": "record",
+                      "name": "Length",
+                      "namespace": "net.pandora.nexus.shared",
+                      "doc": "Standard type for specifying length or distance.",
+                      "fields": [
+                        {
+                          "name": "unit",
+                          "type": {
+                            "type": "enum",
+                            "name": "LengthUnit",
+                            "doc": "Standard units of length measurement.",
+                            "symbols": [
+                              "UNKNOWN",
+                              "MILLIMETER",
+                              "CENTIMETER",
+                              "METER"
+                            ],
+                            "default": "UNKNOWN"
+                          },
+                          "doc": "Unit of this distance measurement."
+                        },
+                        {
+                          "name": "quantity",
+                          "type": "int",
+                          "doc": "Number of the associated units in this measurement."
+                        }
+                      ]
+                    },
+                    "doc": "Represents parcel height"
+                  },
+                  {
+                    "name": "width",
+                    "type": "net.pandora.nexus.shared.Length",
+                    "doc": "Represents parcel width"
+                  },
+                  {
+                    "name": "depth",
+                    "type": "net.pandora.nexus.shared.Length",
+                    "doc": "Represents parcel depth"
+                  }
+                ]
+              }
+            },
+            "doc": "Represents information about parcels",
+            "default": []
+          },
+          {
+            "name": "rootReference",
+            "type": [
+              "null",
+              "string"
+            ],
+            "doc": "Also referred to as StammReferenzen. An identifier sent by Pandora Systems to let the German customs system know which pre-filled meta data to be used for a particular shipment",
+            "default": null
+          },
+          {
+            "name": "bondedWarehouseScenario",
+            "type": [
+              "null",
+              {
+                "type": "enum",
+                "name": "BondedWarehouseScenario",
+                "namespace": "net.pandora.nexus.shared",
+                "doc": "Scenario for the bonded warehose if applicable: * EU - European Union only * EXPORT_IMPORT - Export with import * EXPORT_NO_IMPORT - Export without import",
+                "symbols": [
+                  "UNKNOWN",
+                  "EU",
+                  "EXPORT_IMPORT",
+                  "EXPORT_NO_IMPORT"
+                ],
+                "default": "UNKNOWN"
+              }
+            ],
+            "doc": "Scenario for the bonded warehose",
+            "default": null
+          },
+          {
+            "name": "grossWeight",
+            "type": [
+              "null",
+              "net.pandora.nexus.shared.Weight"
+            ],
+            "doc": "Total weight of the shipment. Use case: covering the weight of one or multiple consolidated orders on the same shipment",
+            "default": null
+          }
+        ]
+      },
+      "doc": "Order shipment terms"
+    },
+    {
+      "name": "orderCharges",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "Charge",
+          "doc": "Represents a charge applied to an order, e.g. freight charge",
+          "fields": [
+            {
+              "name": "orderId",
+              "type": "string",
+              "doc": "Initial sales order identifier"
+            },
+            {
+              "name": "type",
+              "type": {
+                "type": "enum",
+                "name": "ChargeType",
+                "doc": "Type of charge applied to the order * FREIGHT - freight charge applied to the partner sales order",
+                "symbols": [
+                  "UNKNOWN",
+                  "FREIGHT"
+                ],
+                "default": "UNKNOWN"
+              },
+              "doc": "Type of charge applied to the order"
+            },
+            {
+              "name": "amount",
+              "type": {
+                "type": "record",
+                "name": "Money",
+                "namespace": "net.pandora.nexus.shared",
+                "doc": "A type for amounts of money.",
+                "fields": [
+                  {
+                    "name": "currencyCode",
+                    "type": {
+                      "type": "enum",
+                      "name": "CurrencyCode",
+                      "doc": "Currency Codes (ISO 4217 format) (https://en.wikipedia.org/wiki/ISO_4217) The default value `XXX` must not be used by producers directly. This value is reserved for consumers and will be used during the schema evolution.",
+                      "symbols": [
+                        "AED",
+                        "AFN",
+                        "ALL",
+                        "AMD",
+                        "ANG",
+                        "AOA",
+                        "ARS",
+                        "AUD",
+                        "AWG",
+                        "AZN",
+                        "BAM",
+                        "BBD",
+                        "BDT",
+                        "BGN",
+                        "BHD",
+                        "BIF",
+                        "BMD",
+                        "BND",
+                        "BOB",
+                        "BOV",
+                        "BRL",
+                        "BSD",
+                        "BTN",
+                        "BWP",
+                        "BYN",
+                        "BZD",
+                        "CAD",
+                        "CDF",
+                        "CHE",
+                        "CHF",
+                        "CHW",
+                        "CLF",
+                        "CLP",
+                        "CNY",
+                        "COP",
+                        "COU",
+                        "CRC",
+                        "CUC",
+                        "CUP",
+                        "CVE",
+                        "CZK",
+                        "DJF",
+                        "DKK",
+                        "DOP",
+                        "DZD",
+                        "EGP",
+                        "ERN",
+                        "ETB",
+                        "EUR",
+                        "FJD",
+                        "FKP",
+                        "GBP",
+                        "GEL",
+                        "GHS",
+                        "GIP",
+                        "GMD",
+                        "GNF",
+                        "GTQ",
+                        "GYD",
+                        "HKD",
+                        "HNL",
+                        "HRK",
+                        "HTG",
+                        "HUF",
+                        "IDR",
+                        "ILS",
+                        "INR",
+                        "IQD",
+                        "IRR",
+                        "ISK",
+                        "JMD",
+                        "JOD",
+                        "JPY",
+                        "KES",
+                        "KGS",
+                        "KHR",
+                        "KMF",
+                        "KPW",
+                        "KRW",
+                        "KWD",
+                        "KYD",
+                        "KZT",
+                        "LAK",
+                        "LBP",
+                        "LKR",
+                        "LRD",
+                        "LSL",
+                        "LYD",
+                        "MAD",
+                        "MDL",
+                        "MGA",
+                        "MKD",
+                        "MMK",
+                        "MNT",
+                        "MOP",
+                        "MRU",
+                        "MUR",
+                        "MVR",
+                        "MWK",
+                        "MXN",
+                        "MXV",
+                        "MYR",
+                        "MZN",
+                        "NAD",
+                        "NGN",
+                        "NIO",
+                        "NOK",
+                        "NPR",
+                        "NZD",
+                        "OMR",
+                        "PAB",
+                        "PEN",
+                        "PGK",
+                        "PHP",
+                        "PKR",
+                        "PLN",
+                        "PYG",
+                        "QAR",
+                        "RON",
+                        "RSD",
+                        "RUB",
+                        "RWF",
+                        "SAR",
+                        "SBD",
+                        "SCR",
+                        "SDG",
+                        "SEK",
+                        "SGD",
+                        "SHP",
+                        "SLL",
+                        "SOS",
+                        "SRD",
+                        "SSP",
+                        "STN",
+                        "SVC",
+                        "SYP",
+                        "SZL",
+                        "THB",
+                        "TJS",
+                        "TMT",
+                        "TND",
+                        "TOP",
+                        "TRY",
+                        "TTD",
+                        "TWD",
+                        "TZS",
+                        "UAH",
+                        "UGX",
+                        "USD",
+                        "USN",
+                        "UYI",
+                        "UYU",
+                        "UYW",
+                        "UZS",
+                        "VES",
+                        "VND",
+                        "VUV",
+                        "WST",
+                        "XAF",
+                        "XAG",
+                        "XAU",
+                        "XBA",
+                        "XBB",
+                        "XBC",
+                        "XBD",
+                        "XCD",
+                        "XDR",
+                        "XOF",
+                        "XPD",
+                        "XPF",
+                        "XPT",
+                        "XSU",
+                        "XTS",
+                        "XUA",
+                        "XXX",
+                        "YER",
+                        "ZAR",
+                        "ZMW",
+                        "ZWL"
+                      ],
+                      "default": "XXX"
+                    },
+                    "doc": "The currency code"
+                  },
+                  {
+                    "name": "units",
+                    "type": "long",
+                    "doc": "The whole units of the amount."
+                  },
+                  {
+                    "name": "nanos",
+                    "type": "int",
+                    "doc": "Partial units of money expressed in nanos (10^-9)."
+                  }
+                ]
+              },
+              "doc": "Charge amount"
+            }
+          ]
+        }
+      },
+      "doc": "Charges applied to the order, e.g. freight charge for the partner sales order",
+      "default": []
+    },
+    {
+      "name": "masterShipmentTrackingId",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "The tracking code of the master shipment that includes the grouped shipments of the same customer",
+      "default": null
+    },
+    {
+      "name": "isExport",
+      "type": "boolean",
+      "doc": "Represents whether order is export"
+    }
+  ],
+  "metadata": {
+    "key": [
+      "parentOrderId"
+    ],
+    "deduplication": [
+      "parentOrderId",
+      "shipment.id",
+      "shipment.confirmationType",
+      "shipment.shipDate"
+    ],
+    "channel": "channel",
+    "eventTime": "shipment.shipDate",
+    "market": "market"
+  }
+}
