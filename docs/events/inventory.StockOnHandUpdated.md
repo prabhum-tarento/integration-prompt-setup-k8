@@ -3,2090 +3,620 @@
 ## 1. Overview
 
 ### Purpose
-The `inventory.StockOnHandUpdated` is a kafka event that processes inventory stock quantity updates received from external inventory management systems. It synchronizes stock levels across different inventory states and domains, maintaining accurate inventory records in the IIS (Inventory Information System) database.
+`inventory.StockOnHandUpdated` is a Kafka event that processes inventory
+stock-quantity updates received from the WMS (Warehouse Management System). It
+synchronizes B2C stock levels across inventory states and keeps accurate
+stock-on-hand records for the BRAZIL 3PL (BRZ3PL) fulfilment location in the
+IIS (Inventory Information System) Cosmos DB store.
 
 ### Business Objective
-- Synchronize real-time inventory updates from the WMS (Warehouse Management System) to the IIS system
-- Maintain accurate stock-on-hand quantities for B2C (Business-to-Consumer) inventory across different states (AVAILABLE, INSPECTION, AVAILABLETOSELL)
-- Track inventory by product characteristics (Country of Origin, Hallmarking) and fulfillment centers
-- Archive inventory state transitions for audit and historical tracking
-- Distinguish between sellable and non-sellable inventory for business logic purposes
+- Synchronize real-time inventory updates from the WMS into the IIS system.
+- Maintain accurate B2C (Business-to-Consumer) stock-on-hand quantities across
+  states (AVAILABLE, INSPECTION, AVAILABLETOSELL) and statuses (PREPARED,
+  PICKABLE, HELD).
+- Track inventory by product characteristics (Country of Origin, Hallmarking)
+  and by the BRZ3PL fulfilment centre.
+- Archive inventory state transitions for audit and historical tracking.
+- Distinguish sellable from non-sellable inventory for downstream business
+  logic and notify OMS of B2C stock changes.
 
 ### Scope
-- `inventory.StockOnHandUpdated` from Kakfa via Consumer Group: `$Default` and deserialized to `StockOnHandUpdatedEvent` messages and send to Service Bus Queue
-- Processes `StockOnHandUpdatedEvent` messages from Azure Service Bus queue
-- Handles only BRAZIL 3PL (BRZ3PL) location inventory updates
-- Processes B2C domain inventory only
-- Filters items based on specific state/status combinations
-- Updates and archives inventory records in CosmosDB
-- Creates requests for Orchestrator services for both sellable and non-sellable items
+- Consumes `inventory.StockOnHandUpdated` from Kafka, relays it to the Azure
+  Service Bus queue `stock-on-hand-updated`, and processes it on a
+  session-enabled Service Bus consumer as `StockOnHandUpdatedEvent`.
+- Handles **BRAZIL 3PL (BRZ3PL) only** — this event is **B2C-only** and carries
+  **no B2B segmentation**.
+- Filters items by specific state/status combinations and groups by
+  (CountryOfOrigin, Hallmarking).
+- Persists sellable and non-sellable inventory to Cosmos DB via ETag-guarded
+  **Patch** operations and archives snapshots.
+- Publishes a downstream B2C stock notification to the `nexus-producer` queue.
 
 ### High-Level Architecture
 
+Matches the platform data flow in
+[integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md):
+a Kafka-to-Service-Bus relay hosted service, then a session-enabled Service Bus
+consumer that calls the Application layer, which persists through the Cosmos DB
+repository and archives through Blob Storage.
+
 ```
-Kafka (inventory.StockOnHandUpdated)
-        ↓
-Service Bus (StockOnHandUpdatedEvent)
-        ↓
-┌─────────────────────────────────────────┐
-│ Message Validation & Filtering          │
-├─────────────────────────────────────────┤
-│ 1. Parse StockOnHandUpdatedEvent        │
-│ 2. Validate Location & QuantityDetails  │
-│ 3. Filter by Location (BRZ3PLConsigneeId) │
-│ 4. Filter by Domain (B2C)               │
-│ 5. Filter by State/Status Combinations  │
-│ 6. Group by CountryOfOrigin & Hallmarking│
-└─────────────────────────────────────────┘
-        ↓
-        ├──────────────────────────────────┬──────────────────────────────┐
-        ↓                                  ↓                              ↓
-  ┌──────────────────┐        ┌─────────────────────────┐    ┌────────────────────┐
-  │ Case 1: Sellable │        │ Case 2: Non-Sellable    │    │ Case 3: B2C        │
-  │ Items Processing │        │ Items Processing        │    │ Stock Notification │
-  └──────────────────┘        └─────────────────────────┘    └────────────────────┘
-        ↓                                  ↓                              ↓
-  Repository: ItemStockInventoryRepository
-  Archive: MessageArchiveRepository
-        ↓
-   CosmosDB Update
+Kafka topic `inventory.StockOnHandUpdated`
+                    ↓
+   KafkaConsumerHostedServiceBase
+     - correlation id / dedup id / type headers read + logged
+     - schema + dynamic validation
+     - cold-tier request audit (unconditional)
+                    ↓
+   Azure Service Bus queue `stock-on-hand-updated`
+   (session-enabled: SessionId = {FulfilmentId}:{ItemCode};
+    message ID deterministic from the Kafka key — never a fresh GUID)
+                    ↓
+   StockOnHandUpdatedServiceBusHostedService
+   (ServiceBusConsumerHostedService<StockOnHandUpdatedEvent>)
+     - envelope + payload deserialize, dynamic validation, cold-tier audit
+                    ↓
+          IStockOnHandUpdatedHandler.HandleAsync
+                    ↓
+    ┌───────────────────┬────────────────────┬─────────────────────┐
+    ↓                   ↓                    ↓                     ↓
+ Validation &      Case 1: Sellable     Case 2: Non-Sellable   Case 3: B2C
+ Filtering         items (B2C)          items (extended)       stock notification
+ (BRZ3PL, B2C,          ↓                    ↓                     ↓
+  state/status)   ItemStockInventory   ItemStockInventory     nexus-producer
+                  (ETag Patch)         Extended (ETag Patch)  (ServiceBusSender)
+                    ↓                    ↓
+        Cosmos DB (ETag-guarded Patch; 409-as-applied; 412 re-read/reapply)
+        + MessageArchive (Cosmos, optional Blob cold-tier mirror)
 ```
+
+Business logic never touches `CosmosClient`/`Container`/`ServiceBusSender`
+directly — it goes through the repository abstractions and the application-layer
+publish abstraction (see
+[shared/service-bus-publishing.md](shared/service-bus-publishing.md)).
+
+### Key Dependencies
+- **`ItemStockInventoryRepository`** — B2C sellable inventory (Cosmos, BRZ3PL
+  container, ETag-guarded Patch; cosmos §5a/§9).
+- **`ItemStockInventoryExtendedRepository`** — non-sellable / extended-state
+  inventory (Cosmos, ETag-guarded Patch).
+- **`ItemRepository`** — product/item existence validation and creation.
+- **`MessageArchiveRepository`** — snapshot archival (Cosmos + optional Blob).
+- **Cached `ServiceBusSender`** — outbound B2C stock notification.
+- Shared helpers: [cosmos-idempotent-write](shared/cosmos-idempotent-write.md),
+  [service-bus-publishing](shared/service-bus-publishing.md),
+  [b2c-extension-calculation](shared/b2c-extension-calculation.md),
+  [inventory-formulas](shared/inventory-formulas.md),
+  [icr-snapshot](shared/icr-snapshot.md),
+  [country-code-lookup](shared/country-code-lookup.md),
+  [archive-audit](shared/archive-audit.md).
 
 ### Assumptions
-1. Service Bus connection and queue names are correctly configured in ApplicationConfig
-2. Input messages are in correct JSON format deserializable to `StockOnHandUpdatedEvent`
-3. Country of Origin and Hallmarking values are valid enums
-4. Product IDs exist or will be created if missing
-5. The B2C location being processed is always `ReflexConstants.BRZ3PLConsigneeId`
-6. Fulfillment code is consistently `ReflexConstants.BRZDC3PLFulfilmentId` for this location
-7. Negative quantities received should be treated as zero
-8. The system supports optimistic concurrency at the repository level
-
-### Dependencies
-- **AutoMapper**: For mapping between DTOs and domain events
-- **Azure Service Bus**: Message queue infrastructure
-- **CosmosDB**: Persistence layer for inventory data
-- **IItemStockInventoryRepository**: For B2C sellable inventory operations
-- **IItemStockInventoryExtendedRepository**: For extended inventory (non-sellable) operations
-- **IItemRepository**: For product/item existence validation and creation
-- **IMessageArchiveRepository**: For archiving previous inventory states
-- **ILoggerService**: For structured logging and error tracking
-- **ApplicationConfig**: Configuration management for queue names and connection strings
+1. Incoming messages are valid `inventory.StockOnHandUpdated` objects
+   deserializable to `StockOnHandUpdatedEvent`.
+2. The B2C location being processed is always `ReflexConstants.BRZ3PLConsigneeId`.
+3. Fulfilment code is consistently `ReflexConstants.BRZDC3PLFulfilmentId` for
+   this location.
+4. CountryOfOrigin and Hallmarking values are valid enums.
+5. Product IDs exist or are created if missing.
+6. Negative quantities are normalized to zero (see
+   [inventory-formulas](shared/inventory-formulas.md)).
+7. **Processing is idempotent** — a deterministic document `Id` plus
+   ETag-guarded Patch make redelivery a no-op, not a duplicate/double-count (see
+   [cosmos-idempotent-write](shared/cosmos-idempotent-write.md)).
 
 ---
 
 ## 2. End-to-End Flow
 
-### Complete Execution Flow
-
 ```
-START: Kafak message received
-  ↓
-[STEP 1] Deserialize Message
-  Input: inventory.StockOnHandUpdated
-  Output: StockOnHandUpdatedEvent
-  ↓
-[STEP 2] Log Initial Processing
-  Log: "Processing StockOnHandUpdatedEvent for ProductId: {ProductId}, LocationId: {LocationId}"
-  ↓
-[STEP 3] Null Validation - Input
-  Decision: Is input null?
-  ├─ Yes → Log: "Input message is null" → RETURN (exit gracefully)
-  └─ No → Continue
-  ↓
-[STEP 4] Validation - Location and QuantityDetails
-  Check: LocationId != null AND QuantityDetails != null
-  Decision: Are both present?
-  ├─ No → Log validation error → RETURN (exit gracefully)
-  └─ Yes → Continue
-  ↓
-[STEP 5] Validation - Location ID
-  Check: LocationId == BRZ3PLConsigneeId (BRAZIL 3PL location)
-  Decision: Is location valid for this trigger?
-  ├─ No → Log: "Invalid location id" → RETURN (exit gracefully)
-  └─ Yes → Continue
-  ↓
-[STEP 6] Data Filtering and Grouping
-  Input: QuantityDetails list from event
-  Process:
-    a. Filter items where Domain == B2C
-    b. Filter items with specific State/Status combinations:
-       - (AVAILABLE + PREPARED) OR
-       - (AVAILABLE + PICKABLE) OR
-       - (INSPECTION + PICKABLE) OR
-       - (AVAILABLETOSELL + PICKABLE) OR
-       - (AVAILABLE + HELD)
-    c. Group filtered items by (CountryOfOrigin, Hallmarking)
-  Output: List of grouped items
-  ↓
-[STEP 7] Process Each Item Group
-  For each grouped item (identified by CountryOfOrigin, Hallmarking):
-    ↓
-    [7A] CASE 1: SELLABLE ITEMS PROCESSING
-    ├─ Filter sellable items:
-    │   - (AVAILABLE + PREPARED) OR
-    │   - (AVAILABLE + PICKABLE) OR
-    │   - (AVAILABLETOSELL + PICKABLE)
-    │ ↓
-    │ Create StockOnHandUpdatedRequest:
-    │   - FulfilmentCode: BRZDC3PLFulfilmentId
-    │   - ItemCode: from event
-    │   - CountryOfOrigin, Hallmark: from group key
-    │   - StateLevelQtyList: List of (Quantity, State, Domain)
-    │   - UniqueIdentifiers: {ItemCode}
-    │ ↓
-    │ Set B2CAvailableToSell:
-    │   - If location == BRZ3PLConsigneeId
-    │   - B2CAvailableToSell = quantity where (AVAILABLETOSELL + PICKABLE)
-    │ ↓
-    │ Decision: StateLevelQtyList.Count > 0?
-    │ ├─ Yes → Call stockOnHandUpdatedEventHandlerAsync(request)
-    │ │   ├─ Fetch existing inventory by category
-    │ │   ├─ If not exists:
-    │ │   │   ├─ Create new ItemStockInventoryDTO with all fields
-    │ │   │   ├─ Update B2CAVL = B2CAvailableToSell + PreparedQty
-    │ │   │   ├─ Update B2CPrepared
-    │ │   │   └─ Save to repository
-    │ │   ├─ Else (exists):
-    │ │   │   ├─ Update B2CAvailableToSell
-    │ │   │   ├─ Update B2CAVL = B2CAvailableToSell + PreparedQty
-    │ │   │   ├─ Update B2CPrepared
-    │ │   │   └─ Save to repository
-    │ │   └─ Archive updated inventory
-    │ └─ Exception handled: Log error, continue
-    └─ No → Skip (no sellable items)
-    ↓
-    [7B] CASE 2: NON-SELLABLE ITEMS PROCESSING
-    ├─ For each non-sellable item:
-    │   Filter: (AVAILABLE + HELD) OR (INSPECTION + PICKABLE)
-    │ ↓
-    │ For each item in filtered list:
-    │   Create ExtendedStockOnHandUpdatedRequest:
-    │     - FulfilmentCode: BRZDC3PLFulfilmentId
-    │     - ItemCode, CountryOfOrigin, Hallmark: from event/group
-    │     - Domain: from item
-    │     - Quantity: item quantity (0 if negative)
-    │     - State: from item
-    │     - UniqueIdentifiers: {ItemCode}
-    │   ↓
-    │   Call extendedStockOnHandUpdatedEventHandlerAsync(request):
-    │     ├─ Fetch existing extended inventory
-    │     ├─ If not exists:
-    │     │   ├─ Validate/create product if needed
-    │     │   ├─ Build new ItemStockInventoryExtendedDTO
-    │     │   ├─ Save to repository
-    │     │   └─ Archive message
-    │     ├─ Else (exists):
-    │     │   ├─ Archive previous state
-    │     │   ├─ Check discrepancy (old qty != new qty)
-    │     │   ├─ Update quantity
-    │     │   ├─ If discrepancy exists:
-    │     │   │   ├─ Update and archive
-    │     │   │   └─ Calculate delta quantity
-    │     │   └─ Else: Skip update
-    │     └─ Exception handled: Log error, continue
-    └─ End For
+1. MESSAGE RECEPTION (Kafka consumer)
+   ├─ inventory.StockOnHandUpdated deserialized → StockOnHandUpdatedEvent
+   ├─ correlation/dedup/type headers logged
+   ├─ schema + dynamic validation; cold-tier request audit
+   └─ relay to Service Bus queue `stock-on-hand-updated`
+        · SessionId = {FulfilmentId}:{ItemCode}
+        · deterministic message ID from Kafka key (never a fresh GUID)
 
-[STEP 8] B2C Stock Notification (OMS)
-  Action: Create B2CStockOnHandUpdatedEvent
-  ├─ Set Channel = OWN_ONLINE
-  ├─ Map StockOnHandUpdatedEvent to B2CStockOnHandUpdatedEvent
-  ├─ Create NexusProducerRequest
-  ├─ TODO: Send to Nexus Producer via Service Bus Queue
-  └─ Exception handled: Log error, continue
+2. SERVICE BUS CONSUMPTION
+   ├─ envelope + payload deserialize, dynamic validation, cold-tier audit
+   └─ IStockOnHandUpdatedHandler.HandleAsync(StockOnHandUpdatedEvent)
 
-[STEP 9] Final Error Handling
-  Outer catch block captures any uncaught exceptions:
-    ├─ Log exception with context
-    └─ Re-throw exception (Function fails)
+3. VALIDATION & FILTERING
+   ├─ null input → return (graceful, no mutation)
+   ├─ Location.Id and QuantityDetails present? else return
+   ├─ Location.Id == BRZ3PLConsigneeId? else return
+   ├─ filter Domain == B2C AND valid State/Status combination
+   └─ group by (CountryOfOrigin, Hallmarking)
 
-END: Return (Success or Exception)
+4. FOR EACH GROUP
+   4a. CASE 1 — SELLABLE ITEMS
+       (AVAILABLE+PREPARED) OR (AVAILABLE+PICKABLE) OR (AVAILABLETOSELL+PICKABLE)
+       ├─ build StockOnHandUpdatedRequest (FulfilmentCode, ItemCode,
+       │  CountryOfOrigin, Hallmark, StateLevelQtyList, B2CAvailableToSell)
+       ├─ set B2CAvailableToSell = qty where (AVAILABLETOSELL+PICKABLE)
+       ├─ if StateLevelQtyList.Count > 0 → HandleSellableAsync:
+       │    · fetch/create ItemStockInventory (deterministic Id; 409 → existing)
+       │    · compute B2CAVL = B2CAvailableToSell + B2CPrepared
+       │    · archive before, PERSIST via ETag-guarded Patch (Set/Increment),
+       │      412 → re-read/reapply loop, archive after
+       └─ else skip
+
+   4b. CASE 2 — NON-SELLABLE ITEMS
+       (AVAILABLE+HELD) OR (INSPECTION+PICKABLE)
+       For each item:
+       ├─ build ExtendedStockOnHandUpdatedRequest (Domain, State, normalized Qty)
+       └─ HandleExtendedAsync:
+            · fetch/create ItemStockInventoryExtended (deterministic Id; 409 → existing)
+            · archive before; discrepancy = (Qty_old != Qty_new)?
+            · if discrepancy → PERSIST via ETag-guarded Patch, archive after,
+              QuantityDelta = Qty_new - Qty_old; else skip (no-op)
+
+5. CASE 3 — B2C STOCK NOTIFICATION (OMS)
+   ├─ map StockOnHandUpdatedEvent → B2CStockOnHandUpdatedEvent (Channel = OWN_ONLINE)
+   ├─ wrap as Inventory_B2CStockOnHandUpdated
+   └─ PUBLISH to `nexus-producer` via cached ServiceBusSender (after durable commit)
+
+6. OUTCOME
+   └─ no exception → Completed; ConcurrencyException/OperationCanceled → Abandoned;
+      any other → DeadLettered (see cosmos-idempotent-write.md)
 ```
 
-### Key Steps Explained
+### Key Steps
 
-| Step | Action | Input | Processing | Output | Error Handling |
-|------|--------|-------|-----------|--------|----------------|
-| 1 | Deserialize | ServiceBusReceivedMessage | JSON to StockOnHandUpdatedEvent | StockOnHandUpdatedEvent object | Return if null |
-| 2 | Validate Location | LocationId | Check == BRZ3PLConsigneeId | Boolean | Return if invalid |
-| 3 | Filter Items | QuantityDetails list | Filter by domain & state/status | List<QuantityDetail> | Return if empty |
-| 4 | Group Items | Filtered items | GroupBy (CountryOfOrigin, Hallmarking) | IGrouping list | Continue with empty |
-| 5 | Process Sellable | Grouped items | Create request & call handler | bool | Log error, continue |
-| 6 | Process Non-sellable | Non-sellable items | Create request & call handler | long | Log error, continue |
-| 7 | Send B2C Notification | Event | Map & create producer request | bool | Log error, continue |
+| Step | Action | Input | Processing | Output |
+|------|--------|-------|-----------|--------|
+| 1 | Deserialize | Kafka/Service Bus message | JSON → StockOnHandUpdatedEvent | Event object (return if null) |
+| 2 | Validate location | LocationId | Check == BRZ3PLConsigneeId | Continue / return |
+| 3 | Filter items | QuantityDetails | Domain == B2C + valid state/status | Filtered list |
+| 4 | Group items | Filtered items | GroupBy (CountryOfOrigin, Hallmarking) | Groups |
+| 5 | Process sellable | Grouped items | Patch ItemStockInventory | Persisted + archived |
+| 6 | Process non-sellable | Non-sellable items | Patch ItemStockInventoryExtended | Persisted + archived |
+| 7 | Publish B2C notification | Event | Map + publish to nexus-producer | Downstream message |
 
 ---
 
 ## 3. Detailed Business Logic
 
-### Business Rule 1: Location Filtering
-**Purpose**: Ensure only BRAZIL 3PL inventory updates are processed by this trigger.
+### Business Rule 1: Location Filtering (BRZ3PL only)
+**Purpose:** ensure only BRAZIL 3PL inventory updates are processed.
 
-**Rule Implementation**:
 ```
 IF input.Location.Id != ReflexConstants.BRZ3PLConsigneeId THEN
-  Log informational message indicating invalid location
-  RETURN (exit function)
+  log informational message, RETURN (graceful exit)
 END IF
 ```
 
-**Why**: This trigger is specifically designed for BRAZIL 3PL fulfillment center. Other locations have different processing logic and should not be processed here.
-
-**Inputs**: 
-- `input.Location.Id` from StockOnHandUpdatedEvent
-
-**Processing**:
-1. Extract LocationId from input
-2. Compare with BRZ3PLConsigneeId constant
-3. If mismatch, log and exit
-
-**Decision Points**:
-- Is LocationId null? (checked earlier in validation)
-- Does LocationId match BRZ3PLConsigneeId?
-
-**Outputs**:
-- Valid: Continue processing
-- Invalid: Graceful exit
-
-**Validation Rules**:
-- LocationId must not be null
-- LocationId must exactly match BRZ3PLConsigneeId
-
-**Edge Cases**:
-- Multiple locations in single message: Not supported (each message should have single location)
-- Location ID changes during processing: N/A (read-only)
-
-**Failure Scenarios**:
-- LocationId is null: Caught in validation step, return early
-- LocationId is different: Logged and returns early
-- LocationId is empty string: Comparison fails, returns early
-
----
+This event is dedicated to the BRZ3PL fulfilment centre. Other locations have
+different processing paths. `LocationId` must be non-null and match
+`BRZ3PLConsigneeId` exactly; null/mismatch/empty all exit early.
 
 ### Business Rule 2: Domain and State/Status Filtering
-**Purpose**: Select only relevant inventory items for processing based on business domain (B2C) and inventory states.
+**Purpose:** select only relevant B2C inventory items.
 
-**Rule Implementation**:
 ```
-Filter items WHERE:
-  (Domain == B2C) AND
-  (
-    (State == AVAILABLE AND Status == PREPARED) OR
-    (State == AVAILABLE AND Status == PICKABLE) OR
-    (State == INSPECTION AND Status == PICKABLE) OR
+Filter items WHERE Domain == B2C AND (
+    (State == AVAILABLE       AND Status == PREPARED) OR
+    (State == AVAILABLE       AND Status == PICKABLE) OR
+    (State == INSPECTION      AND Status == PICKABLE) OR
     (State == AVAILABLETOSELL AND Status == PICKABLE) OR
-    (State == AVAILABLE AND Status == HELD)
-  )
+    (State == AVAILABLE       AND Status == HELD)
+)
 ```
 
-**Why**: 
-- B2C domain distinguishes consumer sales inventory from B2B or other domains
-- Only specific state/status combinations are relevant for B2C processing
-- PREPARED status indicates ready for picking by warehouse
-- PICKABLE status indicates items available for order fulfillment
-- AVAILABLETOSELL indicates cleared for customer sale
-- HELD status indicates items in quality control or reserved
-
-**Inputs**:
-- `input.QuantityDetails` array containing inventory details
-
-**Processing**:
-1. Iterate through QuantityDetails
-2. Check Domain == B2C
-3. Check if State+Status combination matches allowed list
-4. Accumulate matching items
-
-**Decision Points**:
-- Is Domain == B2C?
-- Is (State, Status) in allowed combinations?
-
-**Outputs**:
-- Filtered list of QuantityDetail objects matching criteria
-
-**Validation Rules**:
-- QuantityDetails must not be null (checked in validation step)
-- State and Status enums must be valid
-
-**Edge Cases**:
-- Empty QuantityDetails: Results in empty filtered list
-- Multiple items with same State/Status: All included
-- Items with negative quantity: Included in filter, quantity normalized to 0 later
-- Unknown state/status combination: Excluded from processing
-
-**Failure Scenarios**:
-- Invalid enum value: Throws exception during enum conversion
-- Null state or status: Excluded from filter (comparison fails)
-- Quantity is negative: Processed but normalized to 0
-
----
+This is a **B2C-only** event — there is no B2B branch or B2B segmentation. Only
+the listed state/status combinations are relevant: PREPARED (ready for picking),
+PICKABLE (available for fulfilment), AVAILABLETOSELL (cleared for customer sale),
+HELD (quality control / reserved). Unknown combinations are excluded; invalid
+enum values surface as a processing error.
 
 ### Business Rule 3: Grouping by Characteristics
-**Purpose**: Group inventory by product characteristics (Country of Origin, Hallmarking) for better inventory tracking and reporting.
+**Purpose:** track inventory separately per product characteristic.
 
-**Rule Implementation**:
 ```
 GROUP filtered_items BY (CountryOfOrigin, Hallmarking)
 ```
 
-**Why**: 
-- Different products from different countries have different tax and compliance implications
-- Hallmarking indicates quality certifications or metal purity standards
-- Grouping enables separate orchestration requests per characteristic combination
-- Enables accurate tracking of inventory by origin and certification
-
-**Inputs**:
-- Filtered QuantityDetails list
-
-**Processing**:
-1. Apply GroupBy on (CountryOfOrigin, Hallmarking)
-2. Creates groups with composite key
-
-**Decision Points**:
-- None (grouping is deterministic)
-
-**Outputs**:
-- `IEnumerable<IGrouping<AnonymousType, QuantityDetail>>`
-
-**Validation Rules**:
-- CountryOfOrigin must be valid enum
-- Hallmarking must be valid enum or null
-
-**Edge Cases**:
-- All items have same Country and Hallmarking: Single group
-- Each item unique by Country/Hallmarking: N groups
-- Null/default Country or Hallmarking values: Grouped separately
-
-**Failure Scenarios**:
-- Invalid enum: Exception during filtering (caught in outer try-catch)
-
----
+Different origins carry different tax/compliance implications and hallmarking
+indicates purity/certification. Each group is processed with its own composite
+key. Null/default characteristic values are grouped separately.
 
 ### Business Rule 4: Sellable vs Non-Sellable Separation
-**Purpose**: Process different inventory states through different orchestrator handlers based on saleability.
+**Purpose:** route inventory states through the appropriate repository.
 
-**Sellable Items**:
 ```
-Items WHERE:
-  (State == AVAILABLE AND Status == PREPARED) OR
-  (State == AVAILABLE AND Status == PICKABLE) OR
-  (State == AVAILABLETOSELL AND Status == PICKABLE)
+Sellable      = (AVAILABLE+PREPARED) OR (AVAILABLE+PICKABLE) OR (AVAILABLETOSELL+PICKABLE)
+Non-Sellable  = (AVAILABLE+HELD)     OR (INSPECTION+PICKABLE)
 ```
 
-**Non-Sellable Items**:
-```
-Items WHERE:
-  (State == AVAILABLE AND Status == HELD) OR
-  (State == INSPECTION AND Status == PICKABLE)
-```
-
-**Why**:
-- Sellable items flow through standard B2C inventory orchestration
-- Non-sellable items require extended tracking for quality control, customs, or reserved status
-- Different systems need different level of detail
-- Held items need separate tracking to prevent accidental allocation
-
-**Inputs**:
-- Grouped items for current (CountryOfOrigin, Hallmarking) pair
-
-**Processing**:
-1. Filter group for sellable state/status combinations
-2. Filter same group for non-sellable state/status combinations
-3. Process each subset independently
-
-**Decision Points**:
-- Is item sellable?
-- Is item non-sellable?
-- Can item be both? (No, mutually exclusive by design)
-
-**Outputs**:
-- Two separate request lists: `StockOnHandUpdatedRequest[]` and `ExtendedStockOnHandUpdatedRequest[]`
-
-**Validation Rules**:
-- State and Status must be valid enums
-- Items cannot be both sellable and non-sellable
-
-**Edge Cases**:
-- Item matches neither: Excluded from processing
-- All items in group are sellable: Non-sellable list empty
-- All items in group are non-sellable: Sellable list empty
-
-**Failure Scenarios**:
-- Handler exception for sellable: Logged, continues with non-sellable
-- Handler exception for non-sellable: Logged, continues to next item/group
-
----
+Sellable items update `ItemStockInventory`; non-sellable items require extended
+tracking in `ItemStockInventoryExtended` (quality control, customs, reserved).
+The two sets are mutually exclusive by design. A failure processing the sellable
+set is logged and does not stop non-sellable processing (see §8).
 
 ### Business Rule 5: Quantity Normalization
-**Purpose**: Ensure quantities are never negative in the inventory system.
+**Purpose:** never store negative stock.
 
-**Rule Implementation**:
 ```
-IF Quantity < 0 THEN
-  Quantity = 0
-ELSE
-  Quantity = Quantity (as-is)
-END IF
+IF Quantity < 0 THEN Quantity = 0 ELSE Quantity = Quantity
 ```
 
-**Why**: 
-- Negative inventory indicates data anomaly or system error
-- Business logic cannot handle negative stock (cannot sell negative units)
-- Systems expecting non-negative quantities will fail
-- Zero is safe default for corrupted/negative data
+Negative inventory indicates a data anomaly; zero is the safe floor. Delegated to
+[inventory-formulas.md](shared/inventory-formulas.md); a resulting negative is a
+business rejection, not a Cosmos error.
 
-**Inputs**:
-- `item.Quantity` from QuantityDetail
+### Business Rule 6: B2C Available to Sell
+**Purpose:** track inventory explicitly cleared for consumer sale.
 
-**Processing**:
-1. Check if quantity < 0
-2. Set to 0 if true, else keep as-is
-
-**Decision Points**:
-- Is Quantity < 0?
-
-**Outputs**:
-- Normalized quantity (0 or positive)
-
-**Validation Rules**:
-- Quantity must be numeric
-- No minimum value in input validation (caught here)
-
-**Edge Cases**:
-- Quantity == 0: Passed as-is
-- Very large quantity: Passed as-is (no maximum validation)
-- Fractional quantity: Would fail if not integer (but input is integer)
-
-**Failure Scenarios**:
-- Quantity is null: Would cause exception (but QuantityDetails is required)
-- Quantity is string: Would cause exception during filtering
-
----
-
-### Business Rule 6: B2C Available to Sell Calculation
-**Purpose**: Track inventory specifically available for consumer sale separate from prepared inventory.
-
-**Rule Implementation**:
 ```
-B2CAvailableToSell = 
-  SUM(Quantity where State == AVAILABLETOSELL AND Status == PICKABLE)
+B2CAvailableToSell = Quantity where (State == AVAILABLETOSELL AND Status == PICKABLE)
 ```
 
-**Why**:
-- Some inventory is prepared but not yet available for sale (in quality control)
-- AVAILABLETOSELL status explicitly indicates items cleared for customer sales
-- Enables accurate order fulfillment availability
-- Distinguish from PREPARED which may be in validation phases
+Selected with `FirstOrDefault` per category (design assumes at most one such line
+per group) defaulting to `0`. Distinguishes cleared-for-sale stock from PREPARED
+stock still in validation.
 
-**Inputs**:
-- `sellableItems` list filtered from group
+### Business Rule 7: Inventory Update and Archive (idempotent)
+**Purpose:** maintain current state plus an audit trail without double-counting.
 
-**Processing**:
-1. Filter sellableItems where (State == AVAILABLETOSELL AND Status == PICKABLE)
-2. Get first item's quantity using FirstOrDefault (assuming max 1 per category)
-3. Default to 0 if no items match
-
-**Decision Points**:
-- Are there items with (AVAILABLETOSELL + PICKABLE)?
-- Should multiple items be summed or just first? (Design uses FirstOrDefault)
-
-**Outputs**:
-- Integer quantity available to sell
-
-**Validation Rules**:
-- Must check if items exist before accessing quantity
-- Default to 0 if no items
-
-**Edge Cases**:
-- Multiple items with AVAILABLETOSELL+PICKABLE: Only first is used (potential bug?)
-- No items with AVAILABLETOSELL+PICKABLE: Returns 0
-- FirstOrDefault returns null: Cause exception (mitigated by ?? 0)
-
-**Failure Scenarios**:
-- No items match: Returns 0 (safe)
-- Multiple items match: Only first used (may be incorrect)
-
----
-
-### Business Rule 7: Inventory Update and Archive
-**Purpose**: Maintain current inventory state and historical audit trail.
-
-**Rule Implementation**:
-```
-TRANSACTION:
-  a. Save updated inventory to active store
-  b. Archive previous/updated state to history table
-END TRANSACTION
-```
-
-**Why**:
-- Current inventory needed for real-time queries
-- Archive maintains audit trail for compliance and debugging
-- Two-step process ensures both operations succeed together
-- Rollback on failure prevents inconsistency
-
-**Inputs**:
-- Updated `ItemStockInventoryExtendedDTO` or `ItemStockInventoryDTO`
-
-**Processing**:
-1. Call UpdateStockInventoryAsync on repository
-2. Call ArchiveMessageAsync on archive repository
-3. Both calls are awaited sequentially
-
-**Decision Points**:
-- Should archive happen before or after update?
-- What if archive fails after update?
-
-**Outputs**:
-- None (void operations)
-
-**Validation Rules**:
-- DTO must have all required fields populated
-- Both operations must complete (exception stops flow)
-
-**Edge Cases**:
-- First insert (no previous state): Still archives new state
-- Update with no quantity change: Still archives if any field changes
-- Zero quantity after update: Archives as-is
-
-**Failure Scenarios**:
-- Update fails: Exception thrown, caught by handler
-- Archive fails after update: Inconsistent state (no rollback)
+Each mutation follows the shared idempotent-write discipline in
+[cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md): a deterministic
+document `Id`, first-write via `CreateAsync` with `409 Conflict` treated as
+"already applied", and every subsequent mutation via **ETag-guarded `PatchAsync`**
+(`Increment` for quantities, `Set` for scalars, ≤10 ops). Before/after snapshots
+are archived via [archive-audit.md](shared/archive-audit.md) (best-effort; an
+archive failure does not by itself fail the message). This is the fix for the
+production **"double-counting inventory" / duplicate-entry / doubled-quantity**
+symptom that came from `Guid.NewGuid()` Ids and last-write-wins replaces.
 
 ---
 
 ## 4. Calculation Logic
 
+All quantity math is centralized in
+[inventory-formulas.md](shared/inventory-formulas.md) and
+[b2c-extension-calculation.md](shared/b2c-extension-calculation.md); increments
+are applied with `PatchOperation.Increment`, never read-modify-write-replace.
+
 ### Calculation 1: B2C Available Inventory (B2CAVL)
-**Formula**:
+
 ```
 B2CAVL = B2CAvailableToSell + B2CPrepared
 ```
 
-**Variables**:
-- **B2CAvailableToSell**: Quantity in AVAILABLETOSELL+PICKABLE state
-- **B2CPrepared**: Quantity in AVAILABLE+PREPARED state
+- **B2CAvailableToSell** — quantity in (AVAILABLETOSELL + PICKABLE); default 0.
+- **B2CPrepared** — quantity in (AVAILABLE + PREPARED); default 0.
+- Integer arithmetic, no rounding; min 0, no enforced maximum; result never null.
 
-**Data Source**:
-- Both extracted from StockOnHandUpdatedEvent.QuantityDetails
-
-**Units**: Count of items (integer)
-
-**Rounding Logic**: None (integer arithmetic)
-
-**Precision**: No decimal values
-
-**Boundary Conditions**:
-- Min: 0 (both components ≥ 0)
-- Max: No upper limit
-
-**Null Handling**:
-- B2CAvailableToSell: Default to 0 if not present
-- B2CPrepared: Default to 0 if no PREPARED items
-- Result: Never null
-
-**Default Values**:
-- Both components default to 0
-- Result defaults to 0
-
-**Overflow/Underflow Handling**:
-- No checks (assumes inputs within int32 range)
-
-**Worked Example 1**:
-```
-Input:
-  B2CAvailableToSell = 50
-  B2CPrepared = 30
-
-Calculation:
-  B2CAVL = 50 + 30 = 80
-
-Output:
-  B2CAVL = 80
-```
-
-**Worked Example 2**:
-```
-Input:
-  B2CAvailableToSell = 0 (no items in AVAILABLETOSELL)
-  B2CPrepared = 45
-
-Calculation:
-  B2CAVL = 0 + 45 = 45
-
-Output:
-  B2CAVL = 45
-```
-
----
+| B2CAvailableToSell | B2CPrepared | B2CAVL |
+|---|---|---|
+| 50 | 30 | 80 |
+| 0 | 45 | 45 |
 
 ### Calculation 2: Quantity Delta for Extended Inventory
-**Formula**:
+
 ```
-QuantityDelta = CurrentQuantity - PreviousQuantity
-```
-
-**Variables**:
-- **CurrentQuantity**: New quantity from event
-- **PreviousQuantity**: Existing quantity in database
-
-**Data Source**:
-- CurrentQuantity: From StockOnHandUpdatedEvent
-- PreviousQuantity: From database fetch
-
-**Units**: Count of items (integer)
-
-**Rounding Logic**: None
-
-**Precision**: No decimals
-
-**Boundary Conditions**:
-- Min: Negative (reduction)
-- Max: Positive (increase)
-
-**Null Handling**:
-- PreviousQuantity defaults to 0 if null: `existing.Qty ?? 0`
-- Current: Never null (checked in request)
-
-**Default Values**:
-- Previous defaults to 0
-
-**Overflow/Underflow Handling**:
-- No checks (accepts negative deltas)
-
-**Worked Example 1**:
-```
-Input:
-  PreviousQuantity = 100
-  CurrentQuantity = 150
-
-Calculation:
-  Delta = 150 - 100 = 50
-
-Output:
-  Delta = 50 (quantity increased by 50)
+QuantityDelta = CurrentQuantity - PreviousQuantity   (PreviousQuantity defaults to 0)
 ```
 
-**Worked Example 2**:
-```
-Input:
-  PreviousQuantity = 75
-  CurrentQuantity = 50
+Used to detect discrepancy on non-sellable items; only when `Qty_old != Qty_new`
+is a Patch applied.
 
-Calculation:
-  Delta = 50 - 75 = -25
-
-Output:
-  Delta = -25 (quantity decreased by 25)
-```
-
-**Worked Example 3**:
-```
-Input:
-  PreviousQuantity = null (new item)
-  CurrentQuantity = 100
-
-Calculation:
-  PreviousQty = 0 (default)
-  Delta = 100 - 0 = 100
-
-Output:
-  Delta = 100 (new inventory of 100)
-```
+| Previous | Current | Delta | Action |
+|---|---|---|---|
+| 100 | 150 | +50 | Patch Increment(+50) |
+| 75 | 50 | −25 | Patch Increment(−25) |
+| null (new) | 100 | +100 | create-if-missing then Increment(+100) |
 
 ---
 
 ## 5. Database Documentation
 
-### Table 1: ItemStockInventory (Sellable B2C Inventory)
+All Cosmos access follows
+[cosmos-db.instructions.md](../ai/cosmos-db.instructions.md) and
+[cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md).
 
-**Purpose**: Maintains current B2C sellable inventory across all state levels.
+### 5.1 ItemStockInventory (Sellable B2C inventory — BRZ3PL container)
+- **Partition key** `Category` = composite
+  `FulfilmentId:ItemCode:Hallmark:CountryOfOrigin`.
+- **Read:** point read `GetAsync(id, category)` within one partition.
+- **Create (first write):** deterministic `Id`; `409 Conflict` → return existing
+  (redelivery no-op).
+- **Update:** **`PatchAsync`** with `IfMatchEtag`, `PatchOperation.Set` for
+  `B2CAvailableToSell`/`B2CPrepared` (event-supplied absolute values) and
+  `PatchOperation.Increment`/`Set` for `B2CAVL` per the formula, plus `.Set` for
+  `ModifiedUtc`, **≤10 ops**. `412` → `ConcurrencyException` → §2
+  re-read/reapply loop (max 3). **No last-write-wins** on any quantity field.
 
-**Read Operations**:
+| Field | How derived |
+|---|---|
+| ItemCode | event `ProductId` |
+| B2CAvailableToSell | from (AVAILABLETOSELL + PICKABLE) → Patch Set |
+| B2CPrepared | from (AVAILABLE + PREPARED) → Patch Set |
+| B2CAVL | B2CAvailableToSell + B2CPrepared → Patch |
+| COO / Hallmark / FulfilmentId | from group key / request (BRZDC3PLFulfilmentId) |
+| B2BAVL/B2BAllocated/B2BPrepared/B2BUsedShare/B2COrg/B2CExtended/B2CThreshold/PSC/B2CAVLAllocated | initialized 0 on create (this event is B2C-only) |
+| IsExtended | initialized false |
 
-| Operation | Query | Filters | Joins | Expected Result |
-|-----------|-------|---------|-------|-----------------|
-| Get inventory by category | `GetInventoryByCategory()` | ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin | None | Single ItemStockInventoryDTO or null |
-| Columns fetched | B2CAVL, B2CPrepared, B2CAvailableToSell, and all other properties | - | - | Complete DTO object |
+### 5.2 ItemStockInventoryExtended (Non-Sellable B2C inventory)
+- Composite key incl. State/Status:
+  `ItemCode, Hallmark, FulfilmentId, CountryOfOrigin, State, Status`.
+- **Create (first write):** deterministic `Id`; `409 Conflict` → existing.
+- **Update:** ETag-guarded `PatchAsync` — `Increment` on `Qty` by the computed
+  delta only when a discrepancy exists; otherwise a no-op. `412` → §2 loop.
+- No hard delete — history retained via archive.
 
-**Index Usage**: 
-- Composite index recommended on (ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin) for query performance
+| Field | How derived |
+|---|---|
+| Qty | `request.Quantity` normalized (`max(0, quantity)`) → Patch Increment(delta) |
+| COO / Hallmark / FulfilmentId | request (BRZDC3PLFulfilmentId) |
+| State / Status | `request.State.State` / `request.State.Status` |
 
-**Insert Operations**:
+### 5.3 MessageArchive
+Before/after snapshots via [archive-audit.md](shared/archive-audit.md)
+(best-effort; deterministic archive id so redelivery does not create duplicate
+rows; failure does not fail the message).
 
-| Column | Source | Value | Type |
-|--------|--------|-------|------|
-| ItemCode | Event | input.ProductId | string |
-| B2CAVL | Calculated | B2CAvailableToSell + B2CPrepared | int |
-| B2CAVLAllocated | Initialized | 0 | int |
-| B2CPrepared | Calculated | Quantity from PREPARED state | int |
-| B2CAvailableToSell | Event | From AVAILABLETOSELL+PICKABLE items | int |
-| B2BAVL | Initialized | 0 | int |
-| B2BAllocated | Initialized | 0 | int |
-| B2BPrepared | Initialized | 0 | int |
-| B2BUsedShare | Initialized | 0 | int |
-| B2COrg | Initialized | 0 | int |
-| B2CExtended | Initialized | 0 | int |
-| B2CThreshold | Initialized | 0 | int |
-| PSC | Initialized | 0 | int |
-| COO | Event | request.CountryOfOrigin.ToString() | string |
-| FulfilmentId | Event | request.FulfilmentCode.ToString() | string |
-| Hallmark | Event | request.Hallmark.ToString() | string |
-| IsExtended | Initialized | false | bool |
-
-**Update Operations**:
-
-| Column | Update Condition | New Value Source | Trigger |
-|--------|-----------------|-----------------|---------|
-| B2CAvailableToSell | Always | request.B2CAvailableToSell | StockOnHandUpdatedEvent |
-| B2CAVL | Always | B2CAvailableToSell + B2CPrepared | Calculated |
-| B2CPrepared | Always | Quantity from PREPARED state | StockOnHandUpdatedEvent |
-| All others | Only if explicitly updated | - | - |
-
-**Transaction Boundary**: 
-```
-BEGIN TRANSACTION
-  1. Fetch existing inventory
-  2. Update quantities
-  3. Save changes
-  4. Archive message
-COMMIT TRANSACTION
-```
-
-**Optimistic Locking**: Not explicitly implemented (assumes no concurrent updates to same item)
-
-**Triggered Events**: 
-- Message archived after update
-- May trigger downstream B2C notification to OMS
+### 5.4 Transaction Flow & Concurrency
+Cosmos has no multi-document transactions here; correctness comes from
+per-document ETag Patch + the §2 retry loop and the deterministic-Id /
+409-as-applied create path — **not** distributed transactions or last-write-wins.
 
 ---
 
-### Table 2: ItemStockInventoryExtended (Non-Sellable B2C Inventory)
+## 6. State Changes & State Machine
 
-**Purpose**: Tracks B2C inventory in special states (HELD, INSPECTION) requiring extended tracking.
-
-**Read Operations**:
-
-| Operation | Query | Filters | Expected Result |
-|-----------|-------|---------|-----------------|
-| Get by category | `GetInventoryByCategory()` | ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin, State, Status | Single ItemStockInventoryExtendedDTO or null |
-
-**Index Usage**: 
-- Composite index on (ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin, State, Status)
-
-**Insert Operations**:
-
-| Column | Source | Value |
-|--------|--------|-------|
-| ItemCode | Event | input.ProductId |
-| Qty | Event | request.Quantity (normalized: max(0, quantity)) |
-| COO | Event | request.CountryOfOrigin.ToString() |
-| FulfilmentId | Event | request.FulfilmentCode.ToString() |
-| Hallmark | Event | request.Hallmark.ToString() |
-| State | Event | request.State.State |
-| Status | Event | request.State.Status |
-
-**Update Operations**:
-
-| Column | Update Condition |
-|--------|-----------------|
-| Qty | If discrepancy exists (previous != new) |
-
-**Delete Operations**: 
-- Soft delete implied (archived records retained)
-- Hard delete not supported (audit trail maintained)
-
----
-
-### Table 3: MessageArchive
-
-**Purpose**: Maintains audit trail of all inventory state transitions and updates.
-
-**Archive Operations**:
-
-| Trigger | Data Archived | Action |
-|---------|---------------|--------|
-| Before any inventory update | Previous state | ArchiveMessageAsync called before update |
-| After inventory update | Updated state | ArchiveMessageAsync called after update |
-| New inventory creation | New state | ArchiveMessageAsync called after creation |
-
-**Archive Fields**:
-- Complete DTO snapshot (all fields)
-- Timestamp of archive
-- Transaction context
-
-**Rollback Scenarios**:
-- If update fails: Archive not called, no state change
-- If archive fails: Update already done, inconsistency possible (no explicit rollback)
-
----
-
-## 6. State Changes
-
-### State Transition Diagram for Sellable Inventory
+### Sellable inventory
 
 ```
-Initial State (No record)
-        ↓
-[Validation] Location, Domain, State/Status
-        ↓ Valid
-[Fetch] Existing inventory from DB
-        ↓
-    ├─ Not Found → NEW ITEM PATH
-    │   ↓
-    │   [Create] Check if product exists
-    │   ├─ No → Create product in system
-    │   └─ Yes → Skip creation
-    │   ↓
-    │   [Calculate] Determine B2CAVL = B2CAvailableToSell + B2CPrepared
-    │   ↓
-    │   [Update] Save new ItemStockInventoryDTO with all initialized fields
-    │   ├─ B2CAVL = calculated value
-    │   ├─ B2CAvailableToSell = from request
-    │   ├─ B2CPrepared = from request
-    │   └─ Other fields = 0 or defaults
-    │   ↓
-    │   [Archive] Save new state snapshot
-    │   ↓
-    │   Final State: Inventory record exists with B2C quantities
-    │
-    └─ Found → EXISTING ITEM PATH
-        ↓
-        [Load] Retrieve current state
-        ├─ B2CAvailableToSell_old
-        ├─ B2CPrepared_old
-        └─ B2CAVL_old
-        ↓
-        [Calculate] New values
-        ├─ B2CAvailableToSell_new = from request
-        ├─ B2CPrepared_new = from request
-        └─ B2CAVL_new = B2CAvailableToSell_new + B2CPrepared_new
-        ↓
-        [Compare] Discrepancy check
-        ├─ B2CAvailableToSell changed?
-        ├─ B2CPrepared changed?
-        └─ B2CAVL changed?
-        ↓
-        [Archive] Save previous state snapshot
-        ↓
-        [Update] Apply new quantities
-        ↓
-        Final State: Inventory updated with new B2C quantities
+StockOnHandUpdatedEvent (BRZ3PL, B2C)
+   ↓  filter + group (CountryOfOrigin, Hallmarking)
+Fetch/Create ItemStockInventory (deterministic Id; 409 → existing)
+   ↓  archive previous
+Compute B2CAVL = B2CAvailableToSell + B2CPrepared
+   ↓
+Patch (ETag, Set/Increment)  ── 412 ─▶ re-read + reapply (≤3)
+   ↓  archive new
+Publish B2C notification (nexus-producer) after durable commit
+   ↓
+Final: sellable inventory updated exactly once
 ```
 
-### State Transition Diagram for Non-Sellable Inventory
+### Non-sellable (extended) inventory
 
 ```
-Initial State (No extended record)
-        ↓
-[Validation] Domain, State/Status, Location
-        ↓ Valid
-[Fetch] Existing extended inventory from DB
-        ↓
-    ├─ Not Found → NEW EXTENDED ITEM
-    │   ↓
-    │   [Create] Check if product exists
-    │   ├─ No → Create product
-    │   └─ Yes → Skip
-    │   ↓
-    │   [Build] Create ItemStockInventoryExtendedDTO
-    │   ├─ Qty = request.Quantity (normalized)
-    │   ├─ State = request.State.State
-    │   ├─ Status = request.State.Status
-    │   └─ Other fields = from request
-    │   ↓
-    │   [Update] Save to extended inventory table
-    │   ↓
-    │   [Archive] Save state snapshot
-    │   ↓
-    │   Final State: Extended inventory record created
-    │
-    └─ Found → EXISTING EXTENDED ITEM
-        ↓
-        [Load] Current quantity and state
-        ├─ Qty_old = existing.Qty ?? 0
-        └─ State_old = existing (entire DTO)
-        ↓
-        [Archive] Save previous state
-        ↓
-        [Check] Discrepancy = (Qty_old != Qty_new)?
-        ↓
-        [Update] Qty = request.Quantity
-        ↓
-        ├─ If discrepancy exists:
-        │   ├─ Archive updated state
-        │   └─ Return QuantityDelta = (Qty_new - Qty_old)
-        └─ Else:
-            └─ Skip archive, return delta = 0
-        ↓
-        Final State: Quantity updated (if changed) with archived history
+Non-sellable item (AVAILABLE+HELD | INSPECTION+PICKABLE)
+   ↓
+Fetch/Create ItemStockInventoryExtended (deterministic Id; 409 → existing)
+   ↓  archive previous
+Discrepancy = (Qty_old != Qty_new)?
+   ├─ No  → skip (no mutation)
+   └─ Yes → Patch Increment(delta) (ETag) ── 412 ─▶ re-read + reapply (≤3)
+             ↓  archive new
+Final: extended inventory updated exactly once (or unchanged)
+```
+
+**Critical invariants:** no quantity goes negative; a redelivered message
+produces no additional mutation (idempotent create + ETag Patch); the two paths
+are independent — one failing does not corrupt the other.
+
+```mermaid
+flowchart TD
+    Start([Message received]) --> CheckNull{"Input == null?"}
+    CheckNull -->|Yes| Ret1["Log + RETURN"]
+    CheckNull -->|No| CheckFields{"Location.Id &&<br/>QuantityDetails present?"}
+    CheckFields -->|No| Ret2["Log + RETURN"]
+    CheckFields -->|Yes| CheckLoc{"Location.Id ==<br/>BRZ3PLConsigneeId?"}
+    CheckLoc -->|No| Ret3["Log invalid location + RETURN"]
+    CheckLoc -->|Yes| Filter["Filter Domain==B2C<br/>+ valid State/Status"]
+    Filter --> Group["Group by<br/>(CountryOfOrigin, Hallmarking)"]
+    Group --> Loop{"For each group"}
+    Loop -->|Sellable| S1["Fetch/Create ItemStockInventory<br/>(det. Id; 409→existing)"]
+    S1 --> S2["Compute B2CAVL<br/>= AvailableToSell + Prepared"]
+    S2 --> S3["Archive before →<br/>ETag Patch (412 re-read≤3) →<br/>Archive after"]
+    Loop -->|Non-Sellable| N1["Fetch/Create Extended<br/>(det. Id; 409→existing)"]
+    N1 --> N2{"Discrepancy?"}
+    N2 -->|No| N3["Skip (no-op)"]
+    N2 -->|Yes| N4["ETag Patch Increment(delta)<br/>(412 re-read≤3) + archive"]
+    S3 --> B2C["Map B2CStockOnHandUpdatedEvent<br/>Channel = OWN_ONLINE"]
+    N3 --> B2C
+    N4 --> B2C
+    B2C --> Pub["Publish to nexus-producer<br/>(cached ServiceBusSender)"]
+    Pub --> Done([Completed])
 ```
 
 ---
 
 ## 7. API Documentation
 
-### 7.1 Azure Service Bus Queue Message
+### 7.1 Kafka message contract
+Topic `inventory.StockOnHandUpdated`, mapped to `StockOnHandUpdatedEvent`:
 
-**Endpoint**: Azure Service Bus Queue  
-**Queue Name**: `{STOCK_ON_HAND_UPDATED_REFLEX_QUEUE_NAME}` (from ApplicationConfig)
-
-**HTTP Equivalent**: Async message queue trigger (no HTTP)
-
-**Request**:
-
-```csharp
-{
-  "ProductId": "PROD-12345",
-  "Location": {
-    "Id": "BRZ3PLConsignee",
-    "Name": "Brazil 3PL"
-  },
-  "QuantityDetails": [
-    {
-      "Domain": "B2C",
-      "Quantity": 100,
-      "State": {
-        "State": "AVAILABLE",
-        "Status": "PICKABLE"
-      },
-      "CountryOfOrigin": "IN",
-      "Hallmarking": "PURE"
-    },
-    {
-      "Domain": "B2C",
-      "Quantity": 50,
-      "State": {
-        "State": "AVAILABLETOSELL",
-        "Status": "PICKABLE"
-      },
-      "CountryOfOrigin": "IN",
-      "Hallmarking": "PURE"
-    }
-  ]
-}
-```
-
-**Request Body Schema**:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| ProductId | string | Yes | Unique product identifier |
-| Location | object | Yes | Location details |
-| Location.Id | string | Yes | Location identifier (must be BRZ3PLConsigneeId) |
-| Location.Name | string | No | Location display name |
-| QuantityDetails | array | Yes | List of quantity records by state |
-| QuantityDetails[].Domain | enum | Yes | Inventory domain (B2C, B2B, etc.) |
-| QuantityDetails[].Quantity | int | Yes | Item count (can be negative, normalized to 0) |
-| QuantityDetails[].State | object | Yes | Inventory state |
-| QuantityDetails[].State.State | enum | Yes | Main state (AVAILABLE, INSPECTION, etc.) |
-| QuantityDetails[].State.Status | enum | Yes | Status code (PREPARED, PICKABLE, HELD, etc.) |
-| QuantityDetails[].CountryOfOrigin | enum | Yes | Country of origin (IN, ZA, etc.) |
-| QuantityDetails[].Hallmarking | enum | Yes | Hallmark certification |
-
-**Response**:
-
-No explicit response (async queue trigger). Function either succeeds silently or throws exception.
-
-**Success Behavior**:
-- Message processed
-- Inventory updated in database
-- Message archived
-- No response returned
-
-**Failure Behavior**:
-- Exception logged
-- Function re-throws exception
-- Message may be retried by Service Bus based on max delivery count
-
-**Status Codes**: N/A (async processing)
-
-**Error Codes**:
-
-| Error | Cause | Handling |
-|-------|-------|----------|
-| NullReferenceException | Input message null | Return gracefully, log info |
-| ValidationException | Location/QuantityDetails null | Return gracefully, log info |
-| InvalidLocationException | LocationId != BRZ3PLConsigneeId | Return gracefully, log info |
-| InvalidItemCodeException | ProductId invalid | Log error, create product if needed |
-| DatabaseException | Update/archive fails | Log error, re-throw |
-
-**Sample Request** (Full):
 ```json
 {
   "ProductId": "GOLD-BAR-001",
   "Channel": "OWN_ONLINE",
-  "Location": {
-    "Id": "BRZ3PLConsignee",
-    "Name": "Brazil Fulfillment"
-  },
+  "Location": { "Id": "BRZ3PLConsignee", "Name": "Brazil 3PL" },
   "QuantityDetails": [
-    {
-      "Domain": "B2C",
-      "Quantity": 500,
-      "State": {
-        "State": "AVAILABLE",
-        "Status": "PREPARED"
-      },
-      "CountryOfOrigin": "IN",
-      "Hallmarking": "PURE",
-      "SourceSystem": "WMS"
-    },
-    {
-      "Domain": "B2C",
-      "Quantity": 300,
-      "State": {
-        "State": "AVAILABLETOSELL",
-        "Status": "PICKABLE"
-      },
-      "CountryOfOrigin": "IN",
-      "Hallmarking": "PURE",
-      "SourceSystem": "WMS"
-    },
-    {
-      "Domain": "B2C",
-      "Quantity": 50,
-      "State": {
-        "State": "INSPECTION",
-        "Status": "PICKABLE"
-      },
-      "CountryOfOrigin": "IN",
-      "Hallmarking": "PURE",
-      "SourceSystem": "WMS"
-    }
+    { "Domain": "B2C", "Quantity": 500,
+      "State": { "State": "AVAILABLE", "Status": "PREPARED" },
+      "CountryOfOrigin": "IN", "Hallmarking": "PURE" },
+    { "Domain": "B2C", "Quantity": 300,
+      "State": { "State": "AVAILABLETOSELL", "Status": "PICKABLE" },
+      "CountryOfOrigin": "IN", "Hallmarking": "PURE" },
+    { "Domain": "B2C", "Quantity": 50,
+      "State": { "State": "INSPECTION", "Status": "PICKABLE" },
+      "CountryOfOrigin": "IN", "Hallmarking": "PURE" }
   ]
 }
 ```
 
-**Sample Response**: None (async)
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| ProductId | string | Yes | Unique product identifier (→ ItemCode) |
+| Location.Id | string | Yes | Must be `BRZ3PLConsigneeId` |
+| Location.Name | string | No | Display name |
+| QuantityDetails | array | Yes | Quantity records by state |
+| QuantityDetails[].Domain | enum | Yes | Must be `B2C` |
+| QuantityDetails[].Quantity | int | Yes | Count (negative normalized to 0) |
+| QuantityDetails[].State.State | enum | Yes | AVAILABLE / INSPECTION / AVAILABLETOSELL |
+| QuantityDetails[].State.Status | enum | Yes | PREPARED / PICKABLE / HELD |
+| QuantityDetails[].CountryOfOrigin | enum | Yes | Country of origin |
+| QuantityDetails[].Hallmarking | enum | Yes | Hallmark certification |
+
+### 7.2 Inbound Service Bus contract
+Queue `stock-on-hand-updated`, `ServiceBusRelayEnvelope` wrapping the event;
+session-enabled with `SessionId = {FulfilmentId}:{ItemCode}`; deterministic
+`MessageId` derived from the Kafka key (never a fresh GUID); correlation headers
+per [service-bus-publishing.md](shared/service-bus-publishing.md).
+
+### 7.3 Outbound Service Bus contract (B2C stock notification)
+Queue `nexus-producer` (old constant `NEXUS_PRODUCER_QUEUE_NAME`, for
+traceability only — resolved from config, not used as a live literal). The
+handler maps `StockOnHandUpdatedEvent` → `B2CStockOnHandUpdatedEvent`
+(`Channel = OWN_ONLINE`), wraps it as `Inventory_B2CStockOnHandUpdated`, and
+publishes via the cached `ServiceBusSender` **after** the Cosmos write is durably
+committed. This is the fully implemented replacement for the previous "send to
+Nexus Producer" TODO. See [service-bus-publishing.md](shared/service-bus-publishing.md).
+The full-availability ICR snapshot path
+([icr-snapshot.md](shared/icr-snapshot.md)) publishes
+`Inventory_OmniInventoryAvailabilityReported` to `nexus-producer` when
+`ENABLE_SNAPSHOT_FOR_ICR` is enabled.
+
+### 7.4 Validation
+
+| Field | Rule | Handling |
+|---|---|---|
+| Input | not null | return early (graceful) |
+| Location / QuantityDetails | not null | return early |
+| Location.Id | == BRZ3PLConsigneeId | return early on mismatch |
+| Domain | == B2C | non-B2C excluded from filter |
+| State/Status | valid enum + allowed combination | invalid excluded / rejected |
+| Quantity | integer | normalized (`max(0, qty)`) |
+| poison / schema-invalid payload | not deserializable | DeadLettered |
 
 ---
 
-## 8. Sequence Diagram
+## 8. Error Handling & Retry Mechanisms
 
-```mermaid
-sequenceDiagram
-    participant SB as Service Bus Queue
-    participant Trigger as StockOnHandUpdatedFullQueueTrigger
-    participant Repo as ItemStockInventoryRepository
-    participant ExtRepo as ItemStockInventoryExtendedRepository
-    participant ItemRepo as ItemRepository
-    participant Archive as MessageArchiveRepository
-    participant DB as CosmosDB
-    participant Logger as LoggerService
+- **Validation / poison payload** → DeadLettered (hot-tier dead-letter container).
+- **Graceful business exits** (null input, missing fields, non-BRZ3PL location,
+  empty filtered set) → logged and returned; the message is **Completed** (no
+  mutation, nothing to retry).
+- **Per-case isolation:** a failure in the sellable path is logged and does not
+  stop the non-sellable path (and vice versa); a B2C-notification failure does
+  not undo the inventory write.
+- **Cosmos 412 (ETag)** → `ConcurrencyException` → §2 re-read/reapply loop (≤3);
+  if exhausted → Abandoned (redelivered up to `MaxDeliveryCount`).
+- **Cosmos 429** → Cosmos SDK retry (`MaxRetryAttemptsOnRateLimitedRequests`).
+- **Service Bus publish transient** → `service-bus-publish` Polly pipeline
+  ([service-bus-publishing.md](shared/service-bus-publishing.md)).
+- **`OperationCanceledException`** → Abandoned.
+- **Any other exception** → DeadLettered (`Reason` = type, `Description` =
+  `ex.ToString()`).
 
-    SB->>Trigger: StockOnHandUpdatedEvent (message)
-    Trigger->>Logger: Log: Processing started
-    
-    activate Trigger
-        Trigger->>Trigger: Deserialize message
-        
-        alt Input is null
-            Trigger->>Logger: Log: Input null
-            Trigger-->>SB: Return (no error)
-        else Input valid
-            alt Location/QuantityDetails null
-                Trigger->>Logger: Log: Missing location/qty
-                Trigger-->>SB: Return
-            else Validation passed
-                Trigger->>Trigger: Check LocationId == BRZ3PLConsigneeId
-                
-                alt Invalid location
-                    Trigger->>Logger: Log: Invalid location
-                    Trigger-->>SB: Return
-                else Valid location
-                    Trigger->>Trigger: Filter items (Domain=B2C, State/Status match)
-                    Trigger->>Trigger: Group by (CountryOfOrigin, Hallmarking)
-                    
-                    loop For each item group
-                        Trigger->>Trigger: Separate into Sellable & Non-Sellable
-                        
-                        alt Has Sellable items
-                            Trigger->>Repo: GetInventoryByCategory()
-                            Repo->>DB: Query inventory
-                            DB-->>Repo: ItemStockInventoryDTO or null
-                            Repo-->>Trigger: Result
-                            
-                            alt Inventory exists
-                                Trigger->>Archive: ArchiveMessageAsync(existing)
-                                Archive->>DB: Insert archive record
-                                Trigger->>Repo: UpdateStockInventoryAsync()
-                                Repo->>DB: Update B2CAVL, B2CPrepared
-                                DB-->>Repo: Confirm
-                            else New inventory
-                                Trigger->>ItemRepo: CheckItemCodeExistsAsync()
-                                ItemRepo->>DB: Query item
-                                alt Item doesn't exist
-                                    Trigger->>ItemRepo: AddProductAsync()
-                                    ItemRepo->>DB: Insert new product
-                                end
-                                Trigger->>Repo: UpdateStockInventoryAsync(new DTO)
-                                Repo->>DB: Insert inventory record
-                                Trigger->>Archive: ArchiveMessageAsync(new)
-                                Archive->>DB: Insert archive
-                            end
-                            Trigger->>Logger: Log: Sellable update success
-                        else No sellable items
-                            Trigger->>Logger: Log: No sellable items
-                        end
-                        
-                        alt Has Non-Sellable items
-                            loop For each non-sellable item
-                                Trigger->>ExtRepo: GetInventoryByCategory()
-                                ExtRepo->>DB: Query extended inventory
-                                DB-->>ExtRepo: ItemStockInventoryExtendedDTO or null
-                                ExtRepo-->>Trigger: Result
-                                
-                                alt Extended inventory exists
-                                    Trigger->>Archive: ArchiveMessageAsync(existing)
-                                    Archive->>DB: Insert archive
-                                    Trigger->>Trigger: Check discrepancy
-                                    alt Quantity changed
-                                        Trigger->>ExtRepo: UpdateStockInventoryAsync()
-                                        ExtRepo->>DB: Update Qty
-                                        Trigger->>Archive: ArchiveMessageAsync(updated)
-                                        Archive->>DB: Insert updated archive
-                                    end
-                                else New extended inventory
-                                    Trigger->>ItemRepo: CheckItemCodeExistsAsync()
-                                    ItemRepo->>DB: Query item
-                                    alt Item doesn't exist
-                                        Trigger->>ItemRepo: AddProductAsync()
-                                        ItemRepo->>DB: Insert product
-                                    end
-                                    Trigger->>ExtRepo: UpdateStockInventoryAsync(new)
-                                    ExtRepo->>DB: Insert extended inventory
-                                    Trigger->>Archive: ArchiveMessageAsync(new)
-                                    Archive->>DB: Insert archive
-                                end
-                                Trigger->>Logger: Log: Non-sellable update success
-                            end
-                        end
-                    end
-                    
-                    Trigger->>Trigger: Create B2CStockOnHandUpdatedEvent
-                    Trigger->>Logger: Log: B2C event created (TODO: send to Nexus)
-                end
-            end
-        end
-    deactivate Trigger
-    
-    Trigger-->>SB: Complete/Exception
-```
+Message outcome mapping (no exception → **Completed**;
+`ConcurrencyException`/`OperationCanceledException` → **Abandoned**; any other →
+**DeadLettered**) is the definitive table in
+[cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md) — not restated
+here.
 
 ---
 
-## 9. Flow Chart
-
-```mermaid
-flowchart TD
-    Start([Trigger invoked by Service Bus]) --> Deserialize["Deserialize message to<br/>StockOnHandUpdatedEvent"]
-    Deserialize --> LogStart["Log: Processing started<br/>ProductId, LocationId"]
-    
-    LogStart --> CheckInputNull{"Input == null?"}
-    CheckInputNull -->|Yes| LogInputNull["Log: Input null"]
-    LogInputNull --> Return1["RETURN<br/>Exit gracefully"]
-    
-    CheckInputNull -->|No| CheckValidation{"Location.Id != null &&<br/>QuantityDetails != null?"}
-    CheckValidation -->|No| LogValidation["Log: Missing location<br/>or QuantityDetails"]
-    LogValidation --> Return2["RETURN"]
-    
-    CheckValidation -->|Yes| CheckLocation{"Location.Id ==<br/>BRZ3PLConsigneeId?"}
-    CheckLocation -->|No| LogLocation["Log: Invalid location id"]
-    LogLocation --> Return3["RETURN"]
-    
-    CheckLocation -->|Yes| Filter["Filter items:<br/>Domain == B2C AND<br/>Valid State/Status"]
-    Filter --> Group["Group by<br/>CountryOfOrigin, Hallmarking"]
-    
-    Group --> ForEachGroup{"For each<br/>group?"}
-    ForEachGroup -->|No more groups| B2CNotification["Create B2CStockOnHandUpdatedEvent<br/>Map to NexusProducerRequest"]
-    B2CNotification --> LogB2C["Log: B2C event created<br/>TODO: Send to Nexus"]
-    LogB2C --> TryCatch{{"Catch<br/>exceptions"}}
-    
-    ForEachGroup -->|Next group| SeparateSellable["Separate into:<br/>CASE 1: Sellable items<br/>CASE 2: Non-sellable items"]
-    
-    SeparateSellable --> Case1{"CASE 1:<br/>Any sellable items?"}
-    Case1 -->|No| Case2{"CASE 2:<br/>Any non-sellable items?"}
-    
-    Case1 -->|Yes| CreateSellableReq["Create StockOnHandUpdatedRequest<br/>- FulfilmentCode<br/>- ItemCode<br/>- CountryOfOrigin<br/>- Hallmark<br/>- StateLevelQtyList<br/>- B2CAvailableToSell"]
-    
-    CreateSellableReq --> CheckSellableCount{"StateLevelQtyList<br/>.Count > 0?"}
-    CheckSellableCount -->|No| Case2
-    CheckSellableCount -->|Yes| CallSellableHandler["Call stockOnHandUpdatedEventHandlerAsync()"]
-    
-    CallSellableHandler --> FetchSellable["FetchExistingInventory()<br/>GetInventoryByCategory()"]
-    FetchSellable --> CheckSellableExists{"Inventory<br/>exists?"}
-    
-    CheckSellableExists -->|No| CreateProduct["CheckItemCodeExistsAsync()"]
-    CreateProduct --> ItemExists{"Item<br/>exists?"}
-    ItemExists -->|No| AddProduct["AddProductAsync()"]
-    AddProduct --> BuildNewDTO["BuildInventoryDTO()<br/>All fields initialized"]
-    BuildNewDTO --> UpdateNew["UpdateStockInventoryAsync()<br/>Save new inventory"]
-    UpdateNew --> ArchiveNew["ArchiveMessageAsync()"]
-    
-    ItemExists -->|Yes| BuildNewDTO
-    
-    ArchiveNew --> ReturnSellable["Return to Case 1"]
-    
-    CheckSellableExists -->|Yes| ArchiveExisting["ArchiveMessageAsync()<br/>Save previous state"]
-    ArchiveExisting --> CheckDiscrepancy{"HasDiscrepancy<br/>= (old_qty !=<br/>new_qty)?"}
-    
-    CheckDiscrepancy -->|No| ReturnSellable
-    CheckDiscrepancy -->|Yes| UpdateExisting["Update quantities"]
-    UpdateExisting --> ArchiveUpdated["ArchiveMessageAsync()"]
-    ArchiveUpdated --> ReturnSellable
-    
-    ReturnSellable --> SellableException{"Exception<br/>caught?"}
-    SellableException -->|Yes| LogSellableError["Log error:<br/>Sellable update failed"]
-    SellableException -->|No| LogSellableSuccess["Log: Success"]
-    LogSellableError --> Case2
-    LogSellableSuccess --> Case2
-    
-    Case2 -->|No| ForEachGroup
-    Case2 -->|Yes| ForEachNonSellable{"For each<br/>non-sellable item?"}
-    
-    ForEachNonSellable -->|No more| ForEachGroup
-    ForEachNonSellable -->|Next item| CreateExtendedReq["Create ExtendedStockOnHandUpdatedRequest<br/>- FulfilmentCode<br/>- ItemCode<br/>- CountryOfOrigin<br/>- Hallmark<br/>- Domain<br/>- Quantity (normalized)<br/>- State"]
-    
-    CreateExtendedReq --> CallExtendedHandler["Call extendedStockOnHandUpdatedEventHandlerAsync()"]
-    
-    CallExtendedHandler --> FetchExtended["FetchExistingInventory()<br/>GetInventoryByCategory()"]
-    FetchExtended --> CheckExtendedExists{"Extended inventory<br/>exists?"}
-    
-    CheckExtendedExists -->|No| CheckItemExist["CheckItemCodeExistsAsync()"]
-    CheckItemExist --> ItemExist2{"Item<br/>exists?"}
-    ItemExist2 -->|No| AddProduct2["AddProductAsync()"]
-    AddProduct2 --> BuildExtendedDTO["BuildInventoryDTO()"]
-    ItemExist2 -->|Yes| BuildExtendedDTO
-    BuildExtendedDTO --> UpdateExtendedNew["UpdateStockInventoryAsync()"]
-    UpdateExtendedNew --> ArchiveExtendedNew["ArchiveMessageAsync()"]
-    ArchiveExtendedNew --> ReturnExtended["Return QuantityDelta"]
-    
-    CheckExtendedExists -->|Yes| ArchiveExtendedExist["ArchiveMessageAsync()"]
-    ArchiveExtendedExist --> CheckExtendedDiscrep{"HasDiscrepancy<br/>= (old != new)?"}
-    
-    CheckExtendedDiscrep -->|No| ReturnExtended
-    CheckExtendedDiscrep -->|Yes| UpdateQty["Update Qty"]
-    UpdateQty --> ArchiveExtendedUpdated["ArchiveMessageAsync()"]
-    ArchiveExtendedUpdated --> ReturnExtended
-    
-    ReturnExtended --> ExtendedException{"Exception<br/>caught?"}
-    ExtendedException -->|Yes| LogExtendedError["Log error:<br/>Non-sellable update failed"]
-    ExtendedException -->|No| LogExtendedSuccess["Log: Success"]
-    LogExtendedError --> ForEachNonSellable
-    LogExtendedSuccess --> ForEachNonSellable
-    
-    TryCatch -->|Exception| LogFinalError["Log exception:<br/>Trigger threw error"]
-    LogFinalError --> RethrowException["RE-THROW Exception"]
-    TryCatch -->|No exception| End(["Success<br/>Return"])
-    
-    RethrowException --> EndError(["Function failed<br/>Message may retry"])
-    Return1 --> End
-    Return2 --> End
-    Return3 --> End
-```
-
----
-
-## 10. Decision Tree
-
-```
-Processing StockOnHandUpdatedEvent
-
-├─ IS INPUT NULL?
-│  ├─ YES → Log "Input null" → Exit
-│  └─ NO → Continue
-│
-├─ ARE LOCATION.ID AND QUANTITYDETAILS PRESENT?
-│  ├─ NO → Log "Missing required fields" → Exit
-│  └─ YES → Continue
-│
-├─ IS LOCATION.ID == BRZ3PLCONSIGNEEID?
-│  ├─ NO → Log "Invalid location" → Exit
-│  └─ YES → Continue
-│
-├─ FILTER AND GROUP ITEMS
-│  ├─ Domain == B2C? 
-│  │  ├─ NO → Exclude item
-│  │  └─ YES → Continue
-│  │
-│  ├─ IS STATE/STATUS IN ALLOWED COMBINATIONS?
-│  │  ├─ NO → Exclude item
-│  │  └─ YES → Continue
-│  │
-│  └─ GROUP BY (CountryOfOrigin, Hallmarking)
-│
-├─ FOR EACH GROUP:
-│  │
-│  ├─ CASE 1: SELLABLE ITEMS
-│  │  │
-│  │  ├─ ARE THERE SELLABLE ITEMS?
-│  │  │  ├─ NO → Skip Case 1
-│  │  │  └─ YES → Continue
-│  │  │
-│  │  ├─ CREATE StockOnHandUpdatedRequest
-│  │  │
-│  │  ├─ FETCH EXISTING INVENTORY
-│  │  │  │
-│  │  │  ├─ EXISTS?
-│  │  │  │  ├─ NO → NEW INVENTORY PATH
-│  │  │  │  │  ├─ Does product exist?
-│  │  │  │  │  │  ├─ NO → Create product
-│  │  │  │  │  │  └─ YES → Continue
-│  │  │  │  │  ├─ Build new ItemStockInventoryDTO
-│  │  │  │  │  ├─ Calculate B2CAVL = B2CAvailableToSell + B2CPrepared
-│  │  │  │  │  ├─ Save to database
-│  │  │  │  │  └─ Archive new state
-│  │  │  │  │
-│  │  │  │  └─ YES → EXISTING INVENTORY PATH
-│  │  │  │     ├─ Archive previous state
-│  │  │  │     ├─ Check discrepancy (old != new)?
-│  │  │  │     │  ├─ YES → Update and archive
-│  │  │  │     │  └─ NO → Skip update
-│  │  │  │     └─ Continue
-│  │  │  │
-│  │  │  ├─ EXCEPTION?
-│  │  │  │  ├─ YES → Log error, continue
-│  │  │  │  └─ NO → Success
-│  │  │
-│  │  └─ END CASE 1
-│  │
-│  ├─ CASE 2: NON-SELLABLE ITEMS
-│  │  │
-│  │  ├─ ARE THERE NON-SELLABLE ITEMS?
-│  │  │  ├─ NO → Skip Case 2
-│  │  │  └─ YES → Continue
-│  │  │
-│  │  ├─ FOR EACH NON-SELLABLE ITEM:
-│  │  │  │
-│  │  │  ├─ CREATE ExtendedStockOnHandUpdatedRequest
-│  │  │  │
-│  │  │  ├─ FETCH EXISTING EXTENDED INVENTORY
-│  │  │  │  │
-│  │  │  │  ├─ EXISTS?
-│  │  │  │  │  ├─ NO → NEW EXTENDED PATH
-│  │  │  │  │  │  ├─ Does product exist?
-│  │  │  │  │  │  │  ├─ NO → Create product
-│  │  │  │  │  │  │  └─ YES → Continue
-│  │  │  │  │  │  ├─ Build new ItemStockInventoryExtendedDTO
-│  │  │  │  │  │  ├─ Save to database
-│  │  │  │  │  │  └─ Archive
-│  │  │  │  │  │
-│  │  │  │  │  └─ YES → EXISTING EXTENDED PATH
-│  │  │  │  │     ├─ Archive previous state
-│  │  │  │  │     ├─ Check discrepancy (old != new)?
-│  │  │  │  │     │  ├─ YES → Update and archive
-│  │  │  │  │     │  └─ NO → Skip update
-│  │  │  │  │     └─ Continue
-│  │  │  │  │
-│  │  │  │  ├─ EXCEPTION?
-│  │  │  │  │  ├─ YES → Log error, continue to next item
-│  │  │  │  │  └─ NO → Success
-│  │  │  │
-│  │  │  └─ END FOR EACH ITEM
-│  │  │
-│  │  └─ END CASE 2
-│  │
-│  └─ END FOR EACH GROUP
-│
-├─ B2C STOCK NOTIFICATION (OMS)
-│  │
-│  ├─ MAP EVENT TO B2CStockOnHandUpdatedEvent
-│  │  └─ Set Channel = OWN_ONLINE
-│  │
-│  ├─ CREATE NexusProducerRequest
-│  │  └─ Type = Inventory_B2CStockOnHandUpdated
-│  │
-│  ├─ TODO: SEND TO NEXUS PRODUCER
-│  │  └─ Via Service Bus Queue
-│  │
-│  └─ EXCEPTION?
-│     ├─ YES → Log error, continue
-│     └─ NO → Success
-│
-├─ FINAL EXCEPTION CHECK
-│  │
-│  ├─ UNCAUGHT EXCEPTION?
-│  │  ├─ YES → Log with context
-│  │  │  └─ RE-THROW EXCEPTION
-│  │  │     └─ Function fails, Message may retry
-│  │  │
-│  │  └─ NO → EXIT SUCCESSFULLY
-│
-└─ END
-```
-
----
-
-## 11. Error Handling
-
-### Validation Errors
-
-| Error | Detection | Handling | Message |
-|-------|-----------|----------|---------|
-| Null input | `input == null` | Return early | "Input message is null" |
-| Missing Location | `input.Location?.Id == null` | Return early | "Input message is missing Location or QuantityDetails" |
-| Missing QuantityDetails | `input.QuantityDetails == null` | Return early | Same as above |
-| Invalid Location ID | `LocationId != BRZ3PLConsigneeId` | Return early | "Invalid location id {LocationId}" |
-
-### Business Logic Errors
-
-| Error | Detection | Handling | Message |
-|-------|-----------|----------|---------|
-| Invalid ItemCode | Item not found & cannot create | Log error bypass, continue | "ItemCode {code} is invalid" |
-| No matching items after filter | Empty filtered list | Continue to next operation | No error logged |
-| No inventory found | Repository returns null | Create new record | Implicit (no error) |
-
-### Database Errors
-
-| Error | Detection | Handling | Message |
-|-------|-----------|----------|---------|
-| Update fails | Exception in UpdateStockInventoryAsync | Log and re-throw | "Sellable/Non-sellable StockOnHandUpdated failed" |
-| Archive fails | Exception in ArchiveMessageAsync | Log and re-throw | Included in outer catch |
-| Query fails | Exception in GetInventoryByCategory | Log and re-throw | Generic exception message |
-
-### Exception Propagation
-
-```
-Inner Try-Catch (Case handlers)
-    ├─ Sellable handler exception
-    │   └─ Caught → Log error, Continue (not re-thrown)
-    ├─ Non-sellable handler exception
-    │   └─ Caught → Log error, Continue (not re-thrown)
-    └─ B2C notification exception
-        └─ Caught → Log error, Continue (not re-thrown)
-
-Outer Try-Catch (Main function)
-    └─ Any uncaught exception
-        └─ Caught → Log error, RE-THROW to caller
-           └─ Function fails (Service Bus may retry)
-```
-
-### Retry Logic
-
-**Service Bus Level**:
-- Azure Service Bus handles message retries based on configuration
-- Max delivery count determines when message is moved to dead-letter queue
-- Backoff strategy applied between retries (exponential)
-
-**Application Level**:
-- No explicit retry logic in trigger
-- Individual handler errors logged but don't stop processing
-- If outer exception occurs, entire message is retried
-
-### Rollback Behavior
-
-**Transaction Scope**:
-- No explicit transaction management
-- Each operation (Update, Archive) executes independently
-- If Update succeeds but Archive fails: Inconsistent state (no rollback)
-
-**Partial Failure Scenarios**:
-- Sellable update fails → Non-sellable processing continues
-- Archive fails after update → Update remains, no rollback
-- B2C notification fails → Inventory update unaffected
-
----
-
-## 12. Performance Considerations
-
-### Query Optimization
-
-**GetInventoryByCategory() - Sellable Inventory**:
-- Composite index: (ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin)
-- Single point lookup (O(1) with index)
-- No joins required
-- Estimated cost: Very low
-
-**GetInventoryByCategory() - Extended Inventory**:
-- Composite index: (ItemCode, Hallmark, FulfilmentCode, CountryOfOrigin, State, Status)
-- Unique lookup (6-field composite key)
-- No joins required
-- Estimated cost: Very low
-
-### Complexity Analysis
-
-**Time Complexity**:
-```
-O(n) = O(groups * items_per_group + handlers)
-
-Where:
-  groups = Number of (CountryOfOrigin, Hallmarking) combinations
-  items_per_group = QuantityDetails count per group
-  handlers = Sellable + Non-sellable handler calls
-
-Typical: 1-5 groups, 5-20 items per group
-Worst case: 50+ groups, 100+ items (unlikely in single message)
-```
-
-**Space Complexity**:
-```
-O(n) = Memory for grouping results
-
-Where:
-  n = Number of items in QuantityDetails
-  
-Stores:
-  - IGrouping objects for each combination
-  - Request objects (1-3 per group)
-  - DTOs from database fetches
-
-Typical memory: Small (< 1 MB for reasonable message size)
-```
-
-### Caching
-
-**Current Implementation**: No caching
-- Each trigger invocation queries fresh from database
-- CosmosDB handles internal caching
-
-**Optimization Opportunity**: 
-- Cache product existence check (AddProductAsync is relatively expensive)
-- Cache inventory lookups within same message (multiple items same product)
-
-### Batch Processing
-
-**Current**: Messages processed individually
-- One message = one trigger invocation
-- Sequential item group processing
-- Sequential handler calls per group
-
-**Bottleneck**: 
-- If many groups (50+), many database round trips
-- Each handler call = separate Update + Archive calls (2x database operations)
-
-### Parallel Execution
-
-**Current**: Sequential processing
-```
-Group 1 → Handler 1 → Handler 2 → Handler 3
-Group 2 → Handler 1 → Handler 2 → Handler 3
-...
-```
-
-**Potential Improvement**: Process groups in parallel
-```
-Task.WhenAll([
-  ProcessGroup(group1),
-  ProcessGroup(group2),
-  ...
-])
-```
-
----
-
-## 13. Security
+## 9. Security & Configuration
 
 ### Authentication
+- Cosmos DB and Service Bus use **connection strings** sourced from Azure Key
+  Vault and delivered as a **Kubernetes Secret**; local dev uses the emulator /
+  user-secrets. This is the deliberate documented standard (cosmos §1/§14,
+  engineering-standards §6) — **not** Managed Identity / Workload Identity.
+- No secrets, connection strings, or keys are logged.
 
-**Service Bus**: Managed Service Identity (MSI) or Connection String
-- Connection string in ApplicationConfig.ServiceBusConnectionString
-- Should use Key Vault reference
-- Function app has permissions to read messages
+### Feature flags
+| Flag | Default | Purpose |
+|---|---|---|
+| ENABLE_SNAPSHOT_FOR_ICR | false | Publish ICR availability snapshot (icr-snapshot.md) |
 
-### Authorization
+### Queue names (kebab-case, config-resolved)
+| Queue | Old constant | Direction |
+|---|---|---|
+| `stock-on-hand-updated` | STOCK_ON_HAND_UPDATED_REFLEX_QUEUE_NAME | inbound (relay) |
+| `nexus-producer` | NEXUS_PRODUCER_QUEUE_NAME | outbound (B2C notification / ICR) |
 
-**Function App**: 
-- Restricted to service-to-service only
-- No user input (internal system message)
-- No API authentication needed
+### Fixed values
+| Setting | Value |
+|---|---|
+| Location ID | `BRZ3PLConsigneeId` (only location processed) |
+| Fulfilment code | `BRZDC3PLFulfilmentId` |
+| Channel for B2C | `OWN_ONLINE` |
+| Quantity floor | 0 (negatives normalized) |
 
-**Database Access**:
-- Repositories use configured CosmosDB connection
-- Credentials injected via dependency injection
-- No hardcoded credentials
-
-### Input Validation
-
-**Validation Points**:
-```
-1. Deserialize: JSON schema validation by framework
-2. Null checks: LocationId, QuantityDetails
-3. Enum validation: State, Status, Domain, etc.
-4. Location filtering: LocationId must match exact value
-5. Quantity: No negative validation (normalized later)
-6. String fields: No length validation (relies on database schema)
-```
-
-**Gaps**:
-- No max size check on QuantityDetails array (DoS risk)
-- No rate limiting per ItemCode
-- No anomaly detection (10x normal quantity spike)
-
-### Sensitive Data Handling
-
-**Logged Data**:
-- ProductId (not sensitive)
-- LocationId (system constant, not sensitive)
-- Quantities (potentially sensitive business data)
-- Logger should respect data classification
-
-**Stored Data**:
-- CosmosDB is encrypted at rest
-- Backup policies should be defined
-- Archive table contains full state snapshots
-
-### SQL Injection Prevention
-
-**Not applicable**: No SQL queries written
-- Using ORM via repositories
-- Parameterized queries via EF Core / CosmosDB SDK
-
-### XSS Prevention
-
-**Not applicable**: Backend processing only, no HTML generation
-
-### CSRF Protection
-
-**Not applicable**: Service Bus messages, not HTTP requests
-
-### Other Security Considerations
-
-**Message Queue Security**:
-- Service Bus enforces authorized access
-- Messages in transit encrypted by Azure
-- Sensitive data should be encrypted at application level
-
-**Product ID Validation**:
-- No validation that ProductId is legitimate
-- Could create records for non-existent products
-- AddProductAsync creates product if missing (by design)
+### Data protection
+TLS in transit; Cosmos encryption at rest; archived payloads carry business data
+only (no secrets). Country/market values resolve via
+[country-code-lookup.md](shared/country-code-lookup.md) with a fail-safe
+`CountryCode.UNKNOWN` fallback.
 
 ---
 
-## 14. Configuration
+## 10. Known Limitations & Future Improvements
 
-### Environment Variables / ApplicationConfig
+### Current Limitations
+- Integer quantities only (no fractional units); no upper-bound / anomaly check
+  on very large quantities.
+- `B2CAvailableToSell` uses `FirstOrDefault` per category — assumes at most one
+  (AVAILABLETOSELL + PICKABLE) line per group; additional lines are not summed.
+- Extended inventory with no discrepancy is skipped (by design).
+- No max-size guard on the `QuantityDetails` array.
 
-| Property | Purpose | Type | Example |
-|----------|---------|------|---------|
-| STOCK_ON_HAND_UPDATED_REFLEX_QUEUE_NAME | Service Bus queue name | string | "stock-onhand-updated-reflex" |
-| ServiceBusConnectionString | Service Bus connection | string | Connection string with key |
-| NEXUS_PRODUCER_QUEUE_NAME | Nexus queue for B2C notification | string | "nexus-producer" |
+### Potential Improvements
+- Cache product-existence checks and inventory lookups within one message
+  (multiple lines share the same product).
+- Sum, rather than `FirstOrDefault`, for `B2CAvailableToSell` if multiple
+  qualifying lines become valid.
+- Evaluate bounded parallel group processing within one message, preserving
+  per-aggregate ordering via the session.
+- Add anomaly detection for unusual quantity spikes.
 
-### Feature Flags
-
-**None currently implemented**
-
-**Potential Flags**:
-- Enable/disable B2C notification to OMS
-- Enable/disable message archiving
-- Enable/disable extended inventory processing
-
-### Configuration Files
-
-**host.json** (Function App configuration):
-- Logging settings
-- Service Bus retry policy
-- Max concurrent processing
-
-**local.settings.json** (Local development):
-```json
-{
-  "AzureWebJobsStorage": "...",
-  "FUNCTIONS_WORKER_RUNTIME": "dotnet",
-  "ServiceBusConnectionString": "...",
-  "STOCK_ON_HAND_UPDATED_REFLEX_QUEUE_NAME": "...",
-  "NEXUS_PRODUCER_QUEUE_NAME": "..."
-}
-```
-
-### Default Values
-
-| Setting | Default | Override |
-|---------|---------|----------|
-| Fulfilled Code | BRZDC3PLFulfilmentId | Cannot override |
-| Location ID | BRZ3PLConsigneeId | Cannot override |
-| Channel for B2C | OWN_ONLINE | Cannot override |
-| Quantity floor | 0 (if negative) | Cannot override |
+> The previous version listed the B2C-to-Nexus notification as a `TODO` and
+> flagged "no idempotency / double-counting on concurrent or duplicate
+> messages" and "last write wins" as risks. All are now resolved by design: the
+> B2C notification is an implemented publish through the cached `ServiceBusSender`
+> to `nexus-producer` (§7.3), and redelivery/concurrency are handled by
+> deterministic Id + 409-as-applied + ETag Patch + the §2 re-read/reapply loop
+> ([cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md)).
 
 ---
 
-## 15. Complete Data Flow
+## 11. Summary
 
-```
-StockOnHandUpdatedEvent (from Service Bus)
-        ↓
-┌───────────────────────────────────────────┐
-│ CONTROLLER: StockOnHandUpdatedFullQueueTrigger
-│ - Deserialize message
-│ - Validate input
-│ - Parse ProductId, Location, QuantityDetails
-└───────────────────────────────────────────┘
-        ↓
-┌───────────────────────────────────────────┐
-│ SERVICE LAYER: Data Transformation
-│ - Filter by Domain (B2C)
-│ - Filter by State/Status combinations
-│ - Group by (CountryOfOrigin, Hallmarking)
-│ - Separate into Sellable/Non-Sellable
-│ - Create Orchestrator Requests
-└───────────────────────────────────────────┘
-        ↓
-        ├────────────────────────┬──────────────────────┐
-        ↓                        ↓                      ↓
-  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐
-  │ HANDLER 1:       │  │ HANDLER 2:       │  │ HANDLER 3:      │
-  │ Sellable Items   │  │ Non-Sellable     │  │ B2C Notification│
-  │                  │  │ Items            │  │                 │
-  │ StockOnHand      │  │ Extended         │  │ B2CStockOnHand  │
-  │ UpdatedRequest   │  │ StockOnHand      │  │ UpdatedEvent    │
-  │                  │  │ UpdatedRequest   │  │                 │
-  └──────────────────┘  └──────────────────┘  └─────────────────┘
-        ↓                        ↓                      ↓
-  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐
-  │ REPOSITORY:      │  │ REPOSITORY:      │  │ TODO:           │
-  │ ItemStock        │  │ ItemStock        │  │ Send via Service│
-  │ InventoryRepo    │  │ InventoryExtended│  │ Bus to Nexus    │
-  │                  │  │ Repo             │  │ Producer        │
-  │ Operations:      │  │                  │  │                 │
-  │ - Fetch by Key   │  │ Operations:      │  │ Not implemented │
-  │ - Update/Insert  │  │ - Fetch by Key   │  │                 │
-  │                  │  │ - Update/Insert  │  │                 │
-  └──────────────────┘  └──────────────────┘  └─────────────────┘
-        ↓                        ↓
-        ├────────────────────────┤
-        ↓                        ↓
-  ┌─────────────────────────────────────────┐
-  │ DATABASE: CosmosDB                      │
-  │                                         │
-  │ Collections:                            │
-  │ - ItemStockInventory                    │
-  │   └─ B2C sellable inventory             │
-  │                                         │
-  │ - ItemStockInventoryExtended            │
-  │   └─ B2C non-sellable inventory         │
-  │                                         │
-  │ - MessageArchive                        │
-  │   └─ Historical state snapshots         │
-  │                                         │
-  │ - Item                                  │
-  │   └─ Product master data                │
-  └─────────────────────────────────────────┘
-        ↓
-┌─────────────────────────────────────────┐
-│ ARCHIVE: MessageArchiveRepository       │
-│ - Save previous state snapshot          │
-│ - Save updated state snapshot           │
-│ - Maintain audit trail                  │
-└─────────────────────────────────────────┘
-        ↓
-┌─────────────────────────────────────────┐
-│ LOGGER: Structured Logging              │
-│ - Success: Processed count, quantities  │
-│ - Error: Exception details, context     │
-│ - Flow: Each major step logged          │
-└─────────────────────────────────────────┘
+`inventory.StockOnHandUpdated` synchronizes **B2C-only, BRZ3PL** stock-on-hand
+updates on the AKS pipeline: it consumes from Kafka, relays to the
+session-enabled `stock-on-hand-updated` Service Bus queue, validates and filters
+to BRZ3PL/B2C items, groups by (CountryOfOrigin, Hallmarking), and updates
+sellable and non-sellable inventory in Cosmos DB.
 
-Mapping Transformations:
-┌────────────────────────────────────────────────┐
-│ Input Event → Internal Request → Database DTO  │
-├────────────────────────────────────────────────┤
-│ StockOnHandUpdatedEvent                        │
-│   ├─ ProductId → ItemCode                      │
-│   ├─ Location.Id → FulfilmentCode              │
-│   ├─ QuantityDetails[].Quantity → Qty          │
-│   ├─ QuantityDetails[].State → State/Status    │
-│   └─ QuantityDetails[].CountryOfOrigin → COO   │
-│           ↓                                     │
-│ StockOnHandUpdatedRequest (or Extended variant)│
-│   ├─ ItemCode ✓                                │
-│   ├─ FulfilmentCode ✓                          │
-│   ├─ CountryOfOrigin ✓                         │
-│   ├─ Hallmark ✓                                │
-│   └─ StateLevelQtyList ✓                       │
-│           ↓                                     │
-│ ItemStockInventoryDTO                          │
-│   ├─ ItemCode ✓                                │
-│   ├─ B2CAVL (calculated)                       │
-│   ├─ B2CAvailableToSell ✓                      │
-│   ├─ B2CPrepared ✓                             │
-│   └─ Other fields (initialized)                │
-└────────────────────────────────────────────────┘
-```
+**Key business logic:** location filtering to BRZ3PL; B2C domain and
+state/status filtering (no B2B segmentation); sellable vs non-sellable routing;
+quantity normalization to a zero floor; `B2CAVL = B2CAvailableToSell +
+B2CPrepared`; before/after archival.
+
+**Database updates:** ETag-guarded **Patch** (`Set`/`Increment`, ≤10 ops) on
+`ItemStockInventory` and `ItemStockInventoryExtended`, with deterministic Id +
+409-as-applied and the §2 412 re-read/reapply loop — this is the fix for the
+duplicate-entry / doubled-quantity production problem (no last-write-wins).
+
+**Downstream:** the B2C stock notification (`Inventory_B2CStockOnHandUpdated`,
+`Channel = OWN_ONLINE`) and the optional ICR snapshot are published to
+`nexus-producer` via the cached `ServiceBusSender` after the Cosmos write
+commits.
+
+**Risks & recommendations:** concurrency conflicts should be rare with sessions
+in place; monitor dead-letter counts and Cosmos 429 rates; revisit the
+`FirstOrDefault` assumption for `B2CAvailableToSell` and cache rarely-changing
+lookups.
 
 ---
 
-## 16. Input vs Output Mapping
-
-### Request Field Mapping
-
-| Input Field | Type | Validation | Transformation | Repository Field | Response Field |
-|-------------|------|-----------|-----------------|------------------|----------------|
-| ProductId | string | Required, not null | As-is | ItemCode | ItemCode |
-| Location.Id | string | Required, exact match BRZ3PLConsigneeId | As-is | FulfilmentCode | FulfilmentCode |
-| Location.Name | string | Optional | Ignored | - | - |
-| QuantityDetails[].Domain | enum | Required, must be B2C | Filter | Domain | Domain |
-| QuantityDetails[].Quantity | int | Required, numeric | Normalize (max 0 if negative) | Qty | Qty |
-| QuantityDetails[].State.State | enum | Required, specific values | As-is | State | State |
-| QuantityDetails[].State.Status | enum | Required, specific values | As-is | Status | Status |
-| QuantityDetails[].CountryOfOrigin | enum | Required, valid country | ToString() | COO | COO |
-| QuantityDetails[].Hallmarking | enum | Required, valid hallmark | ToString() | Hallmark | Hallmark |
-
-### Request to Database Mapping for Sellable Inventory
-
-| Input | Type | Processing | Database Column | Notes |
-|-------|------|-----------|-----------------|-------|
-| ProductId | string | As-is | ItemCode | Primary identifier |
-| B2CAvailableToSell (calculated) | int | From AVAILABLETOSELL+PICKABLE items | B2CAvailableToSell | Sum of quantities |
-| B2CPrepared (calculated) | int | From PREPARED status items | B2CPrepared | Sum of quantities |
-| B2CAVL (calculated) | int | Sum of above two | B2CAVL | Total available |
-| CountryOfOrigin | enum | ToString() | COO | Country code |
-| Hallmark | enum | ToString() | Hallmark | Certification |
-| FulfilmentCode | string | As-is | FulfilmentId | Fixed: BRZDC3PLFulfilmentId |
-| Initialized | - | Set to 0 or false | B2BAVL, B2BAllocated, B2BPrepared, B2BUsedShare, B2COrg, B2CExtended, B2CThreshold, PSC, IsExtended | Default values |
-
-### Request to Database Mapping for Non-Sellable Inventory
-
-| Input | Type | Processing | Database Column | Notes |
-|-------|------|-----------|-----------------|-------|
-| ProductId | string | As-is | ItemCode | Primary identifier |
-| Quantity | int | Normalize (max 0) | Qty | Item count |
-| State.State | enum | As-is | State | Inventory state |
-| State.Status | enum | As-is | Status | Status code |
-| CountryOfOrigin | enum | ToString() | COO | Country code |
-| Hallmark | enum | ToString() | Hallmark | Certification |
-| Domain | enum | As-is | Domain | Inventory domain |
-| FulfilmentCode | string | As-is | FulfilmentId | Fixed: BRZDC3PLFulfilmentId |
-
----
-
-## 17. Assumptions
-
-1. **Service Bus Configuration**: Queue name and connection string are correct and accessible
-2. **Message Format**: All messages are valid JSON deserializable to StockOnHandUpdatedEvent
-3. **Location Filtering**: BRZ3PLConsigneeId is the only location processed by this trigger
-4. **Fulfillment Code**: BRZDC3PLFulfilmentId is constant for all BRZ3PL messages
-5. **Product Master**: Products either exist in database or will be created if missing
-6. **Enum Values**: All State, Status, Domain, CountryOfOrigin, Hallmarking values are valid enums
-7. **Negative Quantities**: Treated as zero (no business logic for negative inventory)
-8. **Concurrency**: No concurrent updates to same inventory item (no locking mechanism)
-9. **Archive Success**: Archiving always succeeds (no retry logic if archive fails)
-10. **Database Connectivity**: CosmosDB is always accessible and responsive
-11. **Idempotency**: Messages are unique (no duplicate processing detection)
-12. **Time Zone**: All timestamps use UTC (no time zone conversion)
-13. **Grouping**: Exactly one group per (CountryOfOrigin, Hallmarking) combination
-14. **State Combinations**: Only listed state/status combinations are valid for processing
-15. **FirstOrDefault Behavior**: Only one item per category with AVAILABLETOSELL+PICKABLE (no sum)
-
----
-
-## 18. Known Limitations
-
-### Edge Cases
-
-| Edge Case | Behavior | Impact | Recommendation |
-|-----------|----------|--------|-----------------|
-| Null QuantityDetails | Return early | Message lost, no retry | Validate at source |
-| Empty QuantityDetails array | Skip all processing | No inventory update | Consider log warning |
-| Quantity > int.MaxValue | Overflow (silent) | Incorrect value stored | Add range validation |
-| Quantity very negative (-1000000) | Normalized to 0 | Data loss | Log anomaly |
-| 50+ item groups in single message | Very slow processing | Timeout risk | Batch messages smaller |
-| Duplicate items (same key) | Last value wins | Data inconsistency | Deduplicate at source |
-| Archive fails after update | Inconsistent state | Audit trail breaks | Implement transaction |
-
-### Unsupported Scenarios
-
-- Multiple locations in single message (not designed for)
-- B2B domain inventory (different handler needed)
-- Partial message processing (all-or-nothing)
-- Message deduplication (no idempotency check)
-- Negative quantity business logic (no specific handling)
-- Rate limiting (no throttling mechanism)
-- Dead-letter queue monitoring (relies on Service Bus)
-
-### Technical Debt
-
-1. **B2C Notification TODO**: "Send message to Nexus Producer via Service Bus Queue" not implemented
-2. **No Transaction Management**: Update and Archive are separate operations
-3. **No Retry Logic**: Individual handler failures don't retry
-4. **No Circuit Breaker**: Failed database calls will cascade
-5. **Hardcoded Constants**: Location and fulfillment codes hardcoded
-6. **No Caching**: All lookups hit database
-7. **No Deduplication**: Same message processed multiple times = duplicate work
-8. **FirstOrDefault Issue**: AVAILABLETOSELL calculation may miss items
-
-### Future Improvements
-
-1. Implement B2C notification to OMS/Nexus
-2. Add explicit transaction management for Update+Archive
-3. Implement exponential backoff for handler retries
-4. Add circuit breaker pattern for database access
-5. Move constants to configuration
-6. Implement message deduplication using message ID
-7. Add rate limiting per product
-8. Add anomaly detection for unusual quantity spikes
-9. Add compression for large archive payloads
-10. Parallel processing of item groups for better performance
-
----
-
-## 19. Summary
-
-### Complete Execution Summary
-
-The `StockOnHandUpdatedFullQueueTrigger` is an Azure Function that synchronizes B2C inventory updates from the WMS to the IIS system through a Service Bus queue. 
-
-**High-Level Flow**:
-1. Receives `StockOnHandUpdatedEvent` from Service Bus queue
-2. Validates input (location, quantity details)
-3. Filters items by domain (B2C) and specific state/status combinations
-4. Groups items by (CountryOfOrigin, Hallmarking)
-5. For each group, processes:
-   - **Sellable items** (AVAILABLE+PREPARED, AVAILABLE+PICKABLE, AVAILABLETOSELL+PICKABLE) → Updates `ItemStockInventory` with B2C available and prepared quantities
-   - **Non-sellable items** (AVAILABLE+HELD, INSPECTION+PICKABLE) → Updates `ItemStockInventoryExtended` with individual item quantities
-6. Archives previous inventory state for audit trail
-7. Sends B2C notification to OMS (TODO: implementation pending)
-8. Returns success or re-throws exception for Service Bus retry
-
-### Key Business Logic
-
-| Logic | Purpose |
-|-------|---------|
-| Location Filtering | Ensure only BRAZIL 3PL inventory is processed |
-| Domain Filtering | Focus on B2C (consumer) sales inventory |
-| State/Status Filtering | Process only relevant inventory states |
-| Grouping by Characteristics | Separate inventory by origin and certification |
-| Sellable vs Non-Sellable | Different orchestration paths for different business needs |
-| Quantity Normalization | Prevent negative inventory |
-| B2CAVL Calculation | Track total B2C available inventory |
-| Archive on Update | Maintain audit trail |
-
-### Database Updates Summary
-
-| Operation | Frequency | Table | Records |
-|-----------|-----------|-------|---------|
-| Select | 2 per group | ItemStockInventory, ItemStockInventoryExtended | 1 record each |
-| Insert (new) | If not exists | ItemStockInventory or Extended | 1-2 records |
-| Update | If changed | ItemStockInventory or Extended | 1-2 records |
-| Archive | Every case | MessageArchive | 1-2 records |
-| Product Create | If missing | Item | 0-1 record |
-
-### Calculation Summary
-
-| Calculation | Formula | Uses |
-|-------------|---------|------|
-| B2CAVL | B2CAvailableToSell + B2CPrepared | For total available tracking |
-| QuantityDelta | Current - Previous | For change detection |
-| Normalized Qty | max(0, input qty) | For preventing negative stock |
-
-### Risks
-
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| Archive failure after update | Inconsistent audit trail | Implement transaction |
-| Large message processing | Timeout | Add message size validation |
-| Duplicate messages | Double-counting inventory | Add idempotency check |
-| Concurrent updates | Last write wins | Implement optimistic locking |
-| Invalid LocationId | Silently rejected | Improve source system validation |
-| Unknown State/Status | Silently excluded | Log anomalies |
-| Slow database | Cascading timeouts | Add connection pooling |
-| TODONexus integration | OMS notification missing | Implement priority fix |
-
-### Recommendations
-
-1. **CRITICAL**: Implement B2C notification to Nexus/OMS (currently TODO)
-2. **HIGH**: Add explicit transaction management for Update+Archive operations
-3. **HIGH**: Implement message deduplication using message ID header
-4. **MEDIUM**: Add circuit breaker for database access failures
-5. **MEDIUM**: Move hardcoded constants to configuration
-6. **MEDIUM**: Add anomaly detection for unusual quantity spikes
-7. **MEDIUM**: Implement exponential backoff retry for handlers
-8. **LOW**: Add compression for archived message payloads
-9. **LOW**: Parallelize item group processing for better throughput
-10. **LOW**: Add FirstOrDefault comment explaining single-item assumption for B2CAvailableToSell
-
----
-
-## Appendix A: Data Models
-
-### StockOnHandUpdatedEvent (Input)
-```csharp
-public class StockOnHandUpdatedEvent
-{
-    public string ProductId { get; set; }
-    public string Channel { get; set; }
-    public Location Location { get; set; }
-    public List<QuantityDetail> QuantityDetails { get; set; }
-}
-
-public class Location
-{
-    public string Id { get; set; }
-    public string Name { get; set; }
-}
-
-public class QuantityDetail
-{
-    public InventoryDomain Domain { get; set; }
-    public int Quantity { get; set; }
-    public InventoryState State { get; set; }
-    public CountryOfOrigin CountryOfOrigin { get; set; }
-    public Hallmarking Hallmarking { get; set; }
-}
-
-public class InventoryState
-{
-    public State State { get; set; }
-    public Status Status { get; set; }
-}
-```
-
-### StockOnHandUpdatedRequest (Sellable)
-```csharp
-public class StockOnHandUpdatedRequest
-{
-    public string FulfilmentCode { get; set; }
-    public string ItemCode { get; set; }
-    public CountryOfOrigin CountryOfOrigin { get; set; }
-    public Hallmarking Hallmark { get; set; }
-    public List<StateLevelQty> StateLevelQtyList { get; set; }
-    public Dictionary<string, string> UniqueIdentifiers { get; set; }
-    public int B2CAvailableToSell { get; set; }
-}
-
-public class StateLevelQty
-{
-    public int Quantity { get; set; }
-    public InventoryState State { get; set; }
-    public InventoryDomain Domain { get; set; }
-}
-```
-
-### ItemStockInventoryDTO (Database - Sellable)
-```csharp
-public class ItemStockInventoryDTO
-{
-    public string ItemCode { get; set; }
-    public int B2CAVL { get; set; }
-    public int B2CAVLAllocated { get; set; }
-    public int B2CPrepared { get; set; }
-    public int B2CAvailableToSell { get; set; }
-    public int B2BAVL { get; set; }
-    public int B2BAllocated { get; set; }
-    public int B2BPrepared { get; set; }
-    public int B2BUsedShare { get; set; }
-    public int B2COrg { get; set; }
-    public int B2CExtended { get; set; }
-    public int B2CThreshold { get; set; }
-    public int PSC { get; set; }
-    public string COO { get; set; }
-    public string FulfilmentId { get; set; }
-    public string Hallmark { get; set; }
-    public bool IsExtended { get; set; }
-}
-```
-
-### ItemStockInventoryExtendedDTO (Database - Non-Sellable)
-```csharp
-public class ItemStockInventoryExtendedDTO
-{
-    public string ItemCode { get; set; }
-    public int? Qty { get; set; }
-    public string COO { get; set; }
-    public string FulfilmentId { get; set; }
-    public string Hallmark { get; set; }
-    public State State { get; set; }
-    public Status Status { get; set; }
-}
-```
-
+**Document Version:** 2.0 (AKS / k8s)
+**Status:** Regenerated

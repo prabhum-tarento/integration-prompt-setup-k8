@@ -1,762 +1,395 @@
-# inventory.InventoryAdjusted - Complete Technical Documentation
+# inventory.InventoryAdjusted - Technical Documentation
 
 ## 1. Overview
 
 ### Purpose
-The `inventory.InventoryAdjusted` is a kafka event that processes inventory adjustment events from the WMS system. It handles real-time inventory updates across multiple fulfillment locations and inventory management systems, including segmentation rules, B2B/B2C domain allocation, and downstream event propagation.
+`inventory.InventoryAdjusted` is a Kafka event that processes inventory
+adjustment events from the WMS. It updates inventory across fulfilment
+locations, applies B2B/B2C segmentation, tracks non-standard (extended) states,
+and propagates deltas to SAP (via Nexus), OMS, and ICR.
 
 ### Business Objective
-- **Inventory Accuracy**: Maintain accurate inventory levels across different fulfillment locations (warehouses and 3PL facilities)
-- **Multi-Domain Management**: Allocate inventory between B2B (Business-to-Business) and B2C (Business-to-Consumer) channels
-- **Inventory Visibility**: Segment inventory by hallmarking, country of origin, and fulfillment location
-- **System Integration**: Propagate inventory changes to SAP (via NEXUS), OMS (Order Management System), and ICR (Inventory Comparison Report)
-- **Delta Tracking**: Calculate and report inventory delta changes to dependent systems
+- Maintain accurate inventory across warehouses and 3PL facilities.
+- Allocate inventory between B2B and B2C channels.
+- Segment inventory by hallmarking, country of origin, and fulfilment location.
+- Propagate inventory changes to SAP/Nexus, OMS, and ICR.
+- Calculate and report signed inventory deltas to dependent systems.
 
 ### Scope
-- **Input**: `inventory.InventoryAdjusted` from Kakfa via Consumer Group: `$InventoryAdjusted` and deserialized to `InventoryAdjustedEvent` messages and send to Service Bus Queue
-- **Processing**: Inventory segmentation, B2B/B2C allocation, state transitions, delta calculations
-- **Output**: 
-  - Updated inventory records in CosmosDB
-  - Downstream events to NEXUS_PRODUCER_QUEUE (B2B Adjusted/Moved, B2C Inventory Adjusted)
-  - Inventory reports to ICR system
+- Consumes `inventory.InventoryAdjusted` from Kafka, relays to Azure Service Bus,
+  and processes it on a session-enabled Service Bus consumer.
+- Performs B2B/B2C segmentation, extended-state transitions, and delta
+  calculations.
+- Persists inventory to Cosmos DB via ETag-guarded **Patch** operations.
+- Publishes downstream events to the `nexus-producer` queue.
 
 ### High-Level Architecture
+
+Matches the platform data flow in
+[integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md):
+a Kafka-to-Service-Bus relay hosted service, then a session-enabled Service Bus
+consumer that calls the Application layer, which persists through the Cosmos DB
+repository and archives through Blob Storage.
+
 ```
-Kafka (inventory.InventoryAdjusted)
-    ↓
-Service Bus Queue (InventoryAdjustedEvent)
-    ↓
-    ├─→ B2B Inventory Handler
-    ├─→ Inventory Segmentation Handler
-    ├─→ Extended Inventory Handler
-    ├─→ OMS Delta Handler
-    └─→ ICR Snapshot Handler
-    ↓
-CosmosDB + Service Bus Queues
+Kafka topic `inventory-events` (Type header: InventoryAdjusted, Avro)
+                    ↓
+   InventoryAdjustedConsumerHostedService (KafkaConsumerHostedServiceBase)
+     - correlation id / dedup id / type headers read + logged
+     - Nexus dedup check (IDeduplicationService, fail-open)
+     - schema + dynamic validation
+     - cold-tier request audit (unconditional)
+                    ↓
+   Azure Service Bus queue `inventory-adjusted`
+   (session-enabled: SessionId = {FulfilmentId}:{ItemCode};
+    message ID deterministic from the Kafka key — never a fresh GUID)
+                    ↓
+   InventoryAdjustedServiceBusHostedService (ServiceBusConsumerHostedService<InventoryAdjustedEvent>)
+     - envelope + payload deserialize, dynamic validation, cold-tier audit
+                    ↓
+          IInventoryAdjustedHandler.HandleAsync
+                    ↓
+    ┌───────────────┬───────────────┬──────────────┬──────────────┐
+    ↓               ↓               ↓              ↓              ↓
+B2B Adjusted   Segmentation    Extended-State   OMS Delta      ICR Snapshot
+(SAP/Nexus)    (B2B/B2C)       transitions      (OMS)          (reporting)
+    ↓               ↓               ↓              ↓              ↓
+IItemStockInventoryService → Cosmos DB (ETag-guarded Patch, re-read-and-reapply
+on 412) + MessageArchive (Cosmos, optional Blob cold-tier mirror)
+                    ↓
+        nexus-producer queue (Service Bus) via cached ServiceBusSender
 ```
+
+Business logic never touches `CosmosClient`/`Container`/`ServiceBusSender`
+directly — it goes through `IItemStockInventoryService` → the Cosmos repository
+and through the application-layer publish abstraction (see
+[shared/service-bus-publishing.md](shared/service-bus-publishing.md)).
+
+### Key Dependencies
+- **`ItemStockInventoryRepository`** — core inventory (Cosmos, multi-container
+  EDC/TDC/ADC/CAECOM/BRZ3PL, ETag-guarded; cosmos §5a/§9).
+- **`ItemLevelSegmentationRepository`** / **`FulfilmentLevelSegmentationRepository`**
+  — segmentation rules (Cosmos, read-only).
+- **`ItemStockInventoryExtendedRepository`** — non-standard state tracking (Cosmos).
+- **`CountryRepository`** — country/market mapping (Cosmos, read-only).
+- **`MessageArchiveRepository`** — snapshot archival (Cosmos + optional Blob).
+- **Cached `ServiceBusSender`** — outbound Nexus publishing.
+- Shared helpers: [segment-inventory](shared/segment-inventory.md),
+  [b2c-extension-calculation](shared/b2c-extension-calculation.md),
+  [inventory-formulas](shared/inventory-formulas.md),
+  [delta-towards-oms](shared/delta-towards-oms.md),
+  [icr-snapshot](shared/icr-snapshot.md),
+  [country-code-lookup](shared/country-code-lookup.md),
+  [archive-audit](shared/archive-audit.md),
+  [cosmos-idempotent-write](shared/cosmos-idempotent-write.md),
+  [service-bus-publishing](shared/service-bus-publishing.md).
 
 ### Assumptions
-1. Kafka incoming messages are valid `inventory.InventoryStateChanged` kafka object
-2. serialize `inventory.InventoryStateChanged`to `InventoryAdjustedEvent` objects and send to Service Bus Queue
-3. All enum values in messages match domain model definitions
-4. Repository implementations are functional and responsive
-5. CosmosDB is accessible with appropriate permissions
-6. Configuration flags are set appropriately per environment
-7. Correlation context is properly propagated through the message pipeline
-
-### Dependencies
-**Internal Repositories:**
-- `IItemStockInventoryRepository` - Core inventory records
-- `IItemLevelSegmentationRepository` - Item-level segmentation rules
-- `IFulfilmentLevelSegmentationRepository` - Fulfillment-level rules
-- `IItemStockInventoryExtendedRepository` - Extended inventory state records
-- `ICountryRepository` - Location to country code mapping
-- `IMessageArchiveRepository` - Message archival for audit trail
-
-**Helper Classes:**
-- `SegmentInventoryHelper` - B2C and fulfillment-level segmentation
-- `ExtendedInventoryHelper` - Item-level extension calculations
-- `FormulaHelper` - Delta calculations
+1. Incoming messages are valid `inventory.InventoryAdjusted` Avro objects
+   deserialized to `InventoryAdjustedEvent`.
+2. Fulfilment location IDs map to known centers (TDC, EDC, ADC, CAECOM, BRZ3PL).
+3. Negative quantities represent deductions; normalized per
+   [inventory-formulas](shared/inventory-formulas.md).
+4. Country codes resolve from `CountryRepository` or fall back to `UNKNOWN`.
+5. **Processing is idempotent** — a deterministic document `Id` plus ETag-guarded
+   Patch make redelivery a no-op, not a duplicate/double-count (see
+   [cosmos-idempotent-write](shared/cosmos-idempotent-write.md)).
 
 ---
 
 ## 2. End-to-End Flow
 
-### Step 1: Message Receipt & Deserialization
-- serialize `inventory.InventoryStateChanged`to `InventoryAdjustedEvent` and send to Service Bus Queue
-- Read Service Bus Queue Message and Validate input is not null
-- If null: log "input is null" and return
-- If valid: Extract `ReferenceId` from input
+```
+1. MESSAGE RECEPTION (Kafka consumer)
+   ├─ InventoryAdjusted deserialized (Avro → InventoryAdjustedEvent)
+   ├─ correlation/dedup/type headers logged; IDeduplicationService check (fail-open)
+   ├─ schema + dynamic validation; cold-tier request audit
+   └─ relay to Service Bus queue `inventory-adjusted`
+        · SessionId = {FulfilmentId}:{ItemCode}
+        · deterministic message ID from Kafka key (never a fresh GUID)
 
-### Step 2: Iterate Through Adjustment Lines
-For each `AdjustmentLine`:
-1. Create `SegmentationInputModel` with item details (ProductId, CountryOfOrigin, Hallmark, Quantity, LocationType)
-2. Create unique identifier dictionary (ItemCode, LineNo, ReferenceId)
+2. SERVICE BUS CONSUMPTION
+   ├─ envelope + payload deserialize, dynamic validation, cold-tier audit
+   └─ IInventoryAdjustedHandler.HandleAsync(InventoryAdjustedEvent)
 
-### Step 3: B2B Inventory Handler
-**Condition**: `ENABLE_DELTA_TOWARDS_SAP == true` AND (Location != ADC OR `ENABLE_ADC_DELTA_TOWARDS_AX12 == true`)
+3. ADJUSTMENT LINE ITERATION
+   For each AdjustmentLine:
+   ├─ build SegmentationInputModel (ProductId, CountryOfOrigin, Hallmark,
+   │  Quantity, LocationType) + deterministic uniqueIdentifier (ItemCode, LineNo, ReferenceId)
 
-**Processing**:
-1. Map to `B2BInventoryAdjustedOrMovedEvent`
-2. Determine `ToState` based on quantity sign:
-   - If Quantity < 0: ToState = (UNKNOWN, UNKNOWN)
-   - Else: ToState = input.Adjustment.State
-3. Validate state transitions (SAE-2798, SAE-3032 fixes)
-4. Normalize statuses (non-AVAILABLE states → UNKNOWN status)
-5. Convert negative quantities to absolute values
-6. Queue `NexusProducerRequest` to NEXUS_PRODUCER_QUEUE
+   4. B2B ADJUSTED/MOVED (SAP) — see delta-towards-oms.md
+      trigger: ENABLE_DELTA_TOWARDS_SAP AND (Location != ADC OR ENABLE_ADC_DELTA_TOWARDS_AX12)
+      ├─ ToState = (UNKNOWN,UNKNOWN) if Quantity < 0 else Adjustment.State
+      ├─ SAE-2798 / SAE-3032 fixes; quantity normalization (Math.Abs)
+      └─ publish Inventory_B2BInventoryAdjustedOrMoved → nexus-producer
 
-### Step 4: Inventory Segmentation Handler
-**Condition**: State == AVAILABLE AND Status == PICKABLE
+   5. SEGMENTATION (AVAILABLE + PICKABLE) — see segment-inventory.md
+      ├─ fetch/create ItemStockInventory
+      ├─ inboundQty = signed normalization; validate (no negate-empty)
+      ├─ 3PL → fulfilment-level; WH → item-level (if active, IsExtended) else fulfilment-level
+      ├─ delta = currB2CAVL - prevB2CAVL; IsB2CChanged
+      ├─ archive before/after (archive-audit.md)
+      └─ PERSIST via ETag-guarded Patch (Increment/Set), 412 re-read/reapply loop
 
-**Path A - Regular Segmentation**:
-1. Fetch or create `ItemStockInventory` record
-2. Archive previous state
-3. Calculate inbound quantity: `int.Parse(MoveSign + Quantity)`
-4. Validate: Cannot apply negative quantity to empty inventory
-5. Save previous B2C values
-6. **Location-based routing**:
-   - **If 3PL**: Apply fulfillment-level B2C segmentation
-   - **If Warehouse**: 
-     - Check item-level segmentation rule
-     - If active: Apply item-level extension (set IsExtended=true)
-     - Else: Apply fulfillment-level segmentation
-7. Calculate delta: `result.DeltaTowardsOMS = curr - prev B2CAvl`
-8. Archive new state
-9. Update inventory in CosmosDB
+   5b. EXTENDED-STATE TRANSITIONS (other states)
+      ├─ TO-state: create-if-missing then Patch Increment
+      └─ FROM-state: validate sufficient qty, Patch Increment (negative)
 
-**Path B - Extended Segmentation** (other states):
-1. Determine which states are valid for extended handling
-2. Process TO-State (if valid):
-   - Fetch or create extended inventory record
-   - Increment quantity
-   - Update and archive
-3. Process FROM-State (if valid):
-   - Fetch extended inventory
-   - Validate sufficient quantity
-   - Decrement quantity
-   - Update and archive
+   6. OMS DELTA (ENABLE_DELTA_TOWARDS_OMS[/_3PL] AND IsB2CChanged) — delta-towards-oms.md
+      └─ publish Inventory_B2CInventoryAdjusted → nexus-producer
 
-### Step 5: Update Item-Level Segmentation
-**Condition**: Regular segmentation executed (AVAILABLE/PICKABLE)
-- Fetch inventory
-- If exists: Call `UpdateItemLevelFulfilmentAsync()`
-- If missing: Log warning
+   7. ICR SNAPSHOT (ENABLE_SNAPSHOT_FOR_ICR) — icr-snapshot.md
+      └─ publish Inventory_OmniInventoryAvailabilityReported → nexus-producer
 
-### Step 6: OMS Delta Handler
-**Condition**: `ENABLE_DELTA_TOWARDS_OMS` enabled AND `IsB2CChanged == true`
+8. OUTCOME
+   └─ no exception → Completed; ConcurrencyException/OperationCanceled → Abandoned;
+      any other → DeadLettered (see cosmos-idempotent-write.md)
+```
 
-1. Determine OMS flag based on location type (3PL vs Warehouse)
-2. Fetch country code from location
-3. Create `DeltaTowardsOmsEventRequest` with:
-   - ReferenceId (new GUID)
-   - ProductId, Location, AdjustmentDate
-   - QuantityDetails with CountryOfOrigin, Hallmarking, Quantity
-4. Queue `NexusProducerRequest` (type: Inventory_B2CInventoryAdjusted)
-
-### Step 7: ICR Snapshot Handler
-**Condition**: `ENABLE_SNAPSHOT_FOR_ICR == true`
-
-1. Fetch `ItemStockInventory`
-2. Determine B2C quantity:
-   - If IsExtended: Use B2COrg (original)
-   - Else: Use B2CAVL (current)
-3. Build 4 quantity details:
-   - B2B Available (B2BAVL, AVAILABLE/PICKABLE)
-   - B2C Available (B2COrg or B2CAVL, AVAILABLE/PICKABLE)
-   - B2B Prepared (B2BPrepared, AVAILABLE/PREPARED)
-   - B2C Prepared (B2CPrepared, AVAILABLE/PREPARED)
-4. Determine location type (CAECOM=3PL, else=WAREHOUSE)
-5. Create `OmniInventoryAvailabilityReported` event
-6. Queue `NexusProducerRequest` (type: Inventory_OmniInventoryAvailabilityReported)
-
-### Step 8: Function Completion
-- Continue to next adjustment line
-- After all lines processed, complete function
+### Data Flow Through Layers
+`Kafka → KafkaConsumerHostedServiceBase → Service Bus (inventory-adjusted) →
+ServiceBusConsumerHostedService → IInventoryAdjustedHandler → helpers →
+IItemStockInventoryService → Cosmos repository (Patch/ETag) + archive →
+ServiceBusSender (nexus-producer)`.
 
 ---
 
 ## 3. Detailed Business Logic
 
-### B2B State Mapping Logic
-**Why**: SAP/AX12 systems require accurate state transitions for reconciliation.
+### 3.1 B2B Adjusted/Moved (SAP/Nexus)
+See [delta-towards-oms.md](shared/delta-towards-oms.md) for the full builder,
+trigger conditions, and the SAE-2798/SAE-3032 fixes. Event-specific inputs:
+- **ToState by quantity sign:** `Quantity < 0` → `(UNKNOWN, UNKNOWN)`;
+  otherwise `Adjustment.State`.
+- Publishes `Inventory_B2BInventoryAdjustedOrMoved` to `nexus-producer`.
 
-**Rules**:
-- **If Quantity < 0** (deduction): ToState = (UNKNOWN, UNKNOWN) - final state uncertain
-- **If Quantity ≥ 0** (addition): ToState = Adjustment.State - use provided state
+### 3.2 B2C Segmentation
+See [segment-inventory.md](shared/segment-inventory.md). Trigger: `State ==
+AVAILABLE AND Status == PICKABLE`. 3PL → fulfilment-level; warehouse →
+item-level extension when an active rule exists (sets `IsExtended`), else
+fulfilment-level. Delta = current − previous B2C available; `IsB2CChanged` =
+(delta ≠ 0).
 
-**State Consistency Fixes** (SAE-2798, SAE-3032):
-- If FromState == ToState AND neither is AVAILABLE → Reject event
-- If State != AVAILABLE → Force Status = UNKNOWN
-- All negative quantities → Convert to Math.Abs()
+### 3.3 Extended-State Transitions
+Non-standard states (RESERVED, DEFECTIVE, IN_TRANSIT, etc.) tracked in
+`ItemStockInventoryExtended`:
+- **TO-state:** create-if-missing (deterministic Id, 409-as-applied) then Patch
+  `Increment(+qty)`.
+- **FROM-state:** only when existing `Qty ≥ |inboundQty|`; Patch
+  `Increment(-qty)`. Insufficient → warning, skip (no negative extended qty).
 
-### B2C Inventory Segmentation Logic
-**Why**: B2C channel requires separate inventory allocation based on location rules and ecommerce share.
-
-**3PL Locations** → Fulfillment-level segmentation (fixed rules)
-
-**Warehouse Locations**:
-- If item-level segmentation rule exists AND active:
-  - Extract EcomShare percentage
-  - Apply item-level extension logic
-  - Set IsExtended = true
-- Else:
-  - Apply fulfillment-level segmentation
-
-**Delta Calculation**: 
-```
-Δ = Current B2C Available - Previous B2C Available
-IsB2CChanged = (Δ ≠ 0)
-```
-
-### Extended Inventory State Transitions
-**Why**: Track inventory in non-standard states (RESERVED, DEFECTIVE, IN_TRANSIT, etc.) separately.
-
-**Validation Rules**:
-- Skip processing if state is standard (AVAILABLE/PICKABLE)
-- TO-State: Always create if missing, increment if exists
-- FROM-State: Only process if sufficient quantity available
-
-**Quantity Constraints**:
-- Cannot decrement extended inventory below zero
-- Source state must have Qty ≥ Math.Abs(input.Quantity)
+### 3.4 OMS Delta & 3.5 ICR Snapshot
+Delegated wholesale to [delta-towards-oms.md](shared/delta-towards-oms.md) and
+[icr-snapshot.md](shared/icr-snapshot.md).
 
 ---
 
 ## 4. Calculation Logic
 
-### Inbound Quantity Calculation
-```
-inboundQty = int.Parse((MoveSign ?? "") + Quantity.ToString())
-```
-- Handles signed adjustments (negative = deductions)
-- Result is integer (whole units only)
+All quantity math is centralized in
+[inventory-formulas.md](shared/inventory-formulas.md) and
+[b2c-extension-calculation.md](shared/b2c-extension-calculation.md).
 
-**Examples**:
-- MoveSign="" + Qty=100 → 100
-- MoveSign="-" + Qty=75 → -75
-- MoveSign="+" + Qty=50 → 50
+- **Inbound quantity:** `inboundQty = Convert.ToInt32(MoveSign + Quantity)`
+  (signed). Examples: `("",100)→100`, `("-",75)→-75`, `("+",50)→50`.
+- **Delta towards OMS:** `currB2CAVL − prevB2CAVL`.
 
-### Delta Towards OMS
-```
-DeltaTowardsOMS = FormulaHelper.CalculateDeltaTowardsOMS(prevB2CAvl, currB2CAvl)
-Result = currB2CAvl - prevB2CAvl
-```
-
-**Examples**:
 | Previous | Current | Delta | IsB2CChanged |
-|----------|---------|-------|--------------|
+|---|---|---|---|
 | 100 | 150 | +50 | true |
-| 100 | 75 | -25 | true |
+| 100 | 75 | −25 | true |
 | 100 | 100 | 0 | false |
+
+Increments are applied with `PatchOperation.Increment`, never
+read-modify-write-replace.
 
 ---
 
 ## 5. Database Documentation
 
-### ItemStockInventory (CosmosDB)
-**Purpose**: Core inventory record with quantities by domain and state.
+All Cosmos access follows [cosmos-db.instructions.md](../ai/cosmos-db.instructions.md)
+and [cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md).
 
-**Read Operation**: `GetInventoryByCategory(itemCode, hallmark, fulfilmentCode, countryOfOrigin)`
-- Index: Composite on (ItemCode, Hallmark, FulfilmentId, COO)
-- Result: Single DTO or null
+### 5.1 ItemStockInventory (Cosmos, multi-container per fulfilment code)
+- **Partition key** `Category` = composite `FulfilmentId:ItemCode:Hallmark:CountryOfOrigin`.
+- **Read:** `GetAsync(id, category)` — point read within one partition.
+- **Create (first write):** deterministic `Id`; `409 Conflict` → return existing
+  (redelivery no-op).
+- **Update:** **`PatchAsync`** with `IfMatchEtag`, `PatchOperation.Increment` for
+  B2B/B2C quantities and `.Set` for flags (`IsExtended`) and `ModifiedUtc`,
+  **≤10 ops**. `412` → `ConcurrencyException` → §2 re-read/reapply loop (max 3).
+- **No last-write-wins** on any quantity field.
 
-**Columns Updated**:
-| Column | Calculated By | Source |
-|--------|---------------|--------|
-| B2BAVL | Segmentation logic | SegmentInventoryHelper |
-| B2CAVL | Segmentation logic | SegmentInventoryHelper or ExtendedInventoryHelper |
-| B2COrg | Extension logic | ExtendedInventoryHelper |
-| IsExtended | Rule check | Set to true if item-level rule active |
+| Field | How derived |
+|---|---|
+| B2BAVL / B2CAVL / B2COrg | segmentation + extension helpers → Patch Increment |
+| IsExtended | item-level rule active → Patch Set |
+| ModifiedUtc | caller-supplied UTC → Patch Set |
 
-**Insert**: `AddStockInventoryAsync()` - Creates new with all quantities = 0
+### 5.2 ItemLevelSegmentation / FulfilmentLevelSegmentation (Cosmos, read-only)
+Point reads by category; supply `EcomShare`, `IsActive`, `StoreLeveragePercentage`.
 
-**Update**: `UpdateStockInventoryAsync()` - Persists modified inventory
+### 5.3 ItemStockInventoryExtended (Cosmos)
+Composite key incl. State/Status; Patch `Increment` for TO/FROM transitions.
 
-**Archive**: Before and after each update for audit trail
+### 5.4 Archive
+Before/after snapshots via [archive-audit.md](shared/archive-audit.md)
+(best-effort; failure does not fail the message).
 
-### ItemLevelSegmentation (CosmosDB)
-**Purpose**: Per-item ecommerce share rules.
-
-**Key Fields**:
-- EcomShare: B2C allocation percentage (0-100)
-- IsActive: Rule currently applicable
-- IsOMNI: Omnichannel eligible
-
-**Read Operation**: `GetItemLevelFulfilmentyByCategory(fulfilmentCode, hallmark, itemCode, countryOfOrigin)`
-
-### ItemStockInventoryExtended (CosmosDB)
-**Purpose**: Inventory in non-standard states (RESERVED, DEFECTIVE, IN_TRANSIT).
-
-**Composite Index**: (ItemCode, Hallmark, FulfilmentId, COO, State, Status)
-
-**Fields**:
-- Qty: Quantity in this state
-- State, Status: The non-standard state combination
-
-**Operations**:
-- Create: If record doesn't exist for TO-state
-- Increment: Add quantity to TO-state
-- Decrement: Subtract from FROM-state (if sufficient qty)
+### 5.5 Transaction Flow & Concurrency
+Cosmos has no multi-document transactions here; correctness comes from
+per-document ETag Patch + the §2 retry loop, not distributed transactions.
 
 ---
 
-## 6. State Changes
+## 6. State Changes & State Machine
 
-### B2B Inventory State Transition
 ```
-Initial: FromState from message
-  ↓
-Check Quantity Sign
-  ├─ Qty < 0 → ToState = UNKNOWN/UNKNOWN
-  └─ Qty ≥ 0 → ToState = Adjustment.State
-  ↓
-Validate State Consistency
-  (SAE-2798, SAE-3032 fixes)
-  ↓
-Normalize Statuses
-  (Non-AVAILABLE → UNKNOWN)
-  ↓
-Convert Negative Quantities
-  (Use Math.Abs())
-  ↓
-Final: B2BInventoryAdjustedOrMovedEvent ready for SAP
+AdjustmentLine
+   ↓  signed inboundQty (inventory-formulas.md)
+Fetch/Create ItemStockInventory (deterministic Id; 409 → existing)
+   ↓  archive previous
+Apply segmentation (3PL | item-level | fulfilment-level)
+   ↓  compute delta, IsB2CChanged
+Patch (ETag, Increment/Set)  ── 412 ─▶ re-read + reapply (≤3)
+   ↓  archive new
+Publish downstream (nexus-producer) after durable commit
+   ↓
+Final: inventory updated exactly once
 ```
 
-### B2C Inventory Segmentation State Transition
-```
-Initial: InventoryAdjustmentLine with Quantity
-  ↓
-Fetch/Create ItemStockInventory
-  (All quantities initialized to 0 if new)
-  ↓
-Archive Previous State
-  ↓
-Calculate Inbound Quantity
-  (Apply MoveSign prefix)
-  ↓
-Validate (Cannot decrement empty inventory)
-  ↓
-Apply Segmentation Rules
-  ├─ 3PL → Fulfillment-level segmentation
-  └─ WH → Item-level (if active) or Fulfillment-level
-  ↓
-Update B2CAVL, B2BAVL, IsExtended
-  ↓
-Calculate Delta
-  (Current - Previous B2CAvl)
-  ↓
-Archive New State
-  ↓
-Persist to CosmosDB
-  ↓
-Final: ItemStockInventory updated with new quantities
-```
+**Critical invariants:** no quantity goes negative; extended FROM-state never
+decremented below zero; a redelivered message produces no additional mutation.
 
 ---
 
 ## 7. API Documentation
 
-### Input Message
-**Kafka**: inventory.InventoryAdjusted message and send to Service Bus Queue
+### Kafka message contract
+Topic `inventory-events`, `Type` header `InventoryAdjusted`, Avro payload
+mapped to `InventoryAdjustedEvent`:
 
-**Message Type**: ServiceBusReceivedMessage containing InventoryAdjustedEvent
-
-**JSON Structure**:
 ```json
 {
   "Channel": "B2B|B2C",
   "Adjustment": {
     "ReferenceId": "ABC123-XYZ789",
-    "Location": {
-      "Id": "WAREHOUSE_1",
-      "Type": "WAREHOUSE|THIRD_PARTY_LOGISTICS"
-    },
-    "State": {
-      "State": "AVAILABLE|RESERVED|DEFECTIVE|...",
-      "Status": "PICKABLE|PREPARED|..."
-    },
+    "Location": { "Id": "WAREHOUSE_1", "Type": "WAREHOUSE|THIRD_PARTY_LOGISTICS" },
+    "State": { "State": "AVAILABLE|RESERVED|...", "Status": "PICKABLE|PREPARED|..." },
     "AdjustmentLines": [
-      {
-        "ProductId": "SKU-001",
-        "LineNum": "1",
-        "Quantity": 100,
-        "CountryOfOrigin": "INDIA",
-        "Hallmarking": "916"
-      }
+      { "ProductId": "SKU-001", "LineNum": "1", "Quantity": 100,
+        "CountryOfOrigin": "INDIA", "Hallmarking": "916" }
     ]
   }
 }
 ```
 
-### Response
-**Function Type**: Async void (no direct response)
+### Service Bus message contract
+Queue `inventory-adjusted`, `ServiceBusRelayEnvelope` wrapping the event;
+`SessionId = {FulfilmentId}:{ItemCode}`; deterministic `MessageId`; correlation
+headers per [service-bus-publishing.md](shared/service-bus-publishing.md).
 
-**Side Effects**:
-1. CosmosDB records updated
-2. Messages archived
-3. Downstream events queued to NEXUS_PRODUCER_QUEUE
-
-### Validation Rules
-| Field | Rule | Error Handling |
-|-------|------|----------------|
-| input | Must not be null | Return early with info log |
-| Quantity | Must be integer | Auto int.Parse conversion |
-| State values | Valid enum | Reject if invalid |
-| Location.Id | Must exist in country repo | Fallback to UNKNOWN country code |
-| Negative qty on empty inventory | Invalid | Log exception, return null |
+### Validation
+| Field | Rule | Handling |
+|---|---|---|
+| payload | not null / schema-valid | poison → DeadLettered |
+| Quantity | integer | signed parse |
+| State/Status | valid enum | reject invalid |
+| Location.Id | resolvable | fallback `CountryCode.UNKNOWN` |
+| negative qty on empty inventory | invalid | business rejection, skip line |
 
 ---
 
-## 8. Sequence Diagram
+## 8. Error Handling & Retry Mechanisms
 
-```mermaid
-sequenceDiagram
-    participant Kafka as inventory.InventoryAdjusted schema
-    participant SB as Service Bus
-    participant IAT as InventoryAdjusted
-    participant Repo as Repositories
-    participant CosmosDB as CosmosDB
-    participant Archive as Archive
-    participant NexusSB as NEXUS<br/>Queue
+- **Validation / poison payload** → DeadLettered (hot-tier dead-letter container).
+- **Cosmos 412 (ETag)** → `ConcurrencyException` → §2 re-read/reapply loop (≤3);
+  if exhausted → Abandoned (redelivered up to `MaxDeliveryCount`).
+- **Cosmos 429** → Cosmos SDK retry (`MaxRetryAttemptsOnRateLimitedRequests`).
+- **Service Bus publish transient** → `service-bus-publish` Polly pipeline.
+- **`OperationCanceledException`** → Abandoned.
+- **Any other exception** → DeadLettered (`Reason` = type, `Description` =
+  `ex.ToString()`).
+- **Application rejections** (`MissingItemStockInventoryException`,
+  `InvalidExtendedItemStockInventoryQtyException`) → logged; that line is
+  skipped without failing the whole message.
 
-    SB->>IAT: InventoryAdjustedEvent
-    IAT->>IAT: Validate input != null
-    
-    loop For each AdjustmentLine
-        IAT->>IAT: Create SegmentationInputModel
-        
-        opt B2B Handler enabled
-            IAT->>IAT: Determine ToState based on qty sign
-            IAT->>IAT: Validate state transitions
-            IAT->>NexusSB: Queue B2BInventoryAdjustedOrMoved
-        end
-
-        opt AVAILABLE + PICKABLE
-            IAT->>Repo: GetInventoryByCategory()
-            Repo->>CosmosDB: Query
-            CosmosDB-->>Repo: Return DTO
-            Repo-->>IAT: Return DTO
-            
-            IAT->>Archive: Archive previous state
-            IAT->>IAT: Calculate inbound qty
-            IAT->>IAT: Apply segmentation rules
-            IAT->>Archive: Archive new state
-            IAT->>Repo: UpdateStockInventoryAsync()
-            Repo->>CosmosDB: Update
-        else Other states
-            IAT->>Repo: Get extended inventory
-            IAT->>IAT: Process TO-state (increment)
-            IAT->>IAT: Process FROM-state (decrement)
-            IAT->>Repo: Update extended inventory
-        end
-
-        opt OMS Delta enabled & B2C changed
-            IAT->>IAT: Create delta event
-            IAT->>NexusSB: Queue B2CInventoryAdjusted
-        end
-
-        opt ICR enabled
-            IAT->>IAT: Build availability snapshot
-            IAT->>NexusSB: Queue OmniInventoryAvailabilityReported
-        end
-    end
-```
+Outcome mapping is the definitive table in
+[cosmos-idempotent-write.md](shared/cosmos-idempotent-write.md).
 
 ---
 
-## 9. Flowchart
-
-```mermaid
-flowchart TD
-    Start([Start]) --> GetInput[Get Input from<br/>Kafka and Send to SB]
-    GetInput --> ValidateInput{Input<br/>!= null?}
-    ValidateInput -->|No| LogNull[Log: input is null]
-    LogNull --> End1([Return])
-    ValidateInput -->|Yes| LoopStart{For Each<br/>AdjustmentLine}
-    
-    LoopStart -->|No more| End2([Complete])
-    LoopStart -->|Next| CreateModel[Create Segmentation<br/>InputModel]
-    
-    CreateModel --> CheckB2B{B2B Handler<br/>Enabled?}
-    CheckB2B -->|Yes| MapB2B[Map to B2B Event]
-    CheckB2B -->|No| SkipB2B[Skip B2B]
-    
-    MapB2B --> CheckQty{Quantity<br/>< 0?}
-    CheckQty -->|Yes| UnknownState[ToState =<br/>UNKNOWN/UNKNOWN]
-    CheckQty -->|No| SetState[ToState =<br/>Adjustment.State]
-    
-    UnknownState --> ValidateB2B[Validate State<br/>Consistency]
-    SetState --> ValidateB2B
-    ValidateB2B --> QueueB2B[Queue to NEXUS]
-    SkipB2B --> QueueB2B
-    
-    QueueB2B --> CheckState{State =<br/>AVAILABLE<br/>& Pickable?}
-    
-    CheckState -->|Yes| FetchInv[Fetch Inventory]
-    CheckState -->|No| ExtendedPath[Extended<br/>Segmentation]
-    
-    FetchInv --> CalcQty[Calculate<br/>Inbound Qty]
-    CalcQty --> ValidateNeg{Qty < 0<br/>& Inv null?}
-    ValidateNeg -->|Yes| ReturnNull[Return null]
-    ValidateNeg -->|No| CheckLoc{Location<br/>= 3PL?}
-    
-    CheckLoc -->|Yes| Segm3PL[Fulfillment-level<br/>Segmentation]
-    CheckLoc -->|No| CheckRule{Item-level<br/>Rule<br/>Active?}
-    
-    CheckRule -->|Yes| ItemSeg[Item-level<br/>Extension<br/>Set IsExtended=true]
-    CheckRule -->|No| SegmWH[Fulfillment-level<br/>Segmentation]
-    
-    Segm3PL --> CalcDelta[Calculate Delta<br/>curr - prev]
-    ItemSeg --> CalcDelta
-    SegmWH --> CalcDelta
-    
-    CalcDelta --> UpdateInv[Update Inventory]
-    
-    ExtendedPath --> ProcessTo{isValidToState?}
-    ProcessTo -->|Yes| IncrTo[Increment<br/>TO-State Qty]
-    ProcessTo -->|No| SkipTo[Skip TO-State]
-    
-    IncrTo --> ProcessFrom{isValidFromState?}
-    SkipTo --> ProcessFrom
-    
-    ProcessFrom -->|Yes| CheckQtyFrom{Qty >=<br/>Input?}
-    CheckQtyFrom -->|Yes| DecrFrom[Decrement<br/>FROM-State]
-    CheckQtyFrom -->|No| SkipFrom[Log Warning]
-    
-    DecrFrom --> UpdateExt[Update Extended<br/>Inventory]
-    SkipFrom --> UpdateExt
-    
-    UpdateInv --> CheckOMS{OMS<br/>Enabled<br/>& B2C<br/>Changed?}
-    UpdateExt --> CheckOMS
-    
-    CheckOMS -->|Yes| CreateOMS[Create Delta Event]
-    CheckOMS -->|No| SkipOMS[Skip OMS]
-    
-    CreateOMS --> QueueOMS[Queue to NEXUS]
-    SkipOMS --> CheckICR{ICR<br/>Enabled?}
-    QueueOMS --> CheckICR
-    
-    CheckICR -->|Yes| BuildDetails[Build Availability<br/>Details]
-    CheckICR -->|No| SkipICR[Skip ICR]
-    
-    BuildDetails --> CreateICR[Create Snapshot Event]
-    CreateICR --> QueueICR[Queue to NEXUS]
-    SkipICR --> LoopStart
-    QueueICR --> LoopStart
-    
-    ReturnNull --> LoopStart
-```
-
----
-
-## 10. Decision Tree
-
-### B2B Handler Decision Path
-```
-├─ ENABLE_DELTA_TOWARDS_SAP?
-│  ├─ YES
-│  │  ├─ Location == ADC?
-│  │  │  ├─ YES → ENABLE_ADC_DELTA_TOWARDS_AX12?
-│  │  │  │  ├─ YES → Process B2B
-│  │  │  │  └─ NO → Skip
-│  │  │  └─ NO → Process B2B
-│  │  ├─ Quantity < 0?
-│  │  │  ├─ YES → ToState = UNKNOWN/UNKNOWN
-│  │  │  └─ NO → ToState = Adjustment.State
-│  │  └─ Queue event
-│  └─ NO → Skip
-```
-
-### Segmentation Decision Path
-```
-├─ State == AVAILABLE & Status == PICKABLE?
-│  ├─ YES → Regular Segmentation
-│  │  ├─ LocationType == 3PL?
-│  │  │  ├─ YES → Fulfillment-level
-│  │  │  └─ NO → Check item rule
-│  │  │      ├─ Active → Item-level (IsExtended=true)
-│  │  │      └─ Not active → Fulfillment-level
-│  │  └─ Update inventory
-│  └─ NO → Extended Segmentation
-│     ├─ Process TO-state (increment)
-│     └─ Process FROM-state (decrement if qty sufficient)
-```
-
-### OMS Notification Decision
-```
-├─ LocationType == 3PL?
-│  ├─ YES → Use ENABLE_DELTA_TOWARDS_OMS_3PL
-│  └─ NO → Use ENABLE_DELTA_TOWARDS_OMS
-├─ Enabled & IsB2CChanged?
-│  ├─ YES → Create and queue delta event
-│  └─ NO → Skip
-```
-
----
-
-## 11. Error Handling
-
-### Validation Errors
-| Error | Condition | Action |
-|-------|-----------|--------|
-| Input Null | input == null | Return with info log |
-| Negative on Empty | Qty < 0 AND Inv null | Log exception, return null |
-| Extended Qty Insufficient | Qty insufficient for decrement | Log warning, skip update |
-| Missing Inventory on ICR | Inventory record not found | Log warning, return empty |
-
-### Database Errors
-| Error | Handling |
-|-------|----------|
-| Query failure | Propagate → function fails → retry |
-| Update failure | Propagate → function fails → retry |
-| Archive failure | Propagate → function fails → retry |
-
-### Exception Bypass
-- `MissingItemStockInventoryException`: Logged with bypass flag, processing continues
-- `InvalidExendedItemStockInventoryQtyException`: Logged as warning, update skipped
-
----
-
-## 12. Performance Considerations
-
-### Query Optimization
-- **GetInventoryByCategory**: O(1) via composite index lookup
-- Recommend: RU provisioning ~10 RU per call
-
-### Complexity Analysis
-- **Time**: O(n) where n = adjustment lines (sequential processing per line)
-- **Space**: O(n) for archive snapshots
-
-### Bottlenecks
-1. Message archive creation (doubles write volume)
-2. Multiple DB lookups for same item
-3. Sequential processing of lines
-
-### Optimization Recommendations
-- Cache country codes and segmentation rules
-- Batch Cosmos operations where possible
-- Consider parallel line processing with careful concurrency
-
----
-
-## 13. Security
+## 9. Security & Configuration
 
 ### Authentication
-- Service Bus: connection string
-- CosmosDB: connection string
+- Cosmos DB and Service Bus use **connection strings** sourced from Azure Key
+  Vault (delivered as a Kubernetes Secret); local dev uses the emulator /
+  user-secrets. This is the deliberate documented standard (cosmos §1) — not
+  Managed Identity.
 
-### Authorization
-- Service Bus: Listen on input queue, Send on output queue
-- CosmosDB: Read/Write permissions on collections
-
-### Data Protection
-- **Data in Transit**: TLS 1.2 (enforced by Azure)
-- **Data at Rest**: Encryption (Microsoft-managed or customer-managed via Key Vault)
-- **Sensitive Data**: No passwords/API keys logged; business data safe
-
-### Input Validation
-- `int.Parse()` validates quantity format
-- String fields used as parameterized query filters
-- Enum values validated against definitions
-
----
-
-## 14. Configuration
-
-### Feature Flags
+### Feature flags
 | Flag | Default | Purpose |
-|------|---------|---------|
-| ENABLE_DELTA_TOWARDS_SAP | true | Enable B2B SAP events |
-| ENABLE_ADC_DELTA_TOWARDS_AX12 | false | Enable ADC-specific SAP events |
-| ENABLE_DELTA_TOWARDS_OMS | true | Enable OMS B2C notifications (warehouse) |
-| ENABLE_DELTA_TOWARDS_OMS_3PL | true | Enable OMS B2C notifications (3PL) |
-| ENABLE_SNAPSHOT_FOR_ICR | false | Enable ICR inventory snapshots |
+|---|---|---|
+| ENABLE_DELTA_TOWARDS_SAP | true | B2B SAP events |
+| ENABLE_ADC_DELTA_TOWARDS_AX12 | false | ADC-specific SAP events |
+| ENABLE_DELTA_TOWARDS_OMS | true | OMS B2C notifications (warehouse) |
+| ENABLE_DELTA_TOWARDS_OMS_3PL | true | OMS B2C notifications (3PL) |
+| ENABLE_SNAPSHOT_FOR_ICR | false | ICR snapshots |
 
-### Queue Names
-| Config | Purpose |
-|--------|---------|
-| INVENTORY_ADJUSTED_REFLEX_QUEUE_NAME | Input queue |
-| NEXUS_PRODUCER_QUEUE_NAME | Output queue for all events |
+### Queue names (kebab-case, config-resolved)
+| Queue | Old constant | Direction |
+|---|---|---|
+| `inventory-adjusted` | INVENTORY_ADJUSTED_REFLEX_QUEUE_NAME | inbound (relay) |
+| `nexus-producer` | NEXUS_PRODUCER_QUEUE_NAME | outbound |
 
----
-
-## 15. Data Flow
-
-Input Event → Deserialization → Service Bus Queue → Validation → Line Loop → B2B Handler → Segmentation Handler → Extended Handler → OMS Handler → ICR Handler → Archive → Update DB → Queue Events → Complete
+### Data protection
+TLS in transit; encryption at rest; no secrets/keys logged.
 
 ---
 
-## 16. Input/Output Mapping
+## 10. Known Limitations & Future Improvements
 
-### Request Body Transformation
-| Input | Transformation | Output |
-|-------|----------------|--------|
-| InventoryAdjustedEvent | Deserialize | ReferenceId extracted |
-| AdjustmentLine | Map | SegmentationInputModel |
-| Adjustment | Map | B2BInventoryAdjustedOrMovedEvent |
-| Quantity + MoveSign | int.Parse | inboundQty (signed) |
-| ItemStockInventory | Calc | Updated B2CAVL, B2BAVL |
-| prev/curr B2CAvl | Subtract | DeltaTowardsOMS |
-| InventorySnapshot | Build | OmniInventoryQuantityDetails |
-| Events | Wrap | NexusProducerRequest<T> |
+### Current Limitations
+- Integer quantities only (no fractional units).
+- Segmentation rules read per line; may be cached (see below).
+- Extended FROM-state with insufficient quantity is skipped with a warning
+  rather than reconciled.
 
----
+### Potential Improvements
+- Cache country codes and segmentation rules per process to cut Cosmos reads.
+- Batch downstream publishes where a line produces multiple events.
+- Evaluate parallel line processing within one message (bounded), preserving
+  per-aggregate ordering via the session.
 
-## 17. Assumptions
-
-1. Service Bus messages are valid JSON InventoryAdjustedEvent
-2. All enum values match domain definitions
-3. Repository implementations functional and responsive
-4. CosmosDB accessible with proper permissions
-5. Configuration properly initialized
-6. AutoMapper configured for all mappings
-7. Correlation context properly propagated
-8. All Location.Id values valid in country repository
-9. Message ordering preserved (Service Bus FIFO)
-10. No external API calls required outside Azure services
+> The previous version listed "TODO: message queuing not implemented" and
+> "no idempotency / ETag conflicts on concurrent updates" as gaps. Both are now
+> resolved by design: downstream sends go through the cached `ServiceBusSender`
+> (§9) and redelivery/concurrency are handled by deterministic Id + ETag Patch +
+> the §2 loop.
 
 ---
 
-## 18. Known Limitations
+## 11. Summary
 
-### Edge Cases
-- Concurrent adjustments may cause ETag conflicts (handled via retry)
-- Floating point calculations not supported (integers only)
-- Stale segmentation rules possible (considered by design)
-- Extended inventory may remain inconsistent if decrement insufficient
+`inventory.InventoryAdjusted` processes WMS adjustments on the AKS pipeline:
+consumes from Kafka, relays to the `inventory-adjusted` Service Bus queue,
+applies B2B/B2C segmentation and extended-state transitions, and publishes
+deltas/snapshots to `nexus-producer`.
 
-### Unsupported Scenarios
-- Bulk adjustments (must send multiple messages)
-- Reversals/corrections (use negative adjustments)
-- Allocation management (separate system)
-- Multi-step workflows (require external orchestration)
-- Custom state transitions (only predefined enums)
+**Key business logic:** B2B negative → UNKNOWN state; 3PL vs warehouse
+segmentation precedence; extended-state increment/decrement guards; OMS delta
+only when B2C changed; before/after archival.
 
-### Technical Debt
-1. **TODO Comments**: Message queuing not implemented (lines 203, 267, 565)
-   - Impact: Downstream events not sent to SAP, OMS, ICR
-2. **Commented Validation**: Line 434 suggests previous state combination issues
-3. **Magic Strings**: Hard-coded values like "NA", CAECOMFulfilmentId
+**Database updates:** ETag-guarded **Patch** (`Increment`/`Set`, ≤10 ops) on
+`ItemStockInventory` and `ItemStockInventoryExtended`, with deterministic Id +
+409 handling and the §2 412 re-read/reapply loop — this is the fix for the
+duplicate-entry / doubled-quantity problem.
 
-### Future Improvements
-1. Implement message queuing (complete TODOs)
-2. Add input validation (length limits, quantity caps)
-3. Cache country codes and segmentation rules
-4. Add structured logging with correlation IDs
-5. Implement dead-letter handling for poison messages
+**Risks & recommendations:** concurrency conflicts are expected to be rare once
+sessions are in place; monitor dead-letter counts and Cosmos 429 rates; cache
+rarely-changing lookups.
 
 ---
 
-## 19. Summary
-
-**inventory.InventoryAdjusted** processes WMS inventory adjustments in real-time:
-1. Receives events from Service Bus
-2. Applies B2B and B2C segmentation rules
-3. Manages extended inventory state transitions
-4. Calculates delta changes for OMS
-5. Generates snapshots for ICR
-6. Updates CosmosDB with audit trail
-7. Queues downstream events (currently TODOs - not sent)
-
-**Critical Gap**: Downstream event queuing is implemented but disabled (TODO comments). Enable to integrate with SAP, OMS, and ICR systems.
-
-**Key Business Rules**:
-- B2B: Negative quantities → UNKNOWN state; positive → provided state
-- B2C: 3PL uses fulfillment rules; Warehouse uses item-level rules if active
-- Extended: Track non-standard states separately; prevent negative quantities
-- Delta: Calculate change for OMS only if B2C availability changed
-- Archive: Maintain complete before/after snapshots for audit
-
-**Risks**:
-- Critical: TODOs not implemented → no downstream notifications
-- Medium: Concurrent updates → ETag conflicts, requires retry
-- Low: Missing country code → defaults to UNKNOWN
-
-**Recommendation**: Implement message queuing to NEXUS_PRODUCER_QUEUE to enable system integration.
-
----
-
-**Document Version**: 1.0  
-**Generated**: 2026-07-30  
-**Status**: Complete
+**Document Version:** 2.0 (AKS / k8s)
+**Status:** Regenerated
