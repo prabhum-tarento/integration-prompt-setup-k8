@@ -7,7 +7,7 @@ namespace IIS.WMS.Consumer.UnitTests.Infrastructure;
 
 /// <summary>
 /// Correctness tests for <see cref="SpecificRecordDeserializerFactory"/> - the reusable Avro/Schema
-/// Registry wiring <see cref="IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.InventoryStateChangedConsumerHostedService"/>
+/// Registry wiring <see cref="Consumer.Infrastructure.Messaging.Events.InventoryEvents.InventoryEventConsumerHostedService"/>
 /// builds its Kafka value deserializer from.
 /// </summary>
 public class SpecificRecordDeserializerFactoryTests

@@ -21,7 +21,7 @@ public class ConsumerOptionsTests
             BootstrapServers = "kafka-level:9092",
             SchemaRegistryUrl = "http://kafka-level-schema-registry",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions();
+        var eventLevel = new InventoryEventConsumerOptions();
 
         eventLevel.ApplyKafkaLevelDefaults(kafkaLevel);
 
@@ -39,7 +39,7 @@ public class ConsumerOptionsTests
             BootstrapServers = "kafka-level:9092",
             SchemaRegistryUrl = "http://kafka-level-schema-registry",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions
+        var eventLevel = new InventoryEventConsumerOptions
         {
             Enabled = false,
             BootstrapServers = "event-level:9092",
@@ -62,7 +62,7 @@ public class ConsumerOptionsTests
             BootstrapServers = "kafka-level:9092",
             SchemaRegistryUrl = "http://kafka-level-schema-registry",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions
+        var eventLevel = new InventoryEventConsumerOptions
         {
             BootstrapServers = "event-level:9092",
         };
@@ -148,7 +148,7 @@ public class ConsumerOptionsTests
             IgnoreCorrelationIdPrefixes = ["TEST-"],
             IgnoreCorrelationIdSuffixes = ["-loadtest"],
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions();
+        var eventLevel = new InventoryEventConsumerOptions();
 
         eventLevel.ApplyKafkaLevelDefaults(kafkaLevel);
 
@@ -168,7 +168,7 @@ public class ConsumerOptionsTests
             Username = "kafka-level-user",
             Password = "kafka-level-password",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions();
+        var eventLevel = new InventoryEventConsumerOptions();
 
         eventLevel.ApplyKafkaLevelDefaults(kafkaLevel);
 
@@ -188,7 +188,7 @@ public class ConsumerOptionsTests
             Username = "kafka-level-user",
             Password = "kafka-level-password",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions
+        var eventLevel = new InventoryEventConsumerOptions
         {
             Protocol = SecurityProtocol.Ssl,
             AuthenticationMode = SaslMechanism.Plain,
@@ -212,7 +212,7 @@ public class ConsumerOptionsTests
             SchemaRegistryApiKey = "kafka-level-key",
             SchemaRegistryApiSecret = "kafka-level-secret",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions();
+        var eventLevel = new InventoryEventConsumerOptions();
 
         eventLevel.ApplyKafkaLevelDefaults(kafkaLevel);
 
@@ -228,7 +228,7 @@ public class ConsumerOptionsTests
             SchemaRegistryApiKey = "kafka-level-key",
             SchemaRegistryApiSecret = "kafka-level-secret",
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions
+        var eventLevel = new InventoryEventConsumerOptions
         {
             SchemaRegistryApiKey = "event-level-key",
             SchemaRegistryApiSecret = "event-level-secret",
@@ -248,7 +248,7 @@ public class ConsumerOptionsTests
             EnableAutoCommit = false,
             AutoOffsetReset = AutoOffsetReset.Earliest,
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions();
+        var eventLevel = new InventoryEventConsumerOptions();
 
         eventLevel.ApplyKafkaLevelDefaults(kafkaLevel);
 
@@ -263,7 +263,7 @@ public class ConsumerOptionsTests
         {
             AutoOffsetReset = AutoOffsetReset.Earliest,
         };
-        var eventLevel = new InventoryStateChangedConsumerOptions
+        var eventLevel = new InventoryEventConsumerOptions
         {
             AutoOffsetReset = AutoOffsetReset.Latest,
         };

@@ -8,7 +8,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 /// <summary>
 /// Relays JSON-contract inventory events from Kafka onto the durable Azure Service Bus queue
 /// (integration-resiliency.instructions.md §1), built on the shared <see cref="KafkaConsumerHostedServiceBase"/>
-/// - the JSON counterpart to the Avro <see cref="InventoryStateChangedConsumerHostedService"/>. Handles
+/// - the JSON counterpart to the Avro <see cref="InventoryEventConsumerHostedService"/>. Handles
 /// exactly one schema regardless of the Kafka <c>Type</c> header's value (registered under
 /// <see cref="DefaultEventType"/>), same as before this class supported registering more than one.
 /// </summary>

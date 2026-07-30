@@ -1,8 +1,10 @@
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
+
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 
 /// <summary>
 /// The two <see cref="InventoryStateChangedEvent"/> transitions this consumer treats as pick/unpick -
-/// shared by <see cref="InventoryStateChangedConsumerHostedService"/> (OrderArchive categorization)
+/// shared by <see cref="InventoryEventConsumerHostedService"/> (OrderArchive categorization)
 /// and <see cref="Handlers.InventoryStateChangedHandler"/> (OrderTracking relay), ported from
 /// the upstream Reflex facade's <c>InventoryStateChangedQueueTrigger.isPickEvent</c>/<c>isUnpickEvent</c>.
 /// </summary>

@@ -1,10 +1,10 @@
-using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Validators;
 
 /// <summary>
 /// Business-rule validation for one deserialized <see cref="InventoryStateChangedEvent"/>, run by
-/// <see cref="InventoryStateChangedConsumerHostedService"/>'s <c>ValidateAsync</c> override - ported
+/// <see cref="InventoryEventConsumerHostedService"/>'s <c>ValidateAsync</c> override - ported
 /// from the upstream Reflex facade's own <c>InventoryStateChangedKafkaHandler.CanProcessMessage</c>
 /// (<c>IIS.WMS.Reflex.Application</c>), adapted to this consumer's own <see cref="InventoryStateChangedEvent"/>
 /// wire contract and enums. Only the pass/fail decision is ported - the Reflex handler's <c>MoveSign</c>

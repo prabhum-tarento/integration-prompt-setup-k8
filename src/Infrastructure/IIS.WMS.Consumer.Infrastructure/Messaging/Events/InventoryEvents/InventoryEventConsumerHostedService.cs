@@ -1,11 +1,12 @@
 using IIS.WMS.Common.Logging;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Validators;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using net.pandora.nexus.@event.inventory;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 
 /// <summary>
 /// Relays the two Avro event types produced onto the shared <c>inventory-events</c> topic -
@@ -37,25 +38,25 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// </remarks>
 [LogLevelCriteria(LogCriteria.High)]
 [Module("Inventory")]
-public sealed class InventoryStateChangedConsumerHostedService : KafkaConsumerHostedServiceBase
+public sealed class InventoryEventConsumerHostedService : KafkaConsumerHostedServiceBase
 {
-    private readonly ILogger<InventoryStateChangedConsumerHostedService> logger;
+    private readonly ILogger<InventoryEventConsumerHostedService> logger;
 
     /// <summary>Builds the schema-registry-backed Avro consumer and the Service Bus sender it relays onto.</summary>
     /// <param name="options">
     /// Topic, consumer group, Schema Registry URL, and Service Bus queue settings for this consumer -
-    /// including <see cref="InventoryStateChangedConsumerOptions.InventoryAdjustedServiceBusQueueName"/>,
+    /// including <see cref="InventoryEventConsumerOptions.InventoryAdjustedServiceBusQueueName"/>,
     /// which lets <c>InventoryAdjusted</c> relay onto a different queue than
     /// <c>InventoryStateChanged</c>'s <see cref="ConsumerOptions.ServiceBusQueueName"/> if configured.
     /// </param>
     /// <param name="specificRecordDeserializerFactory">Builds the Avro deserializers and their shared backing Schema Registry client.</param>
     /// <param name="infrastructure">The Service Bus client, Polly pipeline provider, hot/cold file stores, Blob Storage options, and dedup service every consumer shares - see <see cref="ConsumerRelayInfrastructure"/>.</param>
     /// <param name="logger">Logger for consume/relay/poison-message events.</param>
-    public InventoryStateChangedConsumerHostedService(
-        IOptions<InventoryStateChangedConsumerOptions> options,
+    public InventoryEventConsumerHostedService(
+        IOptions<InventoryEventConsumerOptions> options,
         ISpecificRecordDeserializerFactory specificRecordDeserializerFactory,
         ConsumerRelayInfrastructure infrastructure,
-        ILogger<InventoryStateChangedConsumerHostedService> logger)
+        ILogger<InventoryEventConsumerHostedService> logger)
         : base(options.Value, infrastructure, logger, specificRecordDeserializerFactory)
     {
         this.logger = logger;

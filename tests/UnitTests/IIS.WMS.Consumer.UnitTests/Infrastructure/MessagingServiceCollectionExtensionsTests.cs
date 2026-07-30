@@ -8,7 +8,6 @@ using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
-using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
@@ -177,13 +176,13 @@ public class MessagingServiceCollectionExtensionsTests
         services.AddMessaging(BuildConfiguration());
 
         Assert.Contains(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
-        Assert.Contains(services, d => d.ServiceType == typeof(InventoryStateChangedConsumerHostedService));
+        Assert.Contains(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
         Assert.Contains(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
         Assert.Contains(hostedServices, hs => hs is KafkaConsumerHostedService);
-        Assert.Contains(hostedServices, hs => hs is InventoryStateChangedConsumerHostedService);
+        Assert.Contains(hostedServices, hs => hs is InventoryEventConsumerHostedService);
         Assert.Contains(hostedServices, hs => hs is BulkInventoryImportConsumerHostedService);
 
         var healthCheckNames = HealthCheckNames(provider);
@@ -203,7 +202,7 @@ public class MessagingServiceCollectionExtensionsTests
         services.AddMessaging(BuildConfiguration([KafkaEvents.InventoryEventsConsumerKey]));
 
         Assert.Contains(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
-        Assert.DoesNotContain(services, d => d.ServiceType == typeof(InventoryStateChangedConsumerHostedService));
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
@@ -219,7 +218,7 @@ public class MessagingServiceCollectionExtensionsTests
         services.AddMessaging(BuildConfiguration([KafkaEvents.InventoryAdjustedEventType]));
 
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
-        Assert.Contains(services, d => d.ServiceType == typeof(InventoryStateChangedConsumerHostedService));
+        Assert.Contains(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
@@ -236,7 +235,7 @@ public class MessagingServiceCollectionExtensionsTests
         services.AddMessaging(BuildConfiguration(["SomeOtherFunction"]));
 
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
-        Assert.DoesNotContain(services, d => d.ServiceType == typeof(InventoryStateChangedConsumerHostedService));
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
@@ -244,7 +243,7 @@ public class MessagingServiceCollectionExtensionsTests
 
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
         Assert.DoesNotContain(hostedServices, hs => hs is KafkaConsumerHostedService);
-        Assert.DoesNotContain(hostedServices, hs => hs is InventoryStateChangedConsumerHostedService);
+        Assert.DoesNotContain(hostedServices, hs => hs is InventoryEventConsumerHostedService);
         Assert.DoesNotContain(hostedServices, hs => hs is BulkInventoryImportConsumerHostedService);
     }
 
@@ -310,7 +309,7 @@ public class MessagingServiceCollectionExtensionsTests
 
         var provider = services.BuildServiceProvider();
 
-        var stateChangedOptions = provider.GetRequiredService<IOptions<InventoryStateChangedConsumerOptions>>().Value;
+        var stateChangedOptions = provider.GetRequiredService<IOptions<InventoryEventConsumerOptions>>().Value;
         var bulkImportOptions = provider.GetRequiredService<IOptions<BulkInventoryImportConsumerOptions>>().Value;
 
         Assert.Equal("kafka-level:9092", stateChangedOptions.BootstrapServers);
@@ -329,7 +328,7 @@ public class MessagingServiceCollectionExtensionsTests
         }));
 
         var provider = services.BuildServiceProvider();
-        var stateChangedOptions = provider.GetRequiredService<IOptions<InventoryStateChangedConsumerOptions>>().Value;
+        var stateChangedOptions = provider.GetRequiredService<IOptions<InventoryEventConsumerOptions>>().Value;
 
         Assert.Equal("event-level:9092", stateChangedOptions.BootstrapServers);
     }

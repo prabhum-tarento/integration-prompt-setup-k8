@@ -21,7 +21,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging;
 /// <summary>
 /// Registers the three Kafka → Service Bus relays (the JSON-contract
 /// <see cref="KafkaConsumerHostedService"/>, the Avro/Schema-Registry
-/// <see cref="InventoryStateChangedConsumerHostedService"/>, and the high-volume
+/// <see cref="InventoryEventConsumerHostedService"/>, and the high-volume
 /// <see cref="BulkInventoryImportConsumerHostedService"/>, all built on the shared
 /// <see cref="KafkaConsumerHostedServiceBase"/>) and both Service Bus → Cosmos DB consumers (the
 /// session-enabled <see cref="InventoryStateChangedServiceBusHostedService"/> and the non-session
@@ -111,13 +111,13 @@ public static class MessagingServiceCollectionExtensions
             options.MaxServiceBusMessageSizeBytes ??= ConsumerOptions.DefaultMaxServiceBusMessageSizeBytes;
         });
 
-        services.Configure<InventoryStateChangedConsumerOptions>(
-            configuration.GetSection(InventoryStateChangedConsumerOptions.SectionName));
+        services.Configure<InventoryEventConsumerOptions>(
+            configuration.GetSection(InventoryEventConsumerOptions.SectionName));
 
         // Event level first, Kafka level as fallback (ConsumerOptions.ApplyKafkaLevelDefaults) for
         // Enabled/BootstrapServers/SchemaRegistryUrl. Resolving IOptions<KafkaConsumerOptions> here
         // is what runs its PostConfigure above first, so Enabled is never null by this point.
-        services.AddOptions<InventoryStateChangedConsumerOptions>()
+        services.AddOptions<InventoryEventConsumerOptions>()
             .PostConfigure<IOptions<KafkaConsumerOptions>>(
                 (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
 
@@ -196,7 +196,7 @@ public static class MessagingServiceCollectionExtensions
             healthChecks.Add((KafkaEvents.InventoryAdjustedEventType, "inventory-adjusted-consumer", "InventoryAdjusted Kafka consumer health"));
         }
 
-        AddKafkaConsumer<InventoryStateChangedConsumerHostedService>(
+        AddKafkaConsumer<InventoryEventConsumerHostedService>(
             services,
             healthChecks.ToArray());
     }

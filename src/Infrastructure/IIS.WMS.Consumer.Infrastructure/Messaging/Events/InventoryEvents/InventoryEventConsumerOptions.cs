@@ -1,6 +1,6 @@
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 
-namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
+namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 
 /// <summary>
 /// Bound from the <c>Kafka:InventoryStateChanged</c> configuration section - settings for the
@@ -12,7 +12,7 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 /// <see cref="ConsumerOptions.ApplyKafkaLevelDefaults"/>; set them here only when this consumer
 /// genuinely needs to point at a different cluster or registry.
 /// </summary>
-public sealed class InventoryStateChangedConsumerOptions : ConsumerOptions
+public sealed class InventoryEventConsumerOptions : ConsumerOptions
 {
     /// <summary>Configuration section name this options type binds from.</summary>
     public const string SectionName = "Kafka:InventoryStateChanged";
@@ -22,7 +22,7 @@ public sealed class InventoryStateChangedConsumerOptions : ConsumerOptions
     /// both event types this consumer relays share <see cref="ConsumerOptions.ServiceBusQueueName"/>,
     /// same as before this setting existed. Set this only if <c>InventoryAdjusted</c> needs to land on
     /// a different queue than <c>InventoryStateChanged</c> - see
-    /// <see cref="InventoryStateChangedConsumerHostedService"/>.
+    /// <see cref="InventoryEventConsumerHostedService"/>.
     /// </summary>
     public string? InventoryAdjustedServiceBusQueueName { get; set; }
 }
