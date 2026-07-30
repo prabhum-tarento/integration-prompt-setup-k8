@@ -72,8 +72,12 @@ not silently skip it.
   [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)
   for unit vs. integration test setup).
 - Never commit secrets, connection strings, or keys. Local development uses
-  user-secrets or the emulator; every other environment uses Managed
-  Identity / Workload Identity against Azure Key Vault.
+  user-secrets or the emulator; every other environment sources connection
+  strings from Azure Key Vault, delivered as a Kubernetes Secret — not
+  Managed Identity / Workload Identity (a deliberate, explicitly-directed
+  standards change; see
+  [cosmos-db.instructions.md](docs/ai/cosmos-db.instructions.md) §1/§14 and
+  [engineering-standards.instructions.md](docs/ai/engineering-standards.instructions.md) §6).
 - Build and run the affected test suite before considering a change done.
   If you can't run it (no test project yet, missing tooling), say so
   explicitly rather than reporting success.

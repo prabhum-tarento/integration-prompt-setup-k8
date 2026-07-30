@@ -77,10 +77,14 @@ every hop, log line, and outbound call this flow makes.
   fallback like `BootstrapServers`. Left unset, Confluent.Kafka's own default
   (`Plaintext`, no SASL) applies - correct for the local emulator, never for
   a real cluster. `Username`/`Password` are secrets: never set in
-  `appsettings.json`, local development reads them from user-secrets, every
-  other environment from Azure Key Vault, per
-  engineering-standards.instructions.md §6 - same rule as every other
-  credential in this repo. An inconsistent combination (a `SaslMechanism`
+  `appsettings.json`; every environment (local dev included) sources them
+  from a connection-string-equivalent credential pair delivered as a
+  Kubernetes Secret backed by Azure Key Vault - local dev via user-secrets,
+  every other environment via the Key Vault-sourced Secret, per
+  engineering-standards.instructions.md §6 (a deliberate, explicitly-directed
+  move away from that section's prior Managed Identity standard - see its
+  Secrets bullet) - same rule as every other credential in this repo. An
+  inconsistent combination (a `SaslMechanism`
   set without a SASL `Protocol`, say) is rejected by Confluent.Kafka itself
   when the consumer is built; this repo doesn't re-validate that.
 - **`EnableAutoCommit`/`AutoOffsetReset`** are also topic (event-level)
@@ -702,12 +706,23 @@ var response = await httpPipeline.ExecuteAsync(async ct => await httpClient.GetA
 
 ## 5. Blob Storage
 
+> **Deviation from Managed Identity, at explicit direction.** This section
+> previously described `AccountUri` + `DefaultAzureCredential` as the
+> non-local-dev pattern, with a connection string reserved for local dev
+> only. At the requester's explicit direction, every environment now
+> authenticates via a connection string, sourced from Key Vault via a
+> Kubernetes Secret outside local dev. Flagged per `CLAUDE.md`'s precedence
+> rules; the current `BlobStorageAccountOptions` type still only exposes
+> `AccountUri`, no `ConnectionString` property — that code change is a
+> tracked follow-up, not part of this doc edit.
+
 Five containers now, grouped by tier — don't mix them. **Hot and cold tiers
 are backed by separate Storage accounts**, each with its own connection
 info (`BlobStorageOptions.Hot`/`BlobStorageOptions.Cold`, each a
-`BlobStorageAccountOptions` with its own `AccountUri` — local dev instead
-reads `BlobStorage:Hot:ConnectionString`/`BlobStorage:Cold:ConnectionString`
-directly off configuration, same pattern as the single-account case used to).
+`BlobStorageAccountOptions`). Every environment reads
+`BlobStorage:Hot:ConnectionString`/`BlobStorage:Cold:ConnectionString`
+directly off configuration — local dev from user-secrets, every other
+environment from a Key Vault-sourced Kubernetes Secret.
 `BlobStorageServiceCollectionExtensions.AddBlobStorage` registers a keyed
 `BlobServiceClient`/`IFileStore` pair per tier
 (`BlobStorageServiceCollectionExtensions.HotTierKey`/`ColdTierKey`) rather

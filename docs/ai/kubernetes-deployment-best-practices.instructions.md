@@ -1,6 +1,6 @@
 ---
 applyTo: '**/*.yaml, **/*.yml, **/Dockerfile'
-description: 'AKS deployment for this service: manifests, health probes, autoscaling (including KEDA for Kafka/Service Bus consumers), and secrets via Workload Identity.'
+description: 'AKS deployment for this service: manifests, health probes, autoscaling (including KEDA for Kafka/Service Bus consumers), and secrets via Key Vault-sourced connection strings.'
 ---
 
 # Kubernetes (AKS) Deployment
@@ -59,7 +59,7 @@ spec:
       labels:
         app: inventory-api
     spec:
-      serviceAccountName: inventory-api-sa   # bound to AKS Workload Identity
+      serviceAccountName: inventory-api-sa   # least-privilege RBAC identity; secrets come from a Key Vault-sourced Secret (see Secrets below), not this ServiceAccount
       containers:
         - name: inventory-api
           image: <registry>/inventory-api:<digest>
@@ -112,7 +112,7 @@ spec:
       labels:
         app: servicebus-consumer
     spec:
-      serviceAccountName: servicebus-consumer-sa   # bound to AKS Workload Identity — see Autoscaling
+      serviceAccountName: servicebus-consumer-sa   # least-privilege RBAC identity; connection strings come from a Key Vault-sourced Secret — see Secrets and Autoscaling below
       containers:
         - name: servicebus-consumer
           image: <registry>/servicebus-consumer:<digest>
@@ -170,10 +170,23 @@ here to avoid repeating the same manifest twice.
 
 ## Secrets (mandatory, not advisory)
 
-- Credentials, connection strings, API keys, and certificates **MUST** use
-  Kubernetes Secrets or, preferably, be resolved at runtime via **AKS
-  Workload Identity → Azure Key Vault** — never a client secret, embedded
-  credential, or node-managed identity. This matches
+> **Deviation from Workload Identity, at explicit direction.** This section
+> previously mandated resolving credentials at runtime via AKS Workload
+> Identity → Azure Key Vault, with Kubernetes Secrets as a fallback. At the
+> requester's explicit direction, the standard is now connection strings
+> everywhere, sourced from Key Vault and delivered as Kubernetes Secrets —
+> not fetched via Workload Identity at runtime. Flagged per `CLAUDE.md`'s
+> precedence rules; this repo's current manifests (e.g.
+> `k8s/kafka-consumer/serviceaccount.yaml`, `deployment.yaml`) still carry
+> Workload Identity annotations/`serviceAccountName` wiring that has not
+> been updated to match — that's a tracked follow-up, not part of this doc
+> edit.
+
+- Credentials, connection strings, API keys, and certificates **MUST** be
+  sourced from Azure Key Vault and delivered to the Pod as a Kubernetes
+  Secret (via the External Secrets Operator or an equivalent Key
+  Vault-to-Secret sync) — never a client secret or credential embedded in
+  a ConfigMap, image, or source file. This matches
   [engineering-standards.instructions.md](engineering-standards.instructions.md) §6
   and [cosmos-db.instructions.md](cosmos-db.instructions.md) §1.
 - **MUST NOT** commit a Secret manifest containing real values to source
@@ -195,33 +208,27 @@ here to avoid repeating the same manifest twice.
   length respectively — not CPU, since these workloads are I/O-bound and
   CPU-idle while waiting on messages.
 
-Both consumer Deployments need a `TriggerAuthentication` backed by
-Workload Identity so KEDA can query queue depth / consumer lag without a
-static credential. **The `keda-operator` Pod is what actually performs
-this query** — not the consumer's own Pod — because KEDA's metrics
-adapter runs as part of the operator, polling trigger sources for every
-`ScaledObject` in the cluster centrally. That means the federated identity
-credential (in Microsoft Entra ID) must trust the `keda-operator`
-ServiceAccount's OIDC subject, not `servicebus-consumer-sa`/
-`kafka-consumer-sa`. Use `identityId` to point at the specific
-user-assigned managed identity to use for the query — in practice, the
-simplest setup reuses the **same** managed identity each consumer's own
-Workload Identity already uses (per the Deployments above), with a
-*second* federated credential added to that identity trusting
-`keda-operator`'s ServiceAccount subject, so one identity serves both the
-app's own Azure SDK calls and KEDA's trigger-source polling:
+Both consumer Deployments need a `TriggerAuthentication` so KEDA can query
+queue depth / consumer lag. Per the connection-string standard above (not
+Workload Identity), back it with a Secret holding the Service Bus
+connection string, referenced via `connectionFromEnv`/`secretTargetRef` —
+**not** `podIdentity`/`azure-workload`. **The `keda-operator` Pod is what
+actually performs this query** — not the consumer's own Pod — because
+KEDA's metrics adapter runs as part of the operator, polling trigger
+sources for every `ScaledObject` in the cluster centrally; that's exactly
+why a shared static credential (the connection string) sourced from a
+Secret is simpler here than per-identity federation:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
-  name: azure-workload-identity-auth
+  name: servicebus-connection-string-auth
 spec:
-  podIdentity:
-    provider: azure-workload
-    identityId: <client-id-of-the-managed-identity>   # see explanation above —
-                                                        # this identity needs a federated
-                                                        # credential trusting keda-operator's SA
+  secretTargetRef:
+    - parameter: connection
+      name: kafka-consumer-secrets   # Key Vault-sourced Secret carrying ServiceBus:ConnectionString
+      key: ServiceBus__ConnectionString
 ```
 
 ```yaml
@@ -239,24 +246,18 @@ spec:
     - type: azure-servicebus
       metadata:
         queueName: inventory-events
-        namespace: <service-bus-namespace>   # the Azure Service Bus namespace name, not a k8s namespace —
-                                              # required for Workload Identity auth (no connection string
-                                              # to derive it from)
         messageCount: "50"
       authenticationRef:
-        name: azure-workload-identity-auth
+        name: servicebus-connection-string-auth
 ```
 
 This service's Kafka cluster is a genuine question to settle before writing
-the Kafka `ScaledObject`: Workload Identity via `azure-workload` pod
-identity only applies if the "Kafka" endpoint is **Azure Event Hubs'
-Kafka-compatible surface**. If it's a self-managed Kafka cluster (Confluent,
-Strimzi, or similar) authenticating via SASL/SCRAM or mTLS instead, KEDA's
-`kafka` scaler needs a *different* `TriggerAuthentication` carrying
-`sasl`/`tls` fields (`spec.secretTargetRef` pointing at a Secret with the
-SASL username/password or client cert) — not an absent `authenticationRef`,
-which would mean no authentication at all. Confirm which one applies to
-this repo before deploying either version below:
+the Kafka `ScaledObject`: whether the "Kafka" endpoint is Azure Event Hubs'
+Kafka-compatible surface or a self-managed cluster (Confluent, Strimzi, or
+similar) doesn't change the auth model under the connection-string
+standard — both cases use KEDA's `kafka` scaler with a `sasl`/`tls`
+`TriggerAuthentication` backed by a Secret (SASL username/password or
+client cert), via `secretTargetRef` — never `podIdentity`/`azure-workload`:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -271,18 +272,13 @@ spec:
   triggers:
     - type: kafka
       metadata:
-        bootstrapServers: "<namespace>.servicebus.windows.net:9093"   # Event Hubs Kafka endpoint
+        bootstrapServers: "<namespace>.servicebus.windows.net:9093"   # or the self-managed cluster's brokers
         consumerGroup: inventory-events-consumer
         topic: inventory-events
         lagThreshold: "100"
       authenticationRef:
-        name: azure-workload-identity-auth   # Event Hubs Kafka endpoint via Workload Identity only
+        name: kafka-sasl-auth   # a sasl/tls TriggerAuthentication backed by kafka-consumer-secrets
 ```
-
-If the broker is a self-managed cluster instead, replace
-`authenticationRef` with a SASL/mTLS `TriggerAuthentication` (KEDA's
-`kafka` scaler documents the `sasl`/`tls` field names for that case) —
-don't reuse `azure-workload-identity-auth` for a non-Azure-native broker.
 
 The Kafka consumer's Deployment must match `scaleTargetRef.name` above
 (`kafka-consumer`) — the same rule applies to the Service Bus consumer.

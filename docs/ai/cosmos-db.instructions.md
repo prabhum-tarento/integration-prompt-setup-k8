@@ -42,12 +42,24 @@ When generating Cosmos DB code:
 
 ## 1. Configuration & Secrets
 
+> **Deviation from Managed Identity, at explicit direction.** This section
+> previously mandated `DefaultAzureCredential` / AKS Workload Identity in
+> every non-local environment. At the requester's explicit direction, the
+> standard is now connection-string authentication in **every** environment,
+> including production. This is a deliberate policy change, not a
+> correction — flagged here per `CLAUDE.md`'s precedence rules for human
+> review. The current implementation
+> (`CosmosDbOptions.cs`) has not been updated to match yet — it still only
+> exposes `AccountEndpoint`/`EmulatorKey`, no `ConnectionString` property —
+> that code change is a follow-up, tracked separately, not part of this
+> doc edit.
+
 Cosmos settings are never stored in source code.
 
 ```json
 {
   "CosmosDb": {
-    "AccountEndpoint": "",
+    "ConnectionString": "",
     "DatabaseName": "InventoryDb",
     "ContainerName": "InventoryEvents",
     "PartitionKeyPath": "/category"
@@ -55,26 +67,29 @@ Cosmos settings are never stored in source code.
 }
 ```
 
-* **Local development**: the Cosmos DB Emulator, authenticated with its
-  well-known fixed key (never a production key), loaded from user-secrets —
+* **Local development**: the Cosmos DB Emulator's well-known fixed key,
+  expressed as its emulator connection string, loaded from user-secrets —
   not `appsettings.json`.
-* **Every other environment**: `DefaultAzureCredential` resolving to AKS
-  Workload Identity (see
-  [kubernetes-deployment-best-practices.instructions.md](kubernetes-deployment-best-practices.instructions.md)).
-  There is no account-key configuration entry outside local development —
-  if you find one, it's a bug, not a style choice.
+* **Every other environment**: the account's primary/secondary connection
+  string, sourced from Azure Key Vault and delivered to the pod as a
+  Kubernetes Secret (see
+  [kubernetes-deployment-best-practices.instructions.md](kubernetes-deployment-best-practices.instructions.md)) —
+  never `DefaultAzureCredential`/Managed Identity, and never committed to
+  source or baked into a container image.
+* Rotate the connection string periodically (Key Vault secret rotation);
+  prefer the account's secondary key/connection string for the passive side
+  of a rotation so the primary can be rotated without downtime.
 * Never commit Cosmos keys, connection strings, or tokens.
 
 ## 2. CosmosClient Registration & Retry Policy
 
-Register `CosmosClient` as a singleton, configured for Managed Identity and
-RU-throttling retry:
+Register `CosmosClient` as a singleton, configured for connection-string
+authentication and RU-throttling retry:
 
 ```csharp
 builder.Services.AddSingleton(sp =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
-    var env = sp.GetRequiredService<IHostEnvironment>();
     var options = new CosmosClientOptions
     {
         ConsistencyLevel = ConsistencyLevel.Session,
@@ -82,19 +97,12 @@ builder.Services.AddSingleton(sp =>
         MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
     };
 
-    // Local dev only: the Cosmos DB Emulator's well-known fixed key, read
-    // from user-secrets. Every other environment authenticates with
-    // DefaultAzureCredential (AKS Workload Identity) — there is no key
-    // configuration entry once you leave IsDevelopment().
-    return env.IsDevelopment()
-        ? new CosmosClient(
-            config["CosmosDb:AccountEndpoint"],
-            config["CosmosDb:EmulatorKey"], // user-secrets only, never appsettings.json
-            options)
-        : new CosmosClient(
-            config["CosmosDb:AccountEndpoint"],
-            new DefaultAzureCredential(),
-            options);
+    // Every environment (local emulator and production alike) authenticates
+    // with a connection string: user-secrets locally, a Key Vault-sourced
+    // Kubernetes Secret everywhere else. Never appsettings.json, never
+    // DefaultAzureCredential/Managed Identity (see §1/§14 for the deliberate
+    // deviation this reflects).
+    return new CosmosClient(config["CosmosDb:ConnectionString"], options);
 });
 ```
 
@@ -686,9 +694,11 @@ requests from `ICosmosContainerFactory`.
 
 ## 14. Security
 
-* `DefaultAzureCredential` / Managed Identity in every non-local
-  environment (§1); least-privilege data-plane RBAC role, not the account
-  master key, for the service's identity.
+* Connection-string authentication in every environment (§1), sourced from
+  Azure Key Vault via a Kubernetes Secret outside local dev; no
+  `DefaultAzureCredential`/Managed Identity. Prefer the account's
+  secondary connection string where a distinction between read-write keys
+  matters, and rotate on a schedule via Key Vault.
 * Never log secrets, full document bodies containing PII, or raw Cosmos
   exception messages to the client — see the exception handler in
   [aspnet-rest-apis.instructions.md](aspnet-rest-apis.instructions.md).

@@ -1,9 +1,9 @@
-# InventoryStateChangedFullQueueTrigger - Technical Documentation
+# inventory.InventoryStateChanged - Technical Documentation
 
 ## 1. Overview
 
 ### Purpose
-The **InventoryStateChangedFullQueueTrigger** is an Azure Service Bus Queue-triggered Azure Function that processes inventory state change events from the warehouse management system. It handles the complete inventory lifecycle by managing state transitions, calculating inventory allocations, updating fulfillment records, and synchronizing changes across multiple downstream systems (OMS, SAP, Nexus Producer).
+The **inventory.InventoryStateChanged** is an kafka event that processes inventory state change events from the warehouse management system. It handles the complete inventory lifecycle by managing state transitions, calculating inventory allocations, updating fulfillment records, and synchronizing changes across multiple downstream systems (OMS, SAP, Nexus Producer).
 
 ### Business Objective
 - Process inventory state changes (PICKABLE → PREPARED, HELD, etc.) in near real-time
@@ -13,7 +13,7 @@ The **InventoryStateChangedFullQueueTrigger** is an Azure Service Bus Queue-trig
 - Archive historical inventory snapshots for audit and reconciliation
 
 ### Scope
-- Consumes `InventoryStateChangedEvent` messages from Service Bus
+- Consumes `inventory.InventoryStateChanged` messages from Kakfa
 - Processes pick and unpick events
 - Performs inventory segmentation and extension calculations
 - Updates item stock inventory records with new allocation quantities
@@ -22,33 +22,66 @@ The **InventoryStateChangedFullQueueTrigger** is an Azure Service Bus Queue-trig
 - Publishes Nexus Producer events for downstream processing
 
 ### High-Level Architecture
+
+Matches the platform-wide data flow in
+[integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md):
+a Kafka-to-Service-Bus relay hosted service, followed by a session-enabled
+Service Bus consumer that calls into the Application layer, which persists
+through the Cosmos DB repository and archives through Blob Storage.
+
 ```
-Service Bus Queue (InventoryStateChangedEvent)
+Kafka topic `inventory-events` (Type header: InventoryStateChanged, Avro)
                     ↓
-       InventoryStateChangedFullQueueTrigger
+    InventoryStateChangedConsumerHostedService (KafkaConsumerHostedServiceBase)
+       - correlation id / dedup id / type headers read + logged
+       - Nexus dedup check (IDeduplicationService, fail-open)
+       - schema + dynamic validation
+       - cold-tier audit write (request-audit container, unconditional)
+                    ↓
+   Azure Service Bus queue `inventory-state-changed`
+   (session-enabled: SessionId = {FulfilmentId}:{ItemCode}, message ID
+   deterministic from the Kafka key — never a fresh GUID — for downstream dedup)
+                    ↓
+      InventoryStateChangedServiceBusHostedService (ServiceBusConsumerHostedService<InventoryStateChangedEvent>)
+       - envelope + payload deserialize, dynamic validation, cold-tier audit
+                    ↓
+          IInventoryStateChangedHandler.HandleAsync
                     ↓
     ┌───────────────┼────────────┬─────────────┐
     ↓               ↓            ↓             ↓
 Pick Event    Unpick Event  Segmentation  OMS Delta
 Handler       Handler       Handler       Handler
     ↓               ↓            ↓             ↓
-DB Update    DB Update   DB Insert/Update  Nexus Queue
+IItemStockInventoryService → Cosmos DB (ETag-guarded Patch/Replace,
+re-read-and-reapply retry loop on 412) + MessageArchive (Cosmos, optionally
+mirrored to Blob Storage cold tier per Audit:ColdStorageEnabled)
+                    ↓
+        Nexus Producer queue (Service Bus) — B2B adjusted/moved (SAP),
+        B2C delta (OMS), ICR snapshot
 ```
 
+Business logic never touches `CosmosClient`/`Container`/`ServiceBusSender`
+directly — it goes through `IItemStockInventoryService` → the Cosmos
+repository (§5), and through `IServiceBusQueueService` for outbound Nexus
+Producer publishing, per
+[cosmos-db.instructions.md](../ai/cosmos-db.instructions.md) §5 and
+[dotnet-architecture-good-practices.instructions.md](../ai/dotnet-architecture-good-practices.instructions.md).
+
 ### Key Dependencies
-- **Service Bus**: Queue-based event consumption
 - **AutoMapper**: DTO mapping and transformation
-- **ItemStockInventoryRepository**: Core inventory data access
-- **ItemLevelSegmentationRepository**: Item-level inventory segmentation rules
-- **FulfilmentLevelSegmentationRepository**: Fulfillment-level segmentation defaults
-- **ItemStockInventoryExtendedRepository**: Extended inventory state tracking
-- **CountryRepository**: Geographic/market mappings
-- **MessageArchiveRepository**: Historical snapshot archival
-- **IServiceBusQueueService**: Downstream queue communication (Nexus Producer)
-- **DurableTaskClient**: Distributed function orchestration (currently disabled)
+- **ItemStockInventoryRepository**: Core inventory data access (Cosmos DB,
+  ETag-guarded — see [cosmos-db.instructions.md](../ai/cosmos-db.instructions.md) §9)
+- **ItemLevelSegmentationRepository**: Item-level inventory segmentation rules (Cosmos DB, read-only here)
+- **FulfilmentLevelSegmentationRepository**: Fulfillment-level segmentation defaults (Cosmos DB, read-only here)
+- **ItemStockInventoryExtendedRepository**: Extended inventory state tracking (Cosmos DB)
+- **CountryRepository**: Geographic/market mappings (Cosmos DB)
+- **MessageArchiveRepository**: Historical snapshot archival (Cosmos DB, optionally mirrored to Azure Blob Storage cold tier)
+- **IServiceBusQueueService**: Downstream queue communication (Nexus Producer, Azure Service Bus)
+- **Azure Service Bus**: durable relay between the Kafka consumer and this handler, and outbound Nexus Producer publishing
+- **Azure Blob Storage**: hot-tier dead-letter/claim-check payloads and cold-tier audit trail (see §5 and [integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md) §5)
 
 ### Assumptions
-1. **Message Format**: Incoming messages are valid `InventoryStateChangedEvent` objects that can be deserialized
+1. **Message Format**: Incoming messages are valid `inventory.InventoryStateChanged` kafka object to `InventoryStateChangedEvent` objects that can be deserialized
 2. **Inventory Existence**: For pick/unpick events, inventory records should exist in the database
 3. **Quantity Handling**: Negative quantities in adjustments represent deductions; they are converted to positive values before processing
 4. **Location Mapping**: All fulfillment location IDs map to known fulfillment centers (TDC, EDC, ADC, CAECOM)
@@ -65,8 +98,9 @@ DB Update    DB Update   DB Insert/Update  Nexus Queue
 
 ```
 1. MESSAGE RECEPTION
-   ├─ Service Bus Trigger fires
-   ├─ ServiceBusReceivedMessage deserialized to InventoryStateChangedEvent
+   ├─ Kafka consumer fires inventory.InventoryStateChanged msg
+   ├─ inventory.InventoryStateChanged deserialized to InventoryStateChangedEvent
+   └─ Send InventoryStateChangedEvent to service bus queue
    └─ Extract ReferenceId (InventoryStateChangedEvent.Id)
 
 2. ITEM LINE ITERATION
@@ -185,7 +219,7 @@ DB Update    DB Update   DB Insert/Update  Nexus Queue
 ### Data Flow Through Layers
 
 ```
-SERVICE BUS MESSAGE
+Kafka inventory.InventoryStateChanged MESSAGE
          ↓
     DESERIALIZE to InventoryStateChangedEvent
          ↓
@@ -1280,11 +1314,11 @@ State After Extended Pick (Overage):
 
 ## 7. API Documentation
 
-### Service Bus Message Contract
+### Kakfa Message Contract
 
-**Endpoint**: Service Bus Queue: `{INVENTORY_STATE_CHANGED_REFLEX_QUEUE_NAME}`
+**Endpoint**: Kafka Message, Consumer Group: `$InventoryStateChanged`
 
-**Message Format**: Azure Service Bus ReceivedMessage
+**Message Format**: inventory.InventoryStateChanged as JSON
 
 **Message Payload** - InventoryStateChangedEvent:
 ```json
@@ -1319,12 +1353,14 @@ State After Extended Pick (Overage):
 }
 ```
 
-**Headers** (Standard Azure Service Bus):
-- `MessageId`: Unique message identifier
+**Headers** (Standard Kafka Header):
+- `ReceivedTime`: Nexus received time
 - `CorrelationId`: Trace correlation across systems
-- `ContentType`: application/json
-- `Subject`: (Optional) Event category
+- `EventType`: schema
+- `DeDuplicationId`: id generated based on message payload
+- `EventKey`: id generated based on message payload
 
+### Service Bus Message Contract
 **Response**: None (fire-and-forget processing)
 
 **Status Codes**:
@@ -1466,7 +1502,69 @@ try {
 
 ---
 
-## 9. Known Limitations & Future Improvements
+## 9. Security & Configuration
+
+### Authentication
+
+> **Deviation from documented standards — flagged per
+> [CLAUDE.md](../../CLAUDE.md) precedence rules.**
+> [cosmos-db.instructions.md](../ai/cosmos-db.instructions.md) §1/§14 and
+> [engineering-standards.instructions.md](../ai/engineering-standards.instructions.md) §6
+> specify `DefaultAzureCredential` / AKS Workload Identity for Cosmos DB,
+> Service Bus, and Blob Storage in every non-local environment, reserving
+> connection strings/account keys for local development only (emulators,
+> `.NET user-secrets`). At the requester's explicit direction, this section
+> documents **connection-string authentication for all three dependencies
+> in every environment**, including AKS/production. This conflicts with
+> the standards above; it is not a correction to them. A human reviewer
+> should confirm whether this is an intentional, approved exception before
+> treating it as this service's actual production configuration.
+
+| Dependency | Auth mechanism (as directed) | Where the connection string lives | Conflicts with |
+|---|---|---|---|
+| Azure Service Bus | Connection string (`Endpoint=sb://...;SharedAccessKeyName=...;SharedAccessKey=...`) passed to `ServiceBusClient` | Kubernetes Secret, mounted as an env var / volume into every environment (API, Kafka consumer, Service Bus consumer Deployments) — not Key Vault + Workload Identity | [integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md) §1 (event-level `Username`/`Password` secrets sourced from Key Vault outside local dev); [kubernetes-deployment-best-practices.instructions.md](../ai/kubernetes-deployment-best-practices.instructions.md) Secrets section |
+| Azure Cosmos DB | Primary/secondary account key connection string passed to the `CosmosClient` constructor, in place of `DefaultAzureCredential` | Kubernetes Secret in every environment | [cosmos-db.instructions.md](../ai/cosmos-db.instructions.md) §1, §2, §14 (`DefaultAzureCredential`/Workload Identity mandatory outside `IsDevelopment()`; "there is no account-key configuration entry outside local development — if you find one, it's a bug, not a style choice") |
+| Azure Blob Storage (hot + cold tier) | Connection string per tier (`BlobStorage:Hot:ConnectionString` / `BlobStorage:Cold:ConnectionString`) passed to `BlobServiceClient`, in every environment | Kubernetes Secret per tier | [integration-resiliency.instructions.md](../ai/integration-resiliency.instructions.md) §5 (connection-string config is described there as the local-dev-only path; every other environment uses `AccountUri` + Managed Identity) |
+
+**Configuration keys** (as directed — connection-string shape in every
+environment, not gated by `IsDevelopment()`):
+
+```json
+{
+  "ServiceBus": {
+    "ConnectionString": ""
+  },
+  "CosmosDb": {
+    "ConnectionString": "",
+    "DatabaseName": "InventoryDb",
+    "ContainerName": "InventoryEvents",
+    "PartitionKeyPath": "/category"
+  },
+  "BlobStorage": {
+    "Hot": { "ConnectionString": "" },
+    "Cold": { "ConnectionString": "" }
+  }
+}
+```
+
+- Never commit an actual connection string value to source control or
+  `appsettings.json` — even under this connection-string-everywhere model,
+  the value itself is still a secret and must come from a Kubernetes Secret
+  (or Key Vault-backed Secret), per
+  [kubernetes-deployment-best-practices.instructions.md](../ai/kubernetes-deployment-best-practices.instructions.md)
+  Secrets section — only the *mechanism* (connection string vs. Managed
+  Identity) is being changed here, not the "never in source" rule.
+- TLS/AMQPS-over-TLS still applies at the protocol level regardless of
+  which credential type authenticates the connection — see
+  [engineering-standards.instructions.md](../ai/engineering-standards.instructions.md) §6.
+- Rotating a connection string requires redeploying every Pod that holds
+  the old Secret value (or a Secret-reload mechanism) — a tradeoff
+  Managed Identity does not have, since Workload Identity tokens are
+  issued per-request without a stored long-lived secret at all.
+
+---
+
+## 10. Known Limitations & Future Improvements
 
 ### Current Limitations
 
@@ -1480,12 +1578,6 @@ try {
    - Comment: "Todo: send message to nexus-producer-b2b-inventory-adjusted-moved service bus queue"
    - Impact: SAP and audit systems not updated
    - Fix Required: Uncomment publishing calls
-
-3. **DurableClient Unused**:
-   - Current: Parameter injected but not used
-   - Commented: Order tracking orchestrator calls commented out
-   - Impact: No distributed orchestration
-   - Fix Required: Implement durable orchestration if needed
 
 4. **No Distributed Transactions**:
    - Current: Item-level updates not atomic
@@ -1544,20 +1636,21 @@ try {
 
 ---
 
-## 10. Summary
+## 11. Summary
 
 ### Complete Execution Summary
 
-**InventoryStateChangedFullQueueTrigger** is a critical inventory processing pipeline that:
+**inventory.InventoryStateChanged** is a critical inventory processing pipeline that:
 
-1. **Consumes** inventory state change events from Service Bus
-2. **Processes** pick, unpick, and segmentation operations per item line
-3. **Updates** central inventory database with new allocation states
-4. **Calculates** B2C extension and availability deltas
-5. **Publishes** notifications to SAP (B2B adjustments), OMS (B2C deltas), and audit systems (ICR snapshots)
-6. **Archives** complete audit trail for compliance
+1. **Kafka Consumes** inventory state change events from Kafka and send to Service Bus
+2. **Service Consumes** inventory state change events from Service Bus
+3. **Processes** pick, unpick, and segmentation operations per item line
+4. **Updates** central inventory database with new allocation states
+5. **Calculates** B2C extension and availability deltas
+6. **Publishes** notifications to SAP (B2B adjustments), OMS (B2C deltas), and audit systems (ICR snapshots)
+7. **Archives** complete audit trail for compliance
 
-The trigger handles **100+ inventory state transitions daily** across B2B and B2C domains, managing allocation, extension, and segmentation logic with minimal latency.
+The trigger handles **10000+ inventory state transitions daily** across B2B and B2C domains, managing allocation, extension, and segmentation logic with minimal latency.
 
 ### Key Business Logic
 

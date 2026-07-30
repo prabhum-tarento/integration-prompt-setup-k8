@@ -146,9 +146,16 @@ the project-wide compiler/tooling configuration:
   calls.
 * **Secrets:** never in source, appsettings, or environment variable
   defaults. Local development uses .NET user-secrets or the Cosmos/Service
-  Bus/Kafka emulators. Every other environment authenticates via Managed
-  Identity / AKS Workload Identity against Azure Key Vault — see
+  Bus/Kafka emulators. Every other environment authenticates via
+  connection strings sourced from Azure Key Vault and delivered as a
+  Kubernetes Secret — see
   [kubernetes-deployment-best-practices.instructions.md](kubernetes-deployment-best-practices.instructions.md).
+  This is a deliberate, explicitly-directed deviation from this doc's
+  prior Managed Identity / AKS Workload Identity standard — flagged per
+  `CLAUDE.md`'s precedence rules — and does not yet reflect every current
+  implementation (e.g. `CosmosDbOptions.cs` has no `ConnectionString`
+  property today); code changes are a tracked follow-up, not part of this
+  doc update.
 * **Telemetry:** OpenTelemetry for metrics and distributed traces; New
   Relic (or the configured OTLP backend) as the export target.
 * **Structured logging:** Serilog, JSON output, every log entry carries the
