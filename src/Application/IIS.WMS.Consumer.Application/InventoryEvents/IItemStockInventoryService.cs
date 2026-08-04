@@ -45,4 +45,26 @@ public interface IItemStockInventoryService
     Task ApplyUnpickAsync(
         string fulfilmentId, string itemCode, string countryOfOrigin, string hallmark,
         int quantity, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Applies a §3.2 stock-sync Set (docs/events/inventory.StockSyncSubmitted.md) against the
+    /// identified fulfilment/item/hallmark/COO record: overwrites (never increments) the B2C
+    /// sellable quantities with the values this sync reported. Fetches or creates the record
+    /// (deterministic Id; a Cosmos conflict on create is resolved by re-reading the now-existing
+    /// row rather than throwing - redelivery-safe, same as
+    /// <see cref="IItemStockInventorySegmentationService.ApplySegmentationAsync"/>'s create-if-missing
+    /// branch), retrying the patch path against fresh state on an ETag conflict
+    /// (integration-resiliency.instructions.md §2).
+    /// </summary>
+    /// <param name="fulfilmentId">Fulfilment location the sync was reported against.</param>
+    /// <param name="itemCode">Item code being synced.</param>
+    /// <param name="countryOfOrigin">Country of origin of the item line.</param>
+    /// <param name="hallmark">Hallmarking value of the item line.</param>
+    /// <param name="b2cAvl">The new (Set) B2C available/pickable quantity - already negative-normalized by the caller.</param>
+    /// <param name="b2cPrepared">The new (Set) B2C prepared quantity - already negative-normalized by the caller.</param>
+    /// <param name="b2cAvailableToSell">The new (Set) BR-only available-to-sell quantity, or <see langword="null"/> for fulfilment codes that never report it.</param>
+    /// <param name="cancellationToken">Token to cancel the write.</param>
+    Task<ItemStockSyncApplyResult> ApplyStockSyncAsync(
+        string fulfilmentId, string itemCode, string countryOfOrigin, string hallmark,
+        int b2cAvl, int b2cPrepared, int? b2cAvailableToSell, CancellationToken cancellationToken = default);
 }

@@ -7,6 +7,7 @@ using IIS.WMS.Consumer.Infrastructure;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatusChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
@@ -82,6 +83,7 @@ public class MessagingServiceCollectionExtensionsTests
             ["Kafka:ConsumerGroup"] = "iis-wms-consumer",
             ["Kafka:InventoryStateChanged:ConsumerGroup"] = "iis-wms-consumer",
             ["Kafka:BulkInventoryImport:ConsumerGroup"] = "iis-wms-consumer",
+            ["Kafka:InternalHallmarkingStatusChanged:ConsumerGroup"] = "iis-wms-consumer",
         };
 
         if (kafkaEventFunctions is not null)
@@ -178,19 +180,24 @@ public class MessagingServiceCollectionExtensionsTests
         Assert.Contains(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
         Assert.Contains(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
         Assert.Contains(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
+        Assert.Contains(services, d => d.ServiceType == typeof(InternalHallmarkingStatusChangedConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
         Assert.Contains(hostedServices, hs => hs is KafkaConsumerHostedService);
         Assert.Contains(hostedServices, hs => hs is InventoryEventConsumerHostedService);
         Assert.Contains(hostedServices, hs => hs is BulkInventoryImportConsumerHostedService);
+        Assert.Contains(hostedServices, hs => hs is InternalHallmarkingStatusChangedConsumerHostedService);
+        Assert.Contains(hostedServices, hs => hs is InternalHallmarkingStatusChangedServiceBusHostedService);
 
         var healthCheckNames = HealthCheckNames(provider);
         Assert.Equal(
             new[]
             {
-                "service-bus", "service-bus-bulk-import", "kafka-consumer",
-                "inventory-state-changed-consumer", "inventory-adjusted-consumer", "bulk-import-consumer",
+                "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import", "service-bus-internal-hallmarking-status-changed",
+                "service-bus-stock-sync-submitted",
+                "kafka-consumer", "inventory-state-changed-consumer", "inventory-adjusted-consumer", "stock-sync-submitted-consumer",
+                "bulk-import-consumer", "internal-hallmarking-status-changed-consumer",
             },
             healthCheckNames);
     }
@@ -208,7 +215,13 @@ public class MessagingServiceCollectionExtensionsTests
         var provider = services.BuildServiceProvider();
         var healthCheckNames = HealthCheckNames(provider);
 
-        Assert.Equal(new[] { "service-bus", "service-bus-bulk-import", "kafka-consumer" }, healthCheckNames);
+        Assert.Equal(
+            new[]
+            {
+                "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import",
+                "service-bus-internal-hallmarking-status-changed", "service-bus-stock-sync-submitted", "kafka-consumer",
+            },
+            healthCheckNames);
     }
 
     [Fact(DisplayName = "A Kafka:KafkaEventFunctions filter naming only InventoryAdjusted registers InventoryStateChanged's hosted service with just the adjusted health check")]
@@ -239,7 +252,13 @@ public class MessagingServiceCollectionExtensionsTests
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
 
         var provider = services.BuildServiceProvider();
-        Assert.Equal(new[] { "service-bus", "service-bus-bulk-import" }, HealthCheckNames(provider));
+        Assert.Equal(
+            new[]
+            {
+                "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import",
+                "service-bus-internal-hallmarking-status-changed", "service-bus-stock-sync-submitted",
+            },
+            HealthCheckNames(provider));
 
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
         Assert.DoesNotContain(hostedServices, hs => hs is KafkaConsumerHostedService);

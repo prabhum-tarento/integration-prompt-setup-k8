@@ -58,6 +58,7 @@ data:
   Kafka__InventoryStateChanged__ConsumerGroup: "$InventoryStateChanged"
   Kafka__InventoryStateChanged__ServiceBusQueueName: "inventory-state-changed"
   # Kafka__InventoryStateChanged__InventoryAdjustedServiceBusQueueName: "inventory-adjusted"
+  # Kafka__InventoryStateChanged__StockSyncSubmittedServiceBusQueueName: "stock-sync-submitted"
 
   # Kafka:BulkInventoryImport - disabled by default in appsettings.json; kept here so
   # toggling it on is a ConfigMap edit, not a code change.

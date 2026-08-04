@@ -4,6 +4,8 @@ public class KafkaEvents
 {
     public const string InventoryStateChangedEventType = "inventory.InventoryStateChanged";
     public const string InventoryAdjustedEventType = "inventory.InventoryAdjusted";
+    public const string InternalHallmarkingStatusChangedEventType = "inventory.InternalHallmarkingStatusChanged";
+    public const string StockSyncSubmittedEventType = "inventory.StockSyncSubmitted";
 
     /// <summary>
     /// <c>Kafka:Functions</c> allow-list key for the JSON-contract consumer - this consumer isn't
@@ -13,4 +15,7 @@ public class KafkaEvents
 
     /// <summary><c>Kafka:Functions</c> allow-list key for the high-volume bulk-import consumer.</summary>
     public const string BulkInventoryImportConsumerKey = "BulkInventoryImport";
+
+    /// <summary><c>Kafka:Functions</c> allow-list key for the internal-hallmarking-status-changed consumer.</summary>
+    public const string InternalHallmarkingStatusChangedConsumerKey = "InternalHallmarkingStatusChanged";
 }

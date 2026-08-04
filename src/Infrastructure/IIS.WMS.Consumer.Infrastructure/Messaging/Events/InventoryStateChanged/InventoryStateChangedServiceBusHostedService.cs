@@ -19,8 +19,6 @@ namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged
 [Module("Inventory")]
 public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusConsumerHostedService<InventoryStateChangedEvent>
 {
-    private readonly IServiceScopeFactory scopeFactory;
-
     /// <param name="dependencies">Plumbing dependencies shared by every Service Bus consumer - client, scope factory, hot/cold file stores, blob storage options, and the health-state registry.</param>
     /// <param name="queueName">Queue this consumer reads from.</param>
     /// <param name="eventOptions">Queue-level session-processor overrides, already resolved (queue-level-first, ServiceBus-level-fallback) via <see cref="InventoryStateChangedServiceBusConsumerOptions.ApplyServiceBusLevelDefaults"/>.</param>
@@ -32,15 +30,13 @@ public sealed class InventoryStateChangedServiceBusHostedService : ServiceBusCon
         ILogger<InventoryStateChangedServiceBusHostedService> logger)
         : base(dependencies, queueName, eventOptions.Value, logger)
     {
-        scopeFactory = dependencies.ScopeFactory;
     }
 
     /// <inheritdoc/>
     protected override async Task ProcessMessageAsync(
-        InventoryStateChangedEvent message, ICorrelationContext correlationContext, CancellationToken cancellationToken)
+        InventoryStateChangedEvent message, ICorrelationContext correlationContext, IServiceProvider serviceProvider, CancellationToken cancellationToken)
     {
-        using var scope = scopeFactory.CreateScope();
-        var handler = scope.ServiceProvider.GetRequiredService<IInventoryStateChangedHandler>();
+        var handler = serviceProvider.GetRequiredService<IInventoryStateChangedHandler>();
 
         await handler.HandleAsync(message, correlationContext.CorrelationId, cancellationToken);
     }

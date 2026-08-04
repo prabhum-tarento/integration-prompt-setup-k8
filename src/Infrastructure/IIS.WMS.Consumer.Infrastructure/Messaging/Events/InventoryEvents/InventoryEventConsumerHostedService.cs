@@ -3,6 +3,8 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Rules;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.StockSyncSubmitted;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.StockSyncSubmitted.Mappers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using net.pandora.nexus.@event.inventory;
 
@@ -67,13 +69,38 @@ public sealed class InventoryEventConsumerHostedService : KafkaConsumerHostedSer
                 InventoryStateChangedEventMapper.ToInventoryStateChangedEvent,
                 getOrderArchiveKey: GetOrderArchiveKey,
                 validateAsync: ValidateAsync),
-            [KafkaEvents.InventoryAdjustedEventType] = CreateSchemaHandler<InventoryAdjusted, InventoryAdjustedEvent>(
+            [KafkaEvents.InventoryAdjustedEventType] = CreateSchemaHandler<net.pandora.nexus.@event.inventory.InventoryAdjusted, InventoryAdjustedEvent>(
                 InventoryAdjustedEventMapper.ToInventoryAdjustedEvent,
                 // Null (the default) unless InventoryAdjustedServiceBusQueueName is configured -
                 // falls back to the consumer-wide ServiceBusQueueName, so InventoryAdjusted lands
                 // on the same queue as InventoryStateChanged until ops points it elsewhere.
-                serviceBusQueueName: options.Value.InventoryAdjustedServiceBusQueueName)
+                serviceBusQueueName: options.Value.InventoryAdjustedServiceBusQueueName),
+            [KafkaEvents.StockSyncSubmittedEventType] = CreateSchemaHandler<net.pandora.nexus.@event.inventory.StockSyncSubmitted, StockSyncSubmittedEvent>(
+                StockSyncSubmittedEventMapper.ToStockSyncSubmittedEvent,
+                // StockSyncSubmitted's Avro key is productId alone, but docs/events/inventory.StockSyncSubmitted.md
+                // §2 requires SessionId/MessageId of "{FulfilmentId}:{ItemCode}" - so this schema needs an
+                // explicit routing delegate rather than the default RouteByEventKey, same precedent as
+                // BulkInventoryImportConsumerHostedService's EventId-based routing.
+                getServiceBusRouting: (value, _) => (BuildStockSyncSessionId(value), BuildStockSyncSessionId(value)),
+                serviceBusQueueName: options.Value.StockSyncSubmittedServiceBusQueueName)
         });
+    }
+
+    /// <summary>
+    /// Composes the "{FulfilmentId}:{ItemCode}" Service Bus session/message id for one mapped
+    /// <see cref="StockSyncSubmittedEvent"/> (docs/events/inventory.StockSyncSubmitted.md §2/§4),
+    /// applying the same BRZ3PL consignee-id location remapping
+    /// <see cref="StockSyncSubmitted.Handlers.StockSyncSubmittedHandler"/> applies to the location
+    /// itself, so events for the same physical fulfilment/item land in the same Service Bus session
+    /// regardless of which of the two location ids this particular sync reported.
+    /// </summary>
+    private static string BuildStockSyncSessionId(StockSyncSubmittedEvent value)
+    {
+        var fulfilmentId = value.Location.Id == FulfilmentLocationIds.Brz3PlConsigneeId
+            ? FulfilmentLocationIds.BrzDc3PlFulfilmentId
+            : value.Location.Id;
+
+        return $"{fulfilmentId}:{value.ProductId}";
     }
 
     /// <summary>

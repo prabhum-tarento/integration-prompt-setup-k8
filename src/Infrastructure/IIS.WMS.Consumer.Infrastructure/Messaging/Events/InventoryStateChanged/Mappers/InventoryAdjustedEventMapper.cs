@@ -3,19 +3,23 @@ using net.pandora.nexus.@event.inventory;
 namespace IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Mappers;
 
 /// <summary>
-/// Hand-written mapping from the Avro-generated <see cref="InventoryAdjusted"/> SpecificRecord
-/// (NexusFacades.Common.AvroSchemas) to this consumer's own decoupled
+/// Hand-written mapping from the Avro-generated <c>net.pandora.nexus.event.inventory.InventoryAdjusted</c>
+/// SpecificRecord (NexusFacades.Common.AvroSchemas) to this consumer's own decoupled
 /// <see cref="InventoryAdjustedEvent"/> wire contract - no mapping library, same rationale as
 /// <see cref="InventoryStateChangedEventMapper"/>. <c>state</c>, <c>location</c>, <c>type</c>, and each
 /// <c>adjustmentLines</c> entry share the exact same Avro shapes <see cref="InventoryStateChangedEventMapper"/>
 /// already maps (<c>net.pandora.nexus.object.inventory.InventoryState</c>/<c>InventoryChangeType</c>/
 /// <c>ItemLine</c>, <c>net.pandora.nexus.shared.Location</c>), so this reuses that mapper's private helpers
 /// rather than duplicating them. Every enum is mapped explicitly by symbol name, not by ordinal - same
-/// reasoning as <see cref="InventoryStateChangedEventMapper"/>.
+/// reasoning as <see cref="InventoryStateChangedEventMapper"/>. The Avro type is referenced with its full
+/// namespace rather than via the <c>using net.pandora.nexus.@event.inventory;</c> directive above - this
+/// file's own namespace now has an <c>InventoryAdjusted</c> sibling namespace
+/// (<see cref="Infrastructure.Messaging.Events.InventoryAdjusted"/>) which shadows the using-imported type
+/// name in enclosing-namespace lookup.
 /// </summary>
 internal static class InventoryAdjustedEventMapper
 {
-    public static InventoryAdjustedEvent ToInventoryAdjustedEvent(this InventoryAdjusted source) =>
+    public static InventoryAdjustedEvent ToInventoryAdjustedEvent(this net.pandora.nexus.@event.inventory.InventoryAdjusted source) =>
         new(
             InventoryStateChangedEventMapper.ToChannel(source.channel),
             ToAdjustment(source.adjustment));

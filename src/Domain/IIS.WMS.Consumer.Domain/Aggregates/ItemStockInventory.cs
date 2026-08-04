@@ -1,5 +1,6 @@
 using System.Net.NetworkInformation;
 using IIS.WMS.Consumer.Domain.Common;
+using IIS.WMS.Consumer.Domain.Enums;
 using IIS.WMS.Consumer.Domain.Events;
 using IIS.WMS.Consumer.Domain.Exceptions;
 
@@ -49,6 +50,13 @@ public sealed class ItemStockInventory : AggregateRoot
 
     public int B2BPrepared { get; private set; }
 
+    /// <summary>
+    /// BR-only sellable quantity reported under the <c>AVAILABLETOSELL</c> state
+    /// (docs/events/inventory.StockSyncSubmitted.md §3.2/§4.2/§5.1) - <see langword="null"/> for
+    /// fulfilment codes that never report this state, distinct from a genuine reported zero.
+    /// </summary>
+    public int? B2CAvailableToSell { get; private set; }
+
     public int InternalHallmarkAllocated { get; private set; }
 
     public int InTransit { get; private set; }
@@ -63,7 +71,7 @@ public sealed class ItemStockInventory : AggregateRoot
 
     public int Inspection { get; private init; }
 
-    public int Psc { get; private init; }
+    public int Psc { get; private set; }
 
     public bool IsPosm { get; private init; }
 
@@ -128,7 +136,8 @@ public sealed class ItemStockInventory : AggregateRoot
         int inspection,
         int psc,
         bool isPosm,
-        DateTime modifiedUtc) => new()
+        DateTime modifiedUtc,
+        int? b2cAvailableToSell = null) => new()
     {
         Id = id,
         FulfilmentId = fulfilmentId,
@@ -143,6 +152,7 @@ public sealed class ItemStockInventory : AggregateRoot
         B2BAllocated = b2bAllocated,
         B2CPrepared = b2cPrepared,
         B2BPrepared = b2bPrepared,
+        B2CAvailableToSell = b2cAvailableToSell,
         InternalHallmarkAllocated = internalHallmarkAllocated,
         InTransit = inTransit,
         B2CThreshold = b2cThreshold,
@@ -388,5 +398,138 @@ public sealed class ItemStockInventory : AggregateRoot
 
         B2CAvailable = B2CExtended + B2COriginal;
         ModifiedUtc = nowUtc;
+    }
+
+    /// <summary>
+    /// §3.2 stock-sync Set: overwrites (never increments) the B2C sellable quantities with the
+    /// values reported by this sync, per docs/events/inventory.StockSyncSubmitted.md §3.2/§5.1 -
+    /// unlike every other mutator on this aggregate, which applies a delta. <paramref name="b2cAvailableToSell"/>
+    /// is <see langword="null"/> for fulfilment codes that never report the BR-only
+    /// <c>AVAILABLETOSELL</c> state (§4.2), left untouched in that case rather than cleared, so a
+    /// non-BR sync never wipes out a value only a BR sync would have set.
+    /// </summary>
+    public void ApplyStockSync(int b2cAvl, int b2cPrepared, int? b2cAvailableToSell, DateTime nowUtc)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(b2cAvl);
+        ArgumentOutOfRangeException.ThrowIfNegative(b2cPrepared);
+
+        B2CAvailable = b2cAvl;
+        B2CPrepared = b2cPrepared;
+
+        if (b2cAvailableToSell is not null)
+        {
+            B2CAvailableToSell = b2cAvailableToSell;
+        }
+
+        ModifiedUtc = nowUtc;
+
+        RaiseDomainEvent(new ItemStockSyncApplied(Id, FulfilmentId, ItemCode, B2CAvailable, B2CPrepared, B2CAvailableToSell));
+    }
+
+    /// <summary>
+    /// Internal-hallmarking STARTED-status allocation - mirrors the upstream Reflex facade's
+    /// <c>orderToInventoryAllocatedEventAsync</c> exactly
+    /// (docs/events/inventory.InternalHallmarkingStatusChanged.md §3.1). <paramref name="quantity"/>
+    /// is signed (allocate on positive, undo-allocate on negative) - a zero quantity is a business
+    /// rejection (nothing to allocate), and a resulting negative <see cref="B2BAllocated"/> is
+    /// likewise rejected outright rather than clamped, per the plan's explicit "throws" decision for
+    /// this path (unlike <see cref="PickB2B"/>'s tolerated-drift clamp).
+    /// </summary>
+    public void AllocateInternalHallmarking(int quantity, DateTime nowUtc)
+    {
+        if (quantity == 0)
+        {
+            throw new InvalidItemStockInventoryQtyException(Id, ItemCode, quantity, B2BAllocated);
+        }
+
+        var newB2BAllocated = B2BAllocated + quantity;
+
+        if (newB2BAllocated < 0)
+        {
+            throw new InvalidItemStockInventoryQtyException(Id, ItemCode, quantity, newB2BAllocated);
+        }
+
+        if (B2CAllocated > B2CAvailable)
+        {
+            throw new InvalidItemStockInventoryQtyException(Id, ItemCode, quantity, B2CAllocated);
+        }
+
+        B2BAllocated = newB2BAllocated;
+        ModifiedUtc = nowUtc;
+
+        if (IsExtended)
+        {
+            CalculateB2CExtended();
+            UpdateB2CAvailable(CalculateB2CAvailable());
+        }
+
+        RaiseDomainEvent(new InternalHallmarkingAllocated(Id, FulfilmentId, ItemCode, quantity));
+    }
+
+    /// <summary>
+    /// Internal-hallmarking PICKED-status consolidated-shipment logic - mirrors the upstream Reflex
+    /// facade's <c>consolidatedOrderShippedEventHandlerAsync</c> exactly, applying the §3.3 three-branch
+    /// table by <paramref name="confirmationType"/>: <c>PRELIMINARY</c> only accrues <see cref="Psc"/>
+    /// (tentative shipment, nothing else moves yet); <c>STANDARD_FOLLOWING_PRELIMINARY</c> finalizes a
+    /// prior preliminary shipment (decrements <see cref="B2BAvailable"/>/<see cref="B2BPrepared"/>/
+    /// <see cref="Psc"/> together); anything else is a direct shipment (decrements
+    /// <see cref="B2BAvailable"/>/<see cref="B2BPrepared"/> only). All decrements clamp to zero rather
+    /// than reject, per §3.3's own validation rule.
+    /// </summary>
+    public void ApplyConsolidatedShipment(ConfirmationType confirmationType, int shippedQuantity, DateTime nowUtc)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(shippedQuantity);
+
+        switch (confirmationType)
+        {
+            case ConfirmationType.PRELIMINARY:
+                Psc += shippedQuantity;
+                break;
+
+            case ConfirmationType.STANDARD_FOLLOWING_PRELIMINARY:
+                B2BAvailable = Math.Max(0, B2BAvailable - shippedQuantity);
+                B2BPrepared = Math.Max(0, B2BPrepared - shippedQuantity);
+                Psc = Math.Max(0, Psc - shippedQuantity);
+                break;
+
+            default:
+                B2BAvailable = Math.Max(0, B2BAvailable - shippedQuantity);
+                B2BPrepared = Math.Max(0, B2BPrepared - shippedQuantity);
+                break;
+        }
+
+        ModifiedUtc = nowUtc;
+
+        if (IsExtended)
+        {
+            CalculateB2CExtended();
+            UpdateB2CAvailable(CalculateB2CAvailable());
+        }
+
+        RaiseDomainEvent(new InternalHallmarkingShipped(Id, FulfilmentId, ItemCode, confirmationType.ToString(), shippedQuantity));
+    }
+
+    /// <summary>
+    /// Internal-hallmarking FINISHED-status transit completion - mirrors the upstream Reflex facade's
+    /// "transition from in-transit to available in target hallmark" step
+    /// (docs/events/inventory.InternalHallmarkingStatusChanged.md §3.5/§6): moves
+    /// <paramref name="quantity"/> out of <see cref="InTransit"/> and into <see cref="B2BAvailable"/> on
+    /// this (the <c>HallmarkTo</c>) record. Rejects outright rather than clamping when it would take
+    /// <see cref="InTransit"/> negative, per §6's "in-transit never decremented below zero" invariant.
+    /// </summary>
+    public void CompleteInternalHallmarkingTransit(int quantity, DateTime nowUtc)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(quantity);
+
+        if (quantity > InTransit)
+        {
+            throw new InvalidItemStockInventoryQtyException(Id, ItemCode, quantity, InTransit - quantity);
+        }
+
+        InTransit -= quantity;
+        B2BAvailable += quantity;
+        ModifiedUtc = nowUtc;
+
+        RaiseDomainEvent(new InternalHallmarkingTransitCompleted(Id, FulfilmentId, ItemCode, quantity));
     }
 }

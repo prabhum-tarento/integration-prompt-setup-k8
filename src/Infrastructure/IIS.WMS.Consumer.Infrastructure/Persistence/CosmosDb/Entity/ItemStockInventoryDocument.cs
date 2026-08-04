@@ -21,6 +21,7 @@ public class ItemStockInventoryDocument : ICosmosDocument
     public int? B2BAllocated { get; set; }
     public int? B2CPrepared { get; set; }
     public int? B2BPrepared { get; set; }
+    public int? B2CAvailableToSell { get; set; }
     public int? InternalHallmarkAllocated { get; set; }
     public int? InTransit { get; set; }
     public int? B2CThreshold { get; set; }

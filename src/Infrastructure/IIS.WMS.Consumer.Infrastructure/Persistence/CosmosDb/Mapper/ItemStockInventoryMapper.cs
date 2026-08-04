@@ -23,6 +23,7 @@ internal static class ItemStockInventoryMapper
         B2BAllocated = aggregate.B2BAllocated,
         B2CPrepared = aggregate.B2CPrepared,
         B2BPrepared = aggregate.B2BPrepared,
+        B2CAvailableToSell = aggregate.B2CAvailableToSell,
         InternalHallmarkAllocated = aggregate.InternalHallmarkAllocated,
         InTransit = aggregate.InTransit,
         B2CThreshold = aggregate.B2CThreshold,
@@ -63,7 +64,8 @@ internal static class ItemStockInventoryMapper
             DateTime.TryParse(
                 document.Timestamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var modifiedUtc)
                 ? modifiedUtc
-                : DateTime.UtcNow);
+                : DateTime.UtcNow,
+            document.B2CAvailableToSell);
 
         aggregate.ETag = document.ETag;
 

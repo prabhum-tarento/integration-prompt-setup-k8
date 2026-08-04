@@ -22,4 +22,10 @@ public sealed class InventoryPublishOptions
 
     /// <summary>Queue §3.9 order-tracking requests publish onto.</summary>
     public string OrderTrackingQueueName { get; init; } = default!;
+
+    /// <summary>Queue internal hallmarking's FINISHED status publishes its inventory-adjusted event onto (docs/events/inventory.InternalHallmarkingStatusChanged.md §3.5/§9).</summary>
+    public string InventoryAdjustedReflexQueueName { get; init; } = default!;
+
+    /// <summary>Queue §3.5 OMS B2C stock snapshots publish onto (docs/events/inventory.StockSyncSubmitted.md), old <c>NEXUS_B2CSTOCK_PRODUCER_QUEUE_NAME</c>.</summary>
+    public string B2CStockQueueName { get; init; } = default!;
 }

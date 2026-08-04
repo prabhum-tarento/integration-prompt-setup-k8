@@ -22,8 +22,12 @@ namespace IIS.WMS.Common.Messaging.ServiceBus;
 /// <see cref="DeserializePayload"/> helper using this class's own <typeparamref name="TMessage"/>
 /// generic parameter - fixed at compile time by the derived class's declaration, so there is nothing
 /// for a derived class to override. A derived class supplies only
-/// <see cref="ProcessMessageAsync(TMessage, ICorrelationContext, CancellationToken)"/>
-/// instead of registering a schema-keyed handler map. Uses <see cref="ServiceBusSessionProcessor"/> -
+/// <see cref="ProcessMessageAsync(TMessage, ICorrelationContext, IServiceProvider, CancellationToken)"/>
+/// instead of registering a schema-keyed handler map - note the <see cref="IServiceProvider"/> parameter
+/// is this method's own per-message scope (the same one <paramref name="correlationContext"/> was
+/// resolved from), so a derived class must resolve any further scoped services from it directly rather
+/// than opening a second <see cref="IServiceScopeFactory.CreateScope"/> scope, which would silently
+/// disconnect it from the <see cref="ICorrelationContext"/> that was <c>Set</c> for this message. Uses <see cref="ServiceBusSessionProcessor"/> -
 /// sessions guarantee in-order, single-active-consumer processing per aggregate key, which is what
 /// makes a derived handler's own concurrency-conflict retry loop (if any) a defensive backstop rather
 /// than the primary correctness mechanism.
@@ -96,7 +100,7 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
     private static TMessage DeserializePayload(JsonElement reflexSchema) =>
         reflexSchema.Deserialize<TMessage>() ?? throw new JsonException("Deserialized payload was null.");
 
-    protected abstract Task ProcessMessageAsync(TMessage message, ICorrelationContext correlationContext, CancellationToken cancellationToken);
+    protected abstract Task ProcessMessageAsync(TMessage message, ICorrelationContext correlationContext, IServiceProvider serviceProvider, CancellationToken cancellationToken);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -203,7 +207,7 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
         }
 
         var processingStopwatch = Stopwatch.StartNew();
-        var outcome = await RunProcessMessageAsync(payload, correlationContext, message, correlationId, cancellationToken);
+        var outcome = await RunProcessMessageAsync(payload, correlationContext, scope.ServiceProvider, message, correlationId, cancellationToken);
         var processingDuration = processingStopwatch.Elapsed;
 
         var durations = new ProcessingDurations(
@@ -327,11 +331,11 @@ public abstract class ServiceBusConsumerHostedService<TMessage> : BackgroundServ
     }
 
     private async Task<ServiceBusMessageOutcome> RunProcessMessageAsync(
-        TMessage payload, ICorrelationContext correlationContext, ServiceBusReceivedMessage message, string correlationId, CancellationToken cancellationToken)
+        TMessage payload, ICorrelationContext correlationContext, IServiceProvider serviceProvider, ServiceBusReceivedMessage message, string correlationId, CancellationToken cancellationToken)
     {
         try
         {
-            await ProcessMessageAsync(payload, correlationContext, cancellationToken);
+            await ProcessMessageAsync(payload, correlationContext, serviceProvider, cancellationToken);
             return ServiceBusMessageOutcome.Completed;
         }
         catch (ConcurrencyException ex)

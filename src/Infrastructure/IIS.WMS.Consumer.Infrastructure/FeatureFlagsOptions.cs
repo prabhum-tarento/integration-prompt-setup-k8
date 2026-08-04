@@ -28,4 +28,12 @@ public sealed class FeatureFlagsOptions
 
     /// <summary>Gates §3.8 Inventory Comparison Report snapshot publishing.</summary>
     public bool EnableSnapshotForIcr { get; init; }
+
+    /// <summary>
+    /// Gates §3.5 OMS B2C stock snapshot publishing (docs/events/inventory.StockSyncSubmitted.md) for the
+    /// BRZDC3PLFulfilmentId location specifically - old <c>ENABLE_SNAPSHOT_TOWARDS_OMS_BRZ3PL</c>. Every
+    /// other location always publishes (per the doc's "CAECCOM always publishes" note); this flag only
+    /// suppresses the BR-market case.
+    /// </summary>
+    public bool EnableSnapshotTowardsOmsBrz3Pl { get; init; }
 }

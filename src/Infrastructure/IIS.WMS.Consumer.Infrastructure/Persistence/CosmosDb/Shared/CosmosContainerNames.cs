@@ -27,6 +27,21 @@ public static class CosmosContainerNames
 
     public const string BulkInventoryImports = "BulkInventoryImports";
 
+    /// <summary>Write-only §5.3 stock-sync snapshot audit records (docs/events/inventory.StockSyncSubmitted.md).</summary>
+    public const string SnapshotStockSyncItem = "SnapshotStockSyncItem";
+
+    /// <summary>Write-only §5.4 stock-sync discrepancy audit records (docs/events/inventory.StockSyncSubmitted.md).</summary>
+    public const string ItemDiscrepencyDetail = "ItemDiscrepencyDetail";
+
+    /// <summary>
+    /// Single shared container for <see cref="Domain.Aggregates.ItemStockIntransit"/>
+    /// (docs/events/inventory.InternalHallmarkingStatusChanged.md §5.2) - unlike <see cref="ItemStockInventory"/>,
+    /// this aggregate's composite key doesn't lead with the fulfilment code
+    /// (<c>ItemCode:HallmarkCode:CountryOfOriginCode:OrderType:FulfilmentCode:Status</c>), so there is no
+    /// natural per-fulfilment-code container split here - one container, partitioned by the full composite key.
+    /// </summary>
+    public const string ItemStockIntransit = "ItemStockIntransit";
+
     /// <summary>Allow-listed fulfilment codes that split the ItemStockInventory container - each member name is the exact suffix appended to <see cref="ItemStockInventory"/> (e.g. <see cref="Edc"/> - "ItemStockInventoryEDC").</summary>
     public enum ItemStockInventorySuffix
     {

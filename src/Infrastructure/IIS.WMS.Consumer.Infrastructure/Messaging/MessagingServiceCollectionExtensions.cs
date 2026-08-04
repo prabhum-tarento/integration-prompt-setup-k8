@@ -1,6 +1,7 @@
 using Confluent.Kafka;
 using FluentValidation;
 using IIS.WMS.Common.Messaging.ServiceBus;
+using IIS.WMS.Consumer.Application.InternalHallmarkingStatusChanged;
 using IIS.WMS.Consumer.Application.InventoryEvents;
 using IIS.WMS.Consumer.Application.Messaging;
 using IIS.WMS.Consumer.Application.OrderTracking;
@@ -8,6 +9,10 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryAdjusted;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryAdjusted.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatusChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatusChanged.Handlers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
@@ -52,6 +57,15 @@ public static class MessagingServiceCollectionExtensions
 
     /// <summary>Keyed-service key for the non-session bulk-import queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
     public const string BulkInventoryImportServiceBusKey = "BulkInventoryImport";
+
+    /// <summary>Keyed-service key for the dedicated InventoryAdjusted queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string InventoryAdjustedServiceBusKey = "InventoryAdjusted";
+
+    /// <summary>Keyed-service key for the dedicated InternalHallmarkingStatusChanged queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string InternalHallmarkingStatusChangedServiceBusKey = "InternalHallmarkingStatusChanged";
+
+    /// <summary>Keyed-service key for the dedicated StockSyncSubmitted queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string StockSyncSubmittedServiceBusKey = "StockSyncSubmitted";
 
     /// <summary>Registers the Service Bus clients, all three hosted services, and their health checks.</summary>
     /// <param name="services">The service collection to register against.</param>
@@ -147,9 +161,17 @@ public static class MessagingServiceCollectionExtensions
         var functionsFilter = configuration.GetSection(KafkaConsumerOptions.SectionName).Get<KafkaConsumerOptions>()?.KafkaEventFunctions;
         var allowAll = (functionsFilter?.Length ?? 0) == 0;
 
+        services.Configure<InternalHallmarkingStatusChangedConsumerOptions>(
+            configuration.GetSection(InternalHallmarkingStatusChangedConsumerOptions.SectionName));
+
+        services.AddOptions<InternalHallmarkingStatusChangedConsumerOptions>()
+            .PostConfigure<IOptions<KafkaConsumerOptions>>(
+                (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
+
         RegisterInventoryEventsConsumer(services, functionsFilter, allowAll);
         RegisterInventoryStateChangedConsumer(services, functionsFilter, allowAll);
         RegisterBulkImportConsumer(services, functionsFilter, allowAll);
+        RegisterInternalHallmarkingStatusChangedConsumer(services, functionsFilter, allowAll);
 
         return services;
     }
@@ -180,7 +202,8 @@ public static class MessagingServiceCollectionExtensions
     private static void RegisterInventoryStateChangedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
     {
         if (!allowAll && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType)
-            && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
+            && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType)
+            && !IsFunctionEnabled(functionsFilter, KafkaEvents.StockSyncSubmittedEventType))
         {
             return;
         }
@@ -194,6 +217,11 @@ public static class MessagingServiceCollectionExtensions
         if (IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType))
         {
             healthChecks.Add((KafkaEvents.InventoryAdjustedEventType, "inventory-adjusted-consumer", "InventoryAdjusted Kafka consumer health"));
+        }
+
+        if (IsFunctionEnabled(functionsFilter, KafkaEvents.StockSyncSubmittedEventType))
+        {
+            healthChecks.Add((KafkaEvents.StockSyncSubmittedEventType, "stock-sync-submitted-consumer", "StockSyncSubmitted Kafka consumer health"));
         }
 
         AddKafkaConsumer<InventoryEventConsumerHostedService>(
@@ -211,6 +239,27 @@ public static class MessagingServiceCollectionExtensions
             AddKafkaConsumer<BulkInventoryImportConsumerHostedService>(
                 services,
                 (KafkaConsumerHostedServiceBase.DefaultEventType, "bulk-import-consumer", "BulkInventoryImport Kafka consumer health"));
+        }
+    }
+
+    /// <summary>
+    /// Registers the single-schema Avro consumer for <see cref="KafkaEvents.InternalHallmarkingStatusChangedEventType"/>
+    /// (docs/events/inventory.InternalHallmarkingStatusChanged.md), gated on its own
+    /// <see cref="KafkaEvents.InternalHallmarkingStatusChangedConsumerKey"/> allow-list entry - mirrors
+    /// <see cref="RegisterInventoryEventsConsumer"/>'s single-health-check-entry shape, not
+    /// <see cref="RegisterInventoryStateChangedConsumer"/>'s multi-event one, since this consumer only
+    /// ever registers <see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/>.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInternalHallmarkingStatusChangedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
+        if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.InternalHallmarkingStatusChangedConsumerKey))
+        {
+            AddKafkaConsumer<InternalHallmarkingStatusChangedConsumerHostedService>(
+                services,
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "internal-hallmarking-status-changed-consumer", "InternalHallmarkingStatusChanged Kafka consumer health"));
         }
     }
 
@@ -248,7 +297,10 @@ public static class MessagingServiceCollectionExtensions
         var allowAll = (functionsFilter?.Length ?? 0) == 0;
 
         RegisterInventoryEventsServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterInventoryAdjustedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
         RegisterBulkImportServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterInternalHallmarkingStatusChangedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterStockSyncSubmittedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
 
         return services;
     }
@@ -295,6 +347,135 @@ public static class MessagingServiceCollectionExtensions
         services.AddScoped<IOrderTrackingPublisher, OrderTrackingPublisher>();
 
         services.AddServiceBusQueueHealthCheck("service-bus", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>inventory-adjusted</c> queue consumer
+    /// (docs/events/inventory.InventoryAdjusted.md §9). Resolves its queue name from its own
+    /// <see cref="InventoryAdjustedServiceBusConsumerOptions.QueueName"/> - mirroring
+    /// <see cref="RegisterBulkImportServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup -
+    /// since this queue isn't the top-level <c>ServiceBus:QueueName</c> one.
+    /// <see cref="IInventoryAdjustedOrMovedPublisher"/>/<see cref="IDeltaTowardsOmsPublisher"/>/
+    /// <see cref="IInventoryComparisonReportPublisher"/> are already registered scoped by
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which always runs first in
+    /// <see cref="AddServiceBusConsumers"/> - not re-registered here.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:InventoryAdjusted</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInventoryAdjustedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, InventoryAdjustedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<InventoryAdjustedServiceBusConsumerOptions>(
+            configuration.GetSection(InventoryAdjustedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<InventoryAdjustedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(InventoryAdjustedServiceBusConsumerOptions.SectionName)
+            .Get<InventoryAdjustedServiceBusConsumerOptions>()?.QueueName
+            ?? new InventoryAdjustedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<InventoryAdjustedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<IInventoryAdjustedHandler, InventoryAdjustedHandler>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-inventory-adjusted", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>stock-sync-submitted</c> queue consumer
+    /// (docs/events/inventory.StockSyncSubmitted.md §9). Resolves its queue name from its own
+    /// <see cref="Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions.QueueName"/> -
+    /// mirroring <see cref="RegisterInventoryAdjustedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup -
+    /// since this queue isn't the top-level <c>ServiceBus:QueueName</c> one.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:StockSyncSubmitted</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterStockSyncSubmittedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, StockSyncSubmittedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions>(
+            configuration.GetSection(Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions.SectionName)
+            .Get<Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions>()?.QueueName
+            ?? new Events.StockSyncSubmitted.StockSyncSubmittedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<Events.StockSyncSubmitted.StockSyncSubmittedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<Events.StockSyncSubmitted.Handlers.IStockSyncSubmittedHandler, Events.StockSyncSubmitted.Handlers.StockSyncSubmittedHandler>();
+        services.AddScoped<Application.InventoryEvents.IStockSyncSubmittedOmsPublisher, Egress.StockSyncSubmittedOmsPublisher>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-stock-sync-submitted", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>internal-hallmarking-status-changed</c> queue consumer
+    /// (docs/events/inventory.InternalHallmarkingStatusChanged.md §9). Resolves its queue name from its
+    /// own <see cref="InternalHallmarkingStatusChangedServiceBusConsumerOptions.QueueName"/> - mirroring
+    /// <see cref="RegisterInventoryAdjustedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup - since
+    /// this queue isn't the top-level <c>ServiceBus:QueueName</c> one. <see cref="IOrderTrackingPublisher"/>
+    /// is already registered scoped by <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which
+    /// always runs first in <see cref="AddServiceBusConsumers"/> - not re-registered here.
+    /// <see cref="IInventoryAdjustedReflexPublisher"/> is this event's own, narrower FINISHED-path
+    /// publisher (a different queue than <see cref="IInventoryAdjustedOrMovedPublisher"/>'s SAP one), so
+    /// it's registered here rather than reused from anywhere else.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:InternalHallmarkingStatusChanged</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterInternalHallmarkingStatusChangedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, InternalHallmarkingStatusChangedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<InternalHallmarkingStatusChangedServiceBusConsumerOptions>(
+            configuration.GetSection(InternalHallmarkingStatusChangedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<InternalHallmarkingStatusChangedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(InternalHallmarkingStatusChangedServiceBusConsumerOptions.SectionName)
+            .Get<InternalHallmarkingStatusChangedServiceBusConsumerOptions>()?.QueueName
+            ?? new InternalHallmarkingStatusChangedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<InternalHallmarkingStatusChangedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<IInternalHallmarkingStatusChangedHandler, InternalHallmarkingStatusChangedHandler>();
+        services.AddScoped<IInternalHallmarkingStatusChangedService, InternalHallmarkingStatusChangedService>();
+        services.AddScoped<IInventoryAdjustedReflexPublisher, InventoryAdjustedReflexPublisher>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-internal-hallmarking-status-changed", serviceBusQueueName, "service-bus-consumer");
     }
 
     /// <param name="services">The service collection to register against.</param>

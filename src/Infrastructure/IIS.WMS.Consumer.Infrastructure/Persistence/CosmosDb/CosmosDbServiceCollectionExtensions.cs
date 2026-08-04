@@ -66,6 +66,10 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddScoped<ICountryRepository, CountryRepository>();
         services.AddScoped<IItemStockInventoryExtendedRepository, ItemStockInventoryExtendedRepository>();
         services.AddScoped<IMessageArchiveRepository, MessageArchiveRepository>();
+        services.AddScoped<IItemStockIntransitRepository, ItemStockIntransitRepository>();
+        services.AddScoped<ISnapshotStockSyncItemRepository, SnapshotStockSyncItemRepository>();
+        services.AddScoped<IItemDiscrepencyDetailRepository, ItemDiscrepencyDetailRepository>();
+        services.AddScoped<IItemRepository, ItemRepository>();
 
         // Bulk-import client: same account/database, but AllowBulkExecution = true and connection
         // settings tuned for throughput (Microsoft's documented bulk-executor guidance), so the

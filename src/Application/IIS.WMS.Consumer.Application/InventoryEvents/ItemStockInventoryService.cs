@@ -92,6 +92,87 @@ public sealed class ItemStockInventoryService(
         PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
     ];
 
+    /// <inheritdoc />
+    public async Task<ItemStockSyncApplyResult> ApplyStockSyncAsync(
+        string fulfilmentId, string itemCode, string countryOfOrigin, string hallmark,
+        int b2cAvl, int b2cPrepared, int? b2cAvailableToSell, CancellationToken cancellationToken = default)
+    {
+        var id = ItemStockInventory.BuildId(fulfilmentId, itemCode, hallmark, countryOfOrigin);
+
+        for (var attempt = 1; attempt <= MaxConcurrencyRetryAttempts; attempt++)
+        {
+            var aggregate = await repository.GetAsync(id, id, cancellationToken);
+            var wasCreated = aggregate is null;
+            var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
+
+            aggregate ??= ItemStockInventory.CreateDefault(fulfilmentId, itemCode, hallmark, countryOfOrigin, nowUtc);
+
+            var previousB2CAvailable = aggregate.B2CAvailable;
+
+            aggregate.ApplyStockSync(b2cAvl, b2cPrepared, b2cAvailableToSell, nowUtc);
+
+            try
+            {
+                if (wasCreated)
+                {
+                    await repository.CreateAsync(aggregate, cancellationToken);
+                }
+                else
+                {
+                    await repository.PatchAsync(
+                        aggregate.Id, aggregate.Category, aggregate.ETag!, BuildStockSyncPatch(aggregate), cancellationToken);
+                }
+
+                await domainEventDispatcher.DispatchAsync(aggregate.DomainEvents, cancellationToken);
+
+                logger.LogInformation(
+                    "Applied §3.2 stock sync to ItemStockInventory {Id}: B2CAVL={B2CAvl}, B2CPrepared={B2CPrepared}.",
+                    id, b2cAvl, b2cPrepared);
+
+                return new ItemStockSyncApplyResult
+                {
+                    PreviousB2CAvailable = previousB2CAvailable,
+                    NewB2CAvailable = aggregate.B2CAvailable,
+                    WasCreated = wasCreated,
+                };
+            }
+            catch (ConcurrencyException) when (attempt < MaxConcurrencyRetryAttempts && !wasCreated)
+            {
+                logger.LogWarning(
+                    "Concurrency conflict applying stock sync to {Id}, attempt {Attempt}/{MaxAttempts} - retrying.",
+                    id, attempt, MaxConcurrencyRetryAttempts);
+            }
+        }
+
+        throw new ConcurrencyException(id, "unknown");
+    }
+
+    /// <summary>
+    /// The exact field set §3.2/§5.1 (docs/events/inventory.StockSyncSubmitted.md) Sets on a stock
+    /// sync: <c>B2CAVL</c>/<c>B2CPrepared</c> always, <c>B2CAvailableToSell</c> only when this sync
+    /// reported it (BR-only state) - never a last-write-wins field omitted from the operation list,
+    /// but also never Set when the aggregate's value is <see langword="null"/> (nothing to overwrite).
+    /// Unlike every other patch builder on this service, these are <c>PatchOperation.Set</c>, not
+    /// <c>Increment</c> - the doc's stock-sync semantics are an authoritative overwrite of the
+    /// reported quantities, not a delta.
+    /// </summary>
+    private static List<PatchOperation> BuildStockSyncPatch(ItemStockInventory aggregate)
+    {
+        List<PatchOperation> operations =
+        [
+            PatchOperation.Set("/B2CAVL", aggregate.B2CAvailable),
+            PatchOperation.Set("/B2CPrepared", aggregate.B2CPrepared),
+            PatchOperation.Set("/Timestamp", aggregate.ModifiedUtc.ToString("O")),
+        ];
+
+        if (aggregate.B2CAvailableToSell is not null)
+        {
+            operations.Add(PatchOperation.Set("/B2CAvailableToSell", aggregate.B2CAvailableToSell));
+        }
+
+        return operations;
+    }
+
     /// <summary>
     /// Quantity fields read before <c>mutate</c> runs, so the patch builders below can emit an atomic
     /// <c>PatchOperation.Increment</c> delta (post minus pre) instead of the post-mutation absolute
