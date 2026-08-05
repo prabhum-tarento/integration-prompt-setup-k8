@@ -9,6 +9,10 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Egress;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.Validators;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.ConsolidatedOrderShipped;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.ConsolidatedOrderShipped.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.GoodsInTransitReceived;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.GoodsInTransitReceived.Handlers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryAdjusted;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryAdjusted.Handlers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatusChanged;
@@ -16,6 +20,8 @@ using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatus
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryStateChanged.Handlers;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.OrderStatusChanged;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.OrderStatusChanged.Handlers;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -66,6 +72,21 @@ public static class MessagingServiceCollectionExtensions
 
     /// <summary>Keyed-service key for the dedicated StockSyncSubmitted queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
     public const string StockSyncSubmittedServiceBusKey = "StockSyncSubmitted";
+
+    /// <summary>Keyed-service key for the dedicated StockOnHandUpdated queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string StockOnHandUpdatedServiceBusKey = "StockOnHandUpdated";
+
+    /// <summary>Keyed-service key for the dedicated OrderToInventoryAllocated queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string OrderToInventoryAllocatedServiceBusKey = "OrderToInventoryAllocated";
+
+    /// <summary>Keyed-service key for the dedicated OrderStatusChanged queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string OrderStatusChangedServiceBusKey = "OrderStatusChanged";
+
+    /// <summary>Keyed-service key for the dedicated GoodsInTransitReceived queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string GoodsInTransitReceivedServiceBusKey = "GoodsInTransitReceived";
+
+    /// <summary>Keyed-service key for the dedicated ConsolidatedOrderShipped queue consumer's <see cref="ServiceBus.ServiceBusHealthState"/>.</summary>
+    public const string ConsolidatedOrderShippedServiceBusKey = "ConsolidatedOrderShipped";
 
     /// <summary>Registers the Service Bus clients, all three hosted services, and their health checks.</summary>
     /// <param name="services">The service collection to register against.</param>
@@ -168,10 +189,34 @@ public static class MessagingServiceCollectionExtensions
             .PostConfigure<IOptions<KafkaConsumerOptions>>(
                 (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
 
+        services.Configure<OrderStatusChangedConsumerOptions>(
+            configuration.GetSection(OrderStatusChangedConsumerOptions.SectionName));
+
+        services.AddOptions<OrderStatusChangedConsumerOptions>()
+            .PostConfigure<IOptions<KafkaConsumerOptions>>(
+                (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
+
+        services.Configure<GoodsInTransitReceivedConsumerOptions>(
+            configuration.GetSection(GoodsInTransitReceivedConsumerOptions.SectionName));
+
+        services.AddOptions<GoodsInTransitReceivedConsumerOptions>()
+            .PostConfigure<IOptions<KafkaConsumerOptions>>(
+                (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
+
+        services.Configure<ConsolidatedOrderShippedConsumerOptions>(
+            configuration.GetSection(ConsolidatedOrderShippedConsumerOptions.SectionName));
+
+        services.AddOptions<ConsolidatedOrderShippedConsumerOptions>()
+            .PostConfigure<IOptions<KafkaConsumerOptions>>(
+                (eventOptions, kafkaOptions) => eventOptions.ApplyKafkaLevelDefaults(kafkaOptions.Value));
+
         RegisterInventoryEventsConsumer(services, functionsFilter, allowAll);
         RegisterInventoryStateChangedConsumer(services, functionsFilter, allowAll);
         RegisterBulkImportConsumer(services, functionsFilter, allowAll);
         RegisterInternalHallmarkingStatusChangedConsumer(services, functionsFilter, allowAll);
+        RegisterOrderStatusChangedConsumer(services, functionsFilter, allowAll);
+        RegisterGoodsInTransitReceivedConsumer(services, functionsFilter, allowAll);
+        RegisterConsolidatedOrderShippedConsumer(services, functionsFilter, allowAll);
 
         return services;
     }
@@ -203,7 +248,8 @@ public static class MessagingServiceCollectionExtensions
     {
         if (!allowAll && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryStateChangedEventType)
             && !IsFunctionEnabled(functionsFilter, KafkaEvents.InventoryAdjustedEventType)
-            && !IsFunctionEnabled(functionsFilter, KafkaEvents.StockSyncSubmittedEventType))
+            && !IsFunctionEnabled(functionsFilter, KafkaEvents.StockSyncSubmittedEventType)
+            && !IsFunctionEnabled(functionsFilter, KafkaEvents.StockOnHandUpdatedEventType))
         {
             return;
         }
@@ -222,6 +268,11 @@ public static class MessagingServiceCollectionExtensions
         if (IsFunctionEnabled(functionsFilter, KafkaEvents.StockSyncSubmittedEventType))
         {
             healthChecks.Add((KafkaEvents.StockSyncSubmittedEventType, "stock-sync-submitted-consumer", "StockSyncSubmitted Kafka consumer health"));
+        }
+
+        if (IsFunctionEnabled(functionsFilter, KafkaEvents.StockOnHandUpdatedEventType))
+        {
+            healthChecks.Add((KafkaEvents.StockOnHandUpdatedEventType, "stock-on-hand-updated-consumer", "StockOnHandUpdated Kafka consumer health"));
         }
 
         AddKafkaConsumer<InventoryEventConsumerHostedService>(
@@ -263,6 +314,66 @@ public static class MessagingServiceCollectionExtensions
         }
     }
 
+    /// <summary>
+    /// Registers the single-schema Avro consumer for <see cref="KafkaEvents.OrderStatusChangedEventType"/>
+    /// (docs/events/b2b.sales.OrderStatusChanged.md), gated on its own
+    /// <see cref="KafkaEvents.OrderStatusChangedConsumerKey"/> allow-list entry - mirrors
+    /// <see cref="RegisterInternalHallmarkingStatusChangedConsumer"/>'s single-health-check-entry shape,
+    /// since this consumer only ever registers <see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/>.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterOrderStatusChangedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
+        if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.OrderStatusChangedConsumerKey))
+        {
+            AddKafkaConsumer<OrderStatusChangedConsumerHostedService>(
+                services,
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "order-status-changed-consumer", "OrderStatusChanged Kafka consumer health"));
+        }
+    }
+
+    /// <summary>
+    /// Registers the single-schema Avro consumer for <see cref="KafkaEvents.GoodsInTransitReceivedEventType"/>
+    /// (docs/events/b2b.purchase.GoodsInTransitReceived.md), gated on its own
+    /// <see cref="KafkaEvents.GoodsInTransitReceivedConsumerKey"/> allow-list entry - mirrors
+    /// <see cref="RegisterOrderStatusChangedConsumer"/>'s single-health-check-entry shape, since this
+    /// consumer only ever registers <see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/>.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterGoodsInTransitReceivedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
+        if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.GoodsInTransitReceivedConsumerKey))
+        {
+            AddKafkaConsumer<GoodsInTransitReceivedConsumerHostedService>(
+                services,
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "goods-in-transit-received-consumer", "GoodsInTransitReceived Kafka consumer health"));
+        }
+    }
+
+    /// <summary>
+    /// Registers the single-schema Avro consumer for <see cref="KafkaEvents.ConsolidatedOrderShippedEventType"/>
+    /// (docs/events/b2b.sales.ConsolidatedOrderShipped.md), gated on its own
+    /// <see cref="KafkaEvents.ConsolidatedOrderShippedConsumerKey"/> allow-list entry - mirrors
+    /// <see cref="RegisterGoodsInTransitReceivedConsumer"/>'s single-health-check-entry shape, since this
+    /// consumer only ever registers <see cref="KafkaConsumerHostedServiceBase.DefaultEventType"/>.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="functionsFilter">The configured Kafka consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterConsolidatedOrderShippedConsumer(IServiceCollection services, string[]? functionsFilter, bool allowAll)
+    {
+        if (allowAll || IsFunctionEnabled(functionsFilter, KafkaEvents.ConsolidatedOrderShippedConsumerKey))
+        {
+            AddKafkaConsumer<ConsolidatedOrderShippedConsumerHostedService>(
+                services,
+                (KafkaConsumerHostedServiceBase.DefaultEventType, "consolidated-order-shipped-consumer", "ConsolidatedOrderShipped Kafka consumer health"));
+        }
+    }
+
     /// <summary>Registers the Service Bus consuming infrastructure, both hosted services, and their queue health checks.</summary>
     /// <param name="services">The service collection to register against.</param>
     /// <param name="configuration">Application configuration, read for the <c>ServiceBus</c> section.</param>
@@ -301,6 +412,11 @@ public static class MessagingServiceCollectionExtensions
         RegisterBulkImportServiceBusConsumer(services, configuration, functionsFilter, allowAll);
         RegisterInternalHallmarkingStatusChangedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
         RegisterStockSyncSubmittedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterStockOnHandUpdatedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterOrderToInventoryAllocatedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterOrderStatusChangedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterGoodsInTransitReceivedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
+        RegisterConsolidatedOrderShippedServiceBusConsumer(services, configuration, functionsFilter, allowAll);
 
         return services;
     }
@@ -433,6 +549,89 @@ public static class MessagingServiceCollectionExtensions
     }
 
     /// <summary>
+    /// Registers the dedicated <c>stock-on-hand-updated</c> queue consumer
+    /// (docs/events/inventory.StockOnHandUpdated.md §9). Resolves its queue name from its own
+    /// <see cref="Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions.QueueName"/> -
+    /// mirroring <see cref="RegisterStockSyncSubmittedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup -
+    /// since this queue isn't the top-level <c>ServiceBus:QueueName</c> one.
+    /// <see cref="IInventoryComparisonReportPublisher"/> is already registered scoped by
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which always runs first in
+    /// <see cref="AddServiceBusConsumers"/> - not re-registered here.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:StockOnHandUpdated</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterStockOnHandUpdatedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, StockOnHandUpdatedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions>(
+            configuration.GetSection(Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions.SectionName)
+            .Get<Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions>()?.QueueName
+            ?? new Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<Events.StockOnHandUpdated.StockOnHandUpdatedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<Events.StockOnHandUpdated.Handlers.IStockOnHandUpdatedHandler, Events.StockOnHandUpdated.Handlers.StockOnHandUpdatedHandler>();
+        services.AddScoped<Application.InventoryEvents.IStockOnHandUpdatedOmsPublisher, Egress.StockOnHandUpdatedOmsPublisher>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-stock-on-hand-updated", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>order-to-inventory-allocated</c> queue consumer
+    /// (docs/events/inventory.OrderToInventoryAllocated.md §9). Resolves its queue name from its own
+    /// <see cref="Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions.QueueName"/> -
+    /// mirroring <see cref="RegisterStockSyncSubmittedServiceBusConsumer"/>'s pattern. <see cref="IDeltaTowardsOmsPublisher"/>,
+    /// <see cref="IInventoryComparisonReportPublisher"/>, and <see cref="IOrderTrackingPublisher"/> are already
+    /// registered scoped by <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which always runs first -
+    /// not re-registered here.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:OrderToInventoryAllocated</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterOrderToInventoryAllocatedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, OrderToInventoryAllocatedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions>(
+            configuration.GetSection(Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions.SectionName)
+            .Get<Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions>()?.QueueName
+            ?? new Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<Events.OrderToInventoryAllocated.OrderToInventoryAllocatedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<Events.OrderToInventoryAllocated.Handlers.IOrderToInventoryAllocatedHandler, Events.OrderToInventoryAllocated.Handlers.OrderToInventoryAllocatedHandler>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-order-to-inventory-allocated", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
     /// Registers the dedicated <c>internal-hallmarking-status-changed</c> queue consumer
     /// (docs/events/inventory.InternalHallmarkingStatusChanged.md §9). Resolves its queue name from its
     /// own <see cref="InternalHallmarkingStatusChangedServiceBusConsumerOptions.QueueName"/> - mirroring
@@ -476,6 +675,133 @@ public static class MessagingServiceCollectionExtensions
         services.AddScoped<IInventoryAdjustedReflexPublisher, InventoryAdjustedReflexPublisher>();
 
         services.AddServiceBusQueueHealthCheck("service-bus-internal-hallmarking-status-changed", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>order-status-changed</c> queue consumer
+    /// (docs/events/b2b.sales.OrderStatusChanged.md §9). Resolves its queue name from its own
+    /// <see cref="OrderStatusChangedServiceBusConsumerOptions.QueueName"/> - mirroring
+    /// <see cref="RegisterInternalHallmarkingStatusChangedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup - since
+    /// this queue isn't the top-level <c>ServiceBus:QueueName</c> one. <see cref="IOrderTrackingPublisher"/>
+    /// is already registered scoped by <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which
+    /// always runs first in <see cref="AddServiceBusConsumers"/> - not re-registered here. This event has
+    /// no Application-layer service/repository (no Cosmos DB access), so the only registration beyond
+    /// the hosted service itself is its own handler.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:OrderStatusChanged</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterOrderStatusChangedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, OrderStatusChangedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<OrderStatusChangedServiceBusConsumerOptions>(
+            configuration.GetSection(OrderStatusChangedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<OrderStatusChangedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(OrderStatusChangedServiceBusConsumerOptions.SectionName)
+            .Get<OrderStatusChangedServiceBusConsumerOptions>()?.QueueName
+            ?? new OrderStatusChangedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<OrderStatusChangedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<IOrderStatusChangedHandler, OrderStatusChangedHandler>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-order-status-changed", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>goods-in-transit-received</c> queue consumer
+    /// (docs/events/b2b.purchase.GoodsInTransitReceived.md §9). Resolves its queue name from its own
+    /// <see cref="GoodsInTransitReceivedServiceBusConsumerOptions.QueueName"/> - mirroring
+    /// <see cref="RegisterOrderStatusChangedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup - since
+    /// this queue isn't the top-level <c>ServiceBus:QueueName</c> one. <see cref="IDeltaTowardsOmsPublisher"/>
+    /// and <see cref="IOrderTrackingPublisher"/> are already registered scoped by
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which always runs first in
+    /// <see cref="AddServiceBusConsumers"/> - not re-registered here.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:GoodsInTransitReceived</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterGoodsInTransitReceivedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, GoodsInTransitReceivedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<GoodsInTransitReceivedServiceBusConsumerOptions>(
+            configuration.GetSection(GoodsInTransitReceivedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<GoodsInTransitReceivedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(GoodsInTransitReceivedServiceBusConsumerOptions.SectionName)
+            .Get<GoodsInTransitReceivedServiceBusConsumerOptions>()?.QueueName
+            ?? new GoodsInTransitReceivedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<GoodsInTransitReceivedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<IGoodsInTransitReceivedHandler, GoodsInTransitReceivedHandler>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-goods-in-transit-received", serviceBusQueueName, "service-bus-consumer");
+    }
+
+    /// <summary>
+    /// Registers the dedicated <c>consolidated-order-shipped</c> queue consumer
+    /// (docs/events/b2b.sales.ConsolidatedOrderShipped.md §9). Resolves its queue name from its own
+    /// <see cref="ConsolidatedOrderShippedServiceBusConsumerOptions.QueueName"/> - mirroring
+    /// <see cref="RegisterGoodsInTransitReceivedServiceBusConsumer"/>'s pattern, not
+    /// <see cref="RegisterInventoryEventsServiceBusConsumer"/>'s top-level-<c>QueueName</c> lookup - since
+    /// this queue isn't the top-level <c>ServiceBus:QueueName</c> one. <see cref="IDeltaTowardsOmsPublisher"/>,
+    /// <see cref="IInventoryComparisonReportPublisher"/>, and <see cref="IOrderTrackingPublisher"/> are already
+    /// registered scoped by <see cref="RegisterInventoryEventsServiceBusConsumer"/>, which always runs first
+    /// in <see cref="AddServiceBusConsumers"/> - not re-registered here.
+    /// </summary>
+    /// <param name="services">The service collection to register against.</param>
+    /// <param name="configuration">Application configuration, read for the <c>ServiceBus:ConsolidatedOrderShipped</c> section.</param>
+    /// <param name="functionsFilter">The configured Service Bus consumer allow-list, or <see langword="null"/>/empty for "no filter."</param>
+    /// <param name="allowAll">Whether <paramref name="functionsFilter"/> is empty (every consumer allowed).</param>
+    private static void RegisterConsolidatedOrderShippedServiceBusConsumer(
+        IServiceCollection services, IConfiguration configuration, string[]? functionsFilter, bool allowAll)
+    {
+        if (!allowAll && !IsFunctionEnabled(functionsFilter, ConsolidatedOrderShippedServiceBusKey))
+        {
+            return;
+        }
+
+        services.Configure<ConsolidatedOrderShippedServiceBusConsumerOptions>(
+            configuration.GetSection(ConsolidatedOrderShippedServiceBusConsumerOptions.SectionName));
+
+        services.AddOptions<ConsolidatedOrderShippedServiceBusConsumerOptions>()
+            .PostConfigure<IOptions<ServiceBusConsumerOptions>>(
+                (eventOptions, serviceBusOptions) => eventOptions.ApplyServiceBusLevelDefaults(serviceBusOptions.Value));
+
+        var serviceBusQueueName = configuration.GetSection(ConsolidatedOrderShippedServiceBusConsumerOptions.SectionName)
+            .Get<ConsolidatedOrderShippedServiceBusConsumerOptions>()?.QueueName
+            ?? new ConsolidatedOrderShippedServiceBusConsumerOptions().QueueName;
+
+        services.AddHostedService(sp => ActivatorUtilities.CreateInstance<ConsolidatedOrderShippedServiceBusHostedService>(
+            sp, serviceBusQueueName));
+
+        services.AddScoped<IConsolidatedOrderShippedHandler, ConsolidatedOrderShippedHandler>();
+
+        services.AddServiceBusQueueHealthCheck("service-bus-consolidated-order-shipped", serviceBusQueueName, "service-bus-consumer");
     }
 
     /// <param name="services">The service collection to register against.</param>

@@ -2,9 +2,11 @@ using Azure.Identity;
 using IIS.WMS.Consumer.Application.BulkInventoryImport;
 using IIS.WMS.Consumer.Application.Common;
 using IIS.WMS.Consumer.Application.InventoryEvents;
+using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Caching;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Repository;
 using IIS.WMS.Consumer.Infrastructure.Persistence.CosmosDb.Shared;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -70,6 +72,11 @@ public static class CosmosDbServiceCollectionExtensions
         services.AddScoped<ISnapshotStockSyncItemRepository, SnapshotStockSyncItemRepository>();
         services.AddScoped<IItemDiscrepencyDetailRepository, ItemDiscrepencyDetailRepository>();
         services.AddScoped<IItemRepository, ItemRepository>();
+        services.AddScoped<IItemStockWarehouseInventoryRepository, ItemStockWarehouseInventoryRepository>();
+        services.AddScoped<IOrderTrackingRepository, OrderTrackingRepository>();
+        services.AddScoped<EcomCustomerRepository>();
+        services.AddScoped<IEcomCustomerRepository, CachedEcomCustomerRepository>();
+        services.AddMemoryCache();
 
         // Bulk-import client: same account/database, but AllowBulkExecution = true and connection
         // settings tuned for throughput (Microsoft's documented bulk-executor guidance), so the

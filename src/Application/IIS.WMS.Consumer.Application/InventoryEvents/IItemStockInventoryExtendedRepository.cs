@@ -1,5 +1,6 @@
 using IIS.WMS.Consumer.Domain.Aggregates;
 using IIS.WMS.Consumer.Domain.Enums;
+using Microsoft.Azure.Cosmos;
 
 namespace IIS.WMS.Consumer.Application.InventoryEvents;
 
@@ -28,4 +29,19 @@ public interface IItemStockInventoryExtendedRepository
     /// <summary>Replaces an existing item, guarded by an ETag match. Throws <see cref="IIS.WMS.Common.Exceptions.ConcurrencyException"/> on a mismatch.</summary>
     Task<ItemStockInventoryExtended> ReplaceAsync(
         ItemStockInventoryExtended entity, string expectedETag, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Applies a partial update via the Cosmos Patch API, guarded by an ETag match - use this instead of
+    /// <see cref="ReplaceAsync"/> whenever only a known subset of fields changed, since this container is
+    /// shared with other applications and a full-document replace would silently overwrite fields they
+    /// concurrently wrote. At most 10 operations per call.
+    /// </summary>
+    /// <param name="id">Record id.</param>
+    /// <param name="category">Cosmos partition key (same value as <paramref name="id"/> - see <see cref="ItemStockInventoryExtended.Id"/>).</param>
+    /// <param name="expectedETag">ETag the stored item is expected to still have.</param>
+    /// <param name="operations">Patch operations to apply (Add/Set/Replace/Remove/Increment).</param>
+    /// <param name="cancellationToken">Token to cancel the write.</param>
+    Task<ItemStockInventoryExtended> PatchAsync(
+        string id, string category, string expectedETag,
+        IReadOnlyList<PatchOperation> operations, CancellationToken cancellationToken = default);
 }

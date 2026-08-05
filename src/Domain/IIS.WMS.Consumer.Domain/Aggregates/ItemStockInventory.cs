@@ -467,6 +467,48 @@ public sealed class ItemStockInventory : AggregateRoot
     }
 
     /// <summary>
+    /// Order-to-inventory allocation: increments B2BAllocated and/or B2CAllocated based on the order
+    /// domain (docs/events/inventory.OrderToInventoryAllocated.md §3.2/§3.3). For B2C domain, checks
+    /// source sufficiency and raises <see cref="InsufficientItemStockException"/> if allocation would
+    /// exceed available stock (non-extended: B2CAVL, extended: B2COrg). For B2C domain with non-zero
+    /// B2B allocation, increments <see cref="B2BUsedShare"/> to track borrowed B2B stock. B2C extension
+    /// recalculation is delegated to the caller (Service layer) via
+    /// <see cref="IItemStockInventoryExtensionCalculationService"/>, mirroring how this aggregate
+    /// does not manage extension lifecycle on its own.
+    /// </summary>
+    public void AllocateOrder(OrderDomain orderDomain, int allocatedFromB2BBucketQuantity, int allocatedFromB2CBucketQuantity, DateTime nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(nameof(orderDomain));
+
+        if (allocatedFromB2BBucketQuantity > 0)
+        {
+            B2BAllocated = Math.Max(0, B2BAllocated + allocatedFromB2BBucketQuantity);
+        }
+
+        if (allocatedFromB2CBucketQuantity > 0)
+        {
+            var availableB2C = IsExtended ? B2COriginal : B2CAvailable;
+
+            if (B2CAllocated + allocatedFromB2CBucketQuantity > availableB2C)
+            {
+                throw new InsufficientItemStockException(Id, ItemCode, allocatedFromB2CBucketQuantity, B2CAllocated);
+            }
+
+            B2CAllocated += allocatedFromB2CBucketQuantity;
+
+            if (orderDomain == OrderDomain.B2C && allocatedFromB2BBucketQuantity > 0)
+            {
+                B2BUsedShare += allocatedFromB2BBucketQuantity;
+            }
+        }
+
+        ModifiedUtc = nowUtc;
+
+        RaiseDomainEvent(new OrderAllocatedToInventory(
+            Id, FulfilmentId, ItemCode, orderDomain, allocatedFromB2BBucketQuantity, allocatedFromB2CBucketQuantity));
+    }
+
+    /// <summary>
     /// Internal-hallmarking PICKED-status consolidated-shipment logic - mirrors the upstream Reflex
     /// facade's <c>consolidatedOrderShippedEventHandlerAsync</c> exactly, applying the §3.3 three-branch
     /// table by <paramref name="confirmationType"/>: <c>PRELIMINARY</c> only accrues <see cref="Psc"/>

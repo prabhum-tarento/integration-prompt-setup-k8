@@ -33,7 +33,7 @@ DeltaTowardsOmsEventRequest {
   Reason:           ReasonCode.ADJUSTMENT
   AdjustmentDate:   supplied by caller (UTC)
   ProductUnits:     "N/A"
-  Market:           CountryCode (see country-code-lookup.md)
+  Market:           resolved market code (see country-code-lookup.md)
   QuantityDetails:  [{ CountryOfOrigin, Hallmarking, Quantity = signed delta,
                        State = (AVAILABLE, PICKABLE), ReasonTexts: [] }]
 }
@@ -71,7 +71,10 @@ With the historical fixes preserved:
 
 ## Failure handling
 
-- Country lookup fails → fall back to `CountryCode.UNKNOWN`.
+- Fulfilment unit lookup misses → fall back to `"UNKNOWN"` market.
+- Resolved market has no active `CountryMaster` record in `CountryRepository`
+  → log a warning, publish anyway (validation only, never blocks the send —
+  see [country-code-lookup.md](country-code-lookup.md)).
 - `IsB2CChanged` false → skip publishing (conserve queue traffic).
 - Feature flag disabled → skip with an information log.
 - Publish transient failure → retried by the `service-bus-publish` pipeline;

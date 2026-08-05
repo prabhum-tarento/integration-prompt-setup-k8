@@ -78,4 +78,58 @@ public static class CosmosContainerNames
 
         return ItemStockInventoryExtended + suffix.ToString().ToUpperInvariant();
     }
+
+    /// <summary>Base name for the per-fulfilment-code ItemStockWarehouseInventory containers (docs/events/b2b.sales.ConsolidatedOrderShipped.md §5.3) - split per fulfilment code like <see cref="ItemStockInventory"/> (Q3).</summary>
+    public const string ItemStockWarehouseInventory = "ItemStockWarehouseInventory";
+
+    /// <summary>Base name for the per-fulfilment-code OrderTracking containers (docs/events/b2b.sales.ConsolidatedOrderShipped.md §5.4) - split per fulfilment code like <see cref="ItemStockInventory"/> (Q3).</summary>
+    public const string OrderTracking = "OrderTracking";
+
+    /// <summary>Allow-listed fulfilment codes that split the ItemStockWarehouseInventory container - mirrors <see cref="ItemStockInventorySuffix"/>.</summary>
+    public enum ItemStockWarehouseInventorySuffix
+    {
+        Edc,
+        Tdc,
+        Adc,
+        CaEcom,
+        Brz3Pl,
+    }
+
+    /// <summary>Allow-listed fulfilment codes that split the OrderTracking container - mirrors <see cref="ItemStockInventorySuffix"/>.</summary>
+    public enum OrderTrackingSuffix
+    {
+        Edc,
+        Tdc,
+        Adc,
+        CaEcom,
+        Brz3Pl,
+    }
+
+    /// <summary>Resolves the per-fulfilment-code container name for ItemStockWarehouseInventory (e.g. "ItemStockWarehouseInventoryEDC"), or throws if <paramref name="fulfilmentCode"/> isn't one of the allow-listed <see cref="ItemStockWarehouseInventorySuffix"/> values.</summary>
+    public static string GetItemStockWarehouseInventoryContainerName(string fulfilmentCode)
+    {
+        if (!Enum.TryParse<ItemStockWarehouseInventorySuffix>(fulfilmentCode, ignoreCase: true, out var suffix))
+        {
+            throw new ArgumentException(
+                $"Unrecognized fulfilment code '{fulfilmentCode}' for ItemStockWarehouseInventory container resolution. " +
+                $"Allowed codes: {string.Join(", ", Enum.GetNames<ItemStockWarehouseInventorySuffix>())}.",
+                nameof(fulfilmentCode));
+        }
+
+        return ItemStockWarehouseInventory + suffix.ToString().ToUpperInvariant();
+    }
+
+    /// <summary>Resolves the per-fulfilment-code container name for OrderTracking (e.g. "OrderTrackingEDC"), or throws if <paramref name="fulfilmentCode"/> isn't one of the allow-listed <see cref="OrderTrackingSuffix"/> values.</summary>
+    public static string GetOrderTrackingContainerName(string fulfilmentCode)
+    {
+        if (!Enum.TryParse<OrderTrackingSuffix>(fulfilmentCode, ignoreCase: true, out var suffix))
+        {
+            throw new ArgumentException(
+                $"Unrecognized fulfilment code '{fulfilmentCode}' for OrderTracking container resolution. " +
+                $"Allowed codes: {string.Join(", ", Enum.GetNames<OrderTrackingSuffix>())}.",
+                nameof(fulfilmentCode));
+        }
+
+        return OrderTracking + suffix.ToString().ToUpperInvariant();
+    }
 }

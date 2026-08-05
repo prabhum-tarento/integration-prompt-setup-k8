@@ -33,4 +33,20 @@ public sealed class InventoryEventConsumerOptions : ConsumerOptions
     /// consumer relays - see <see cref="InventoryEventConsumerHostedService"/>.
     /// </summary>
     public string? StockSyncSubmittedServiceBusQueueName { get; set; }
+
+    /// <summary>
+    /// Service Bus queue for <c>OrderToInventoryAllocated</c> events specifically - unset (the default) means
+    /// this event type also shares <see cref="ConsumerOptions.ServiceBusQueueName"/>. Set this only if
+    /// <c>OrderToInventoryAllocated</c> needs to land on a different queue than the other event types this
+    /// consumer relays - see <see cref="InventoryEventConsumerHostedService"/>.
+    /// </summary>
+    public string? OrderToInventoryAllocatedServiceBusQueueName { get; set; }
+
+    /// <summary>
+    /// Service Bus queue for <c>StockOnHandUpdated</c> events specifically - unset (the default) means
+    /// this event type also shares <see cref="ConsumerOptions.ServiceBusQueueName"/>. Set this only if
+    /// <c>StockOnHandUpdated</c> needs to land on a different queue than the other event types this
+    /// consumer relays - see <see cref="InventoryEventConsumerHostedService"/>.
+    /// </summary>
+    public string? StockOnHandUpdatedServiceBusQueueName { get; set; }
 }

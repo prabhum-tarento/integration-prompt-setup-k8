@@ -7,8 +7,11 @@ using IIS.WMS.Consumer.Infrastructure;
 using IIS.WMS.Consumer.Infrastructure.Messaging;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.BulkInventoryImport.AvroContracts;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.ConsolidatedOrderShipped;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.GoodsInTransitReceived;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InternalHallmarkingStatusChanged;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Events.InventoryEvents;
+using IIS.WMS.Consumer.Infrastructure.Messaging.Events.StockOnHandUpdated;
 using IIS.WMS.Consumer.Infrastructure.Messaging.OrderArchiving;
 using IIS.WMS.Consumer.Infrastructure.Messaging.Shared.Kafka;
 using IIS.WMS.Consumer.Infrastructure.Resilience;
@@ -84,6 +87,9 @@ public class MessagingServiceCollectionExtensionsTests
             ["Kafka:InventoryStateChanged:ConsumerGroup"] = "iis-wms-consumer",
             ["Kafka:BulkInventoryImport:ConsumerGroup"] = "iis-wms-consumer",
             ["Kafka:InternalHallmarkingStatusChanged:ConsumerGroup"] = "iis-wms-consumer",
+            ["Kafka:OrderStatusChanged:ConsumerGroup"] = "iis-wms-consumer",
+            ["Kafka:GoodsInTransitReceived:ConsumerGroup"] = "iis-wms-consumer",
+            ["Kafka:ConsolidatedOrderShipped:ConsumerGroup"] = "iis-wms-consumer",
         };
 
         if (kafkaEventFunctions is not null)
@@ -189,15 +195,20 @@ public class MessagingServiceCollectionExtensionsTests
         Assert.Contains(hostedServices, hs => hs is BulkInventoryImportConsumerHostedService);
         Assert.Contains(hostedServices, hs => hs is InternalHallmarkingStatusChangedConsumerHostedService);
         Assert.Contains(hostedServices, hs => hs is InternalHallmarkingStatusChangedServiceBusHostedService);
+        Assert.Contains(hostedServices, hs => hs is GoodsInTransitReceivedConsumerHostedService);
+        Assert.Contains(hostedServices, hs => hs is GoodsInTransitReceivedServiceBusHostedService);
+        Assert.Contains(hostedServices, hs => hs is StockOnHandUpdatedServiceBusHostedService);
 
         var healthCheckNames = HealthCheckNames(provider);
         Assert.Equal(
             new[]
             {
                 "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import", "service-bus-internal-hallmarking-status-changed",
-                "service-bus-stock-sync-submitted",
+                "service-bus-stock-sync-submitted", "service-bus-stock-on-hand-updated", "service-bus-order-to-inventory-allocated",
+                "service-bus-order-status-changed", "service-bus-goods-in-transit-received", "service-bus-consolidated-order-shipped",
                 "kafka-consumer", "inventory-state-changed-consumer", "inventory-adjusted-consumer", "stock-sync-submitted-consumer",
-                "bulk-import-consumer", "internal-hallmarking-status-changed-consumer",
+                "stock-on-hand-updated-consumer", "bulk-import-consumer", "internal-hallmarking-status-changed-consumer",
+                "order-status-changed-consumer", "goods-in-transit-received-consumer", "consolidated-order-shipped-consumer",
             },
             healthCheckNames);
     }
@@ -219,9 +230,30 @@ public class MessagingServiceCollectionExtensionsTests
             new[]
             {
                 "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import",
-                "service-bus-internal-hallmarking-status-changed", "service-bus-stock-sync-submitted", "kafka-consumer",
+                "service-bus-internal-hallmarking-status-changed", "service-bus-stock-sync-submitted",
+                "service-bus-stock-on-hand-updated", "service-bus-order-to-inventory-allocated", "service-bus-order-status-changed",
+                "service-bus-goods-in-transit-received", "service-bus-consolidated-order-shipped", "kafka-consumer",
             },
             healthCheckNames);
+    }
+
+    [Fact(DisplayName = "A Kafka:KafkaEventFunctions filter naming only StockOnHandUpdated registers InventoryStateChanged's hosted service with just that health check")]
+    public void AddMessaging_FilterNamesOnlyStockOnHandUpdated_RegistersOnlyThatHealthCheck()
+    {
+        var services = BuildServices();
+        services.AddMessaging(BuildConfiguration([KafkaEvents.StockOnHandUpdatedEventType]));
+
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
+        Assert.Contains(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(BulkInventoryImportConsumerHostedService));
+
+        var provider = services.BuildServiceProvider();
+        var healthCheckNames = HealthCheckNames(provider);
+
+        Assert.Contains("stock-on-hand-updated-consumer", healthCheckNames);
+        Assert.DoesNotContain("inventory-state-changed-consumer", healthCheckNames);
+        Assert.DoesNotContain("inventory-adjusted-consumer", healthCheckNames);
+        Assert.DoesNotContain("stock-sync-submitted-consumer", healthCheckNames);
     }
 
     [Fact(DisplayName = "A Kafka:KafkaEventFunctions filter naming only InventoryAdjusted registers InventoryStateChanged's hosted service with just the adjusted health check")]
@@ -241,6 +273,32 @@ public class MessagingServiceCollectionExtensionsTests
         Assert.DoesNotContain("inventory-state-changed-consumer", healthCheckNames);
     }
 
+    [Fact(DisplayName = "A Kafka:KafkaEventFunctions filter naming only GoodsInTransitReceived registers just that Kafka consumer, and its Service Bus consumer/health check register regardless")]
+    public void AddMessaging_FilterNamesOnlyGoodsInTransitReceived_RegistersOnlyThatConsumerAndItsServiceBusPair()
+    {
+        var services = BuildServices();
+        services.AddMessaging(BuildConfiguration([KafkaEvents.GoodsInTransitReceivedConsumerKey]));
+
+        Assert.Contains(services, d => d.ServiceType == typeof(GoodsInTransitReceivedConsumerHostedService));
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(KafkaConsumerHostedService));
+        Assert.DoesNotContain(services, d => d.ServiceType == typeof(InventoryEventConsumerHostedService));
+
+        var provider = services.BuildServiceProvider();
+        var hostedServices = provider.GetServices<IHostedService>().ToArray();
+        Assert.Contains(hostedServices, hs => hs is GoodsInTransitReceivedConsumerHostedService);
+        Assert.Contains(hostedServices, hs => hs is GoodsInTransitReceivedServiceBusHostedService);
+
+        var healthCheckNames = HealthCheckNames(provider);
+        Assert.Contains("goods-in-transit-received-consumer", healthCheckNames);
+        Assert.Contains("service-bus-goods-in-transit-received", healthCheckNames);
+        Assert.DoesNotContain("order-status-changed-consumer", healthCheckNames);
+
+        // Service-Bus-before-Kafka ordering preserved even for this newest pair.
+        Assert.True(
+            Array.IndexOf(healthCheckNames.ToArray(), "service-bus-goods-in-transit-received")
+                < Array.IndexOf(healthCheckNames.ToArray(), "goods-in-transit-received-consumer"));
+    }
+
     [Fact(DisplayName = "A Kafka:KafkaEventFunctions filter naming none of the three consumers registers no Kafka consumers or their health checks")]
     public void AddMessaging_FilterExcludesEveryConsumer_RegistersNoKafkaConsumers()
     {
@@ -257,6 +315,8 @@ public class MessagingServiceCollectionExtensionsTests
             {
                 "service-bus", "service-bus-inventory-adjusted", "service-bus-bulk-import",
                 "service-bus-internal-hallmarking-status-changed", "service-bus-stock-sync-submitted",
+                "service-bus-stock-on-hand-updated", "service-bus-order-to-inventory-allocated", "service-bus-order-status-changed",
+                "service-bus-goods-in-transit-received", "service-bus-consolidated-order-shipped",
             },
             HealthCheckNames(provider));
 

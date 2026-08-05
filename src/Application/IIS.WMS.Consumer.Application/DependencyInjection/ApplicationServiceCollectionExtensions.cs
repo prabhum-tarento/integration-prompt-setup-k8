@@ -29,8 +29,12 @@ public static class ApplicationServiceCollectionExtensions
         services.AddScoped<IItemStockInventoryExtensionCalculationService, ItemStockInventoryExtensionCalculationService>();
         services.AddScoped<IItemStockInventoryExtensionService, ItemStockInventoryExtensionService>();
         services.AddScoped<IItemStockInventorySegmentationService, ItemStockInventorySegmentationService>();
+        services.AddScoped<IOrderToInventoryAllocatedService, OrderToInventoryAllocatedService>();
         services.AddScoped<IItemStockInventoryExtendedSegmentationService, ItemStockInventoryExtendedSegmentationService>();
+        services.AddScoped<IGoodsInTransitReceivedService, GoodsInTransitReceivedService>();
         services.AddScoped<IBulkInventoryImportService, BulkInventoryImportService>();
+        services.AddScoped<IConsolidatedOrderShippedService, ConsolidatedOrderShippedService>();
+        services.AddScoped<IItemStockWarehouseInventoryService, ItemStockWarehouseInventoryService>();
 
         return services;
     }

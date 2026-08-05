@@ -80,7 +80,11 @@ directly — it goes through `IItemStockInventoryService` → the Cosmos reposit
 - **`ItemLevelSegmentationRepository`** / **`FulfilmentLevelSegmentationRepository`**
   — segmentation rules (Cosmos, read-only here).
 - **`ItemStockInventoryExtendedRepository`** — non-standard state tracking (Cosmos).
-- **`CountryRepository`** — country/market mapping (Cosmos, read-only).
+- **`FulfilmentUnitRepository`** — resolves the §3.7 OMS-delta `Market` from a
+  fulfilment/location id (Cosmos, read-only).
+- **`CountryRepository`** — validates a resolved market code against
+  `CountryMaster` master data and logs a warning if missing/inactive; does not
+  change the resolved `Market` (Cosmos, read-only).
 - **`MessageArchiveRepository`** — snapshot archival (Cosmos + optional Blob).
 - **Cached `ServiceBusSender`** — outbound Nexus / order-tracking publishing.
 - **AutoMapper** — DTO mapping and transformation.
@@ -102,7 +106,8 @@ directly — it goes through `IItemStockInventoryService` → the Cosmos reposit
 3. Negative quantities represent deductions; normalized per
    [inventory-formulas](shared/inventory-formulas.md).
 4. Fulfilment location IDs map to known centers (TDC, EDC, ADC, CAECOM).
-5. Country codes resolve from `CountryRepository` or fall back to `UNKNOWN`
+5. Country codes resolve from `FulfilmentUnitRepository` or fall back to
+   `UNKNOWN`, then are validated (not re-resolved) against `CountryRepository`
    (see [country-code-lookup](shared/country-code-lookup.md)).
 6. Inventory state transitions follow a predefined state machine (AVAILABLE,
    IN_TRANSIT, DAMAGED, QUARANTINE, etc.).
@@ -478,16 +483,21 @@ QuantityDetails  : [ { CountryOfOrigin, Hallmarking, Quantity = result.DeltaTowa
 ```
 
 **Publishing**:
-1. Resolve `CountryCode` from `CountryRepository` by FulfilmentId; fallback to
-   `CountryCode.UNKNOWN` on miss/parse failure
+1. Resolve `Market` from `FulfilmentUnitRepository.GetByFulfilmentIdAsync`
+   (`FulfilmentUnit.CountryCode`); fallback to `"UNKNOWN"` on miss
    ([country-code-lookup.md](shared/country-code-lookup.md)).
-2. Build `DeltaTowardsOmsEventRequest` with the deterministic `ReferenceId`, the
+2. If a market was resolved, validate it against `CountryRepository.GetByCodeAsync`
+   and log a warning if the `CountryMaster` record is missing or inactive — an
+   observability check only, it never changes the resolved `Market` or blocks
+   publishing.
+3. Build `DeltaTowardsOmsEventRequest` with the deterministic `ReferenceId`, the
    calculated signed delta, and `State/Status = (AVAILABLE, PICKABLE)` for OMS.
-3. Wrap in `NexusProducerRequest` (type `Inventory_B2CInventoryAdjusted`).
-4. Publish to `nexus-producer` via the cached `ServiceBusSender`.
+4. Wrap in `NexusProducerRequest` (type `Inventory_B2CInventoryAdjusted`).
+5. Publish to `nexus-producer` via the cached `ServiceBusSender`.
 
 **Failure Handling**:
-- Country lookup fails → fallback to `CountryCode.UNKNOWN`.
+- Fulfilment unit lookup misses → fallback to `"UNKNOWN"` market.
+- Resolved market has no active `CountryMaster` record → log warning, publish anyway.
 - B2C not changed → skip publishing (conserve queue traffic).
 - Feature flag disabled → skip with an information log.
 
@@ -784,11 +794,10 @@ downstream publishes). Outcome mapping per §8.
 **Application-level errors** (logged, not returned to a caller):
 | Error | Scenario | Handling |
 |---|---|---|
-| MissingItemStockInventoryException | inventory not found | log, skip line (returns null) |
-| InvalidItemStockInventoryQtyException | quantity would go negative | log, cap at 0 |
-| InvalidDataException | invalid event type/state | log, skip operation |
-| InvalidExtendedItemStockInventoryQtyException | extended underflow | log, skip update |
-| CountryCode.UNKNOWN | country lookup miss | fallback UNKNOWN |
+| aggregate is null | inventory record not found for the id | log warning, skip line's mutation |
+| `InsufficientItemStockException` | pick/unpick would take a quantity below zero and no B2C-extension fallback applies | log warning, skip mutation (Completed, not DeadLettered) |
+| `ItemStockShareExhaustedException` | B2C extension borrow would also take `B2BUsedShare` negative | log warning, skip mutation (Completed, not DeadLettered) |
+| market unresolved | fulfilment unit lookup miss | fallback `"UNKNOWN"` |
 
 ---
 
@@ -881,10 +890,14 @@ carry business data only.
 > The previous version listed the outbound Nexus / order-tracking sends as
 > `TODO`/commented-out and `[CURRENTLY DISABLED]`, and described "no idempotency
 > / last-write-wins" and "no distributed transactions" as gaps. All are now
-> resolved by design: downstream sends go through the cached `ServiceBusSender`
-> (§9), and redelivery/concurrency are handled by deterministic Id + ETag Patch
-> + the §2 re-read/reapply loop (§5.6) — this is the fix for the duplicate-entry
-> / doubled-quantity problem.
+> resolved: downstream sends go through the cached `ServiceBusSender` (§9), and
+> redelivery/concurrency are handled by deterministic Id + ETag Patch + the §2
+> re-read/reapply loop (§5.6) — this is the fix for the duplicate-entry /
+> doubled-quantity problem. Order tracking (§3.9) specifically is a real
+> publish onto the `order-tracking` queue via `IOrderTrackingPublisher` — not a
+> log-only stub — and is covered by dedicated unit tests for both the handler's
+> request-building and the publisher's queue-routing/serialization/best-effort
+> exception-swallowing behavior.
 
 ---
 
