@@ -1,106 +1,395 @@
-# iis-wms-integrations — root instructions
+# IIS-WMS Integrations
 
-## Project context
+## Project Overview
 
-This service is an inventory/WMS integration platform. It consumes Kafka
-inventory events, republishes them onto Azure Service Bus for durable
-processing, persists state in Azure Cosmos DB, and exposes a REST API for
-downstream consumers. It runs on AKS. See
-[docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)
-for the end-to-end data flow.
+This repository implements the Inventory Information System (IIS) integration platform.
 
-## Required reading
+### Responsibilities
 
-Read these documents before generating or reviewing code. Each owns a
-distinct concern — do not restate one file's content in another. This
-assumes tool access to read files (Claude Code has it by default); if
-you're ever operating without file-read access, say explicitly that these
-docs couldn't be consulted rather than proceeding as if you'd read them.
+- Consume inventory events from Kafka
+- Process business workflows
+- Persist data in Azure Cosmos DB
+- Publish events to Azure Service Bus
+- Expose ASP.NET Core REST APIs
+- Deploy to Azure Kubernetes Service (AKS)
 
-| # | Document | Owns |
-|---|---|---|
-| 1 | [docs/ai/engineering-standards.instructions.md](docs/ai/engineering-standards.instructions.md) | Baseline tech stack, versions, cross-cutting standards (logging, security, coverage). Wins on any version/number conflict. |
-| 2 | [docs/ai/dotnet-architecture-good-practices.instructions.md](docs/ai/dotnet-architecture-good-practices.instructions.md) | Clean Architecture layering, DDD, SOLID (canonical definitions), test naming convention. |
-| 3 | [docs/ai/csharp.instructions.md](docs/ai/csharp.instructions.md) | C# language idioms and formatting only. |
-| 4 | [docs/ai/oop-design-patterns.instructions.md](docs/ai/oop-design-patterns.instructions.md) | GoF pattern selection. Defers to #2 for SOLID text and to #3 for doc-comment style. |
-| 5 | [docs/ai/aspnet-rest-apis.instructions.md](docs/ai/aspnet-rest-apis.instructions.md) | Web API layer: routing, versioning, validation, exception middleware wiring. |
-| 6 | [docs/ai/cosmos-db.instructions.md](docs/ai/cosmos-db.instructions.md) | Cosmos DB data access, concurrency, repository pattern. |
-| 7 | [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md) | Kafka, Service Bus, Blob storage, Polly, correlation IDs, async/parallelism, test infrastructure. |
-| 8 | [docs/ai/kubernetes-deployment-best-practices.instructions.md](docs/ai/kubernetes-deployment-best-practices.instructions.md) | AKS deployment, health probes, autoscaling, secrets. |
-| 9 | [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md) | When and how to create Claude Code Skills (`.claude/skills/`) for this repo's recurring workflows. **Claude Code-only** — not part of the sync mandate below, since Copilot has no Skills equivalent. |
+---
 
-## Precedence when documents disagree
+# Purpose
 
-1. **More specific beats more general.** A rule about Cosmos DB in
-   `cosmos-db.instructions.md` wins over a general data-access remark
-   elsewhere.
-2. **`engineering-standards.instructions.md` wins on any version, threshold,
-   or numeric conflict** (target framework, coverage %, TLS version, etc.).
-3. **`dotnet-architecture-good-practices.instructions.md` is the sole source
-   of truth for SOLID definitions and test naming** — other files reference
-   it instead of restating it.
-4. If a conflict doesn't fit the above and isn't resolved by this file, stop
-   and ask rather than guessing which rule wins. **Running non-interactively
-   with no one to ask?** Don't guess and don't skip the work silently either
-   — implement the unambiguous parts, leave the conflicting part with a
-   `// TODO(ai): unresolved precedence conflict — <the two rules and why>`
-   marker (or the equivalent for the file type), and call it out plainly in
-   your summary of the change so a human resolves it on review.
+This file is a lightweight bootstrap for Claude Code.
 
-## If a referenced document is missing or unreadable
+**Do not load every instruction document by default.**
 
-Stop and report it. Do not proceed on assumptions about its contents, and do
-not silently skip it.
+Instead:
 
-## Working rules
+1. Understand the user's request.
+2. Determine which technologies are affected.
+3. Load only the relevant instruction documents.
+4. Implement the smallest correct solution.
 
-- Follow the documented architecture. Do not change public APIs without
-  explaining why.
-- Never introduce a new third-party library or NuGet package without
-  approval — propose it and explain the tradeoff first, then wait for an
-  explicit yes. Silence is not approval: if no one responds (e.g. a
-  non-interactive run), don't add the dependency — implement against what's
-  already named across these docs (`Confluent.Kafka`,
-  `Azure.Messaging.ServiceBus`, `Microsoft.Azure.Cosmos`, `Polly.Core`,
-  `FluentValidation`, `Serilog`, `xUnit`, and their transitive framework
-  dependencies) — plus `MediatR`, used specifically for domain-event
-  dispatch per
-  [oop-design-patterns.instructions.md](docs/ai/oop-design-patterns.instructions.md).
-  Those are already approved by being specified here, so using them isn't
-  "introducing" anything new.
-- Prefer xUnit for tests (see
-  [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)
-  for unit vs. integration test setup).
-- Never commit secrets, connection strings, or keys. Local development uses
-  user-secrets or the emulator; every other environment sources connection
-  strings from Azure Key Vault, delivered as a Kubernetes Secret — not
-  Managed Identity / Workload Identity (a deliberate, explicitly-directed
-  standards change; see
-  [cosmos-db.instructions.md](docs/ai/cosmos-db.instructions.md) §1/§14 and
-  [engineering-standards.instructions.md](docs/ai/engineering-standards.instructions.md) §6).
-- Build and run the affected test suite before considering a change done.
-  If you can't run it (no test project yet, missing tooling), say so
-  explicitly rather than reporting success.
-- **Strictly validate every implementation against current Microsoft best
-  practices, and pick the optimized approach over the first one that just
-  works.** Before treating a change as done, cross-check it against the
-  relevant official Microsoft Learn / SDK guidance for the APIs touched
-  (ASP.NET Core, C#/.NET, Azure SDKs) — "it compiles and the tests pass" is
-  not sufficient on its own. Where more than one correct approach exists,
-  prefer the more efficient/idiomatic one (e.g. avoid sync-over-async,
-  avoid unnecessary allocations or abstraction layers, avoid a superseded
-  API when a current one exists) over whichever was simplest to write. If
-  the Microsoft-recommended pattern conflicts with a rule in one of the
-  numbered docs above, the numbered doc wins (see Precedence) — call out
-  the conflict in your summary instead of silently picking one. If you are
-  not confident an approach matches current guidance, say so explicitly
-  rather than asserting that it does.
+This significantly reduces token usage while preserving engineering standards.
 
-## Keeping instructions in sync
+---
 
-This file and [.github/copilot-instructions.md](.github/copilot-instructions.md)
-must stay consistent — they steer different tools against the same codebase.
-If you change a rule in one, mirror it in the other in the same change.
-**Exception:** [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md)
-(#9 above) is Claude Code-specific and intentionally not referenced from
-copilot-instructions.md — its absence there is not a sync gap.
+# Instruction Loading Strategy
+
+## Always Load (Code Changes Only)
+
+For implementation, refactoring, or code review tasks always load:
+
+- [Engineering Standards](docs/ai/engineering-standards.instructions.md)
+
+This file defines:
+
+- Target Framework
+- Approved package versions
+- Security standards
+- Logging standards
+- Code quality expectations
+- Cross-cutting engineering practices
+
+For documentation-only, Git, Markdown, or repository navigation tasks, this document does **not** need to be loaded unless explicitly required.
+
+---
+
+# Load Additional Instructions Only When Needed
+
+| Task                                             | Instruction File                                                                                                             |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| C# implementation                                | [docs/ai/csharp.instructions.md](docs/ai/csharp.instructions.md)                                                             |
+| Clean Architecture / DDD / SOLID                 | [docs/ai/dotnet-architecture-good-practices.instructions.md](docs/ai/dotnet-architecture-good-practices.instructions.md)     |
+| Design Patterns                                  | [docs/ai/oop-design-patterns.instructions.md](docs/ai/oop-design-patterns.instructions.md)                                   |
+| ASP.NET Core / REST APIs                         | [docs/ai/aspnet-rest-apis.instructions.md](docs/ai/aspnet-rest-apis.instructions.md)                                         |
+| Cosmos DB                                        | [docs/ai/cosmos-db.instructions.md](docs/ai/cosmos-db.instructions.md)                                                       |
+| Kafka / Azure Service Bus / Blob Storage / Polly | [docs/ai/integration-resiliency.instructions.md](docs/ai/integration-resiliency.instructions.md)                             |
+| Kubernetes / AKS                                 | [docs/ai/kubernetes-deployment-best-practices.instructions.md](docs/ai/kubernetes-deployment-best-practices.instructions.md) |
+| Claude Skills                                    | [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md)                                       |
+
+Never load unrelated instruction files.
+
+---
+
+# Task Routing Examples
+
+## Rename Variable
+
+Load:
+
+- Engineering Standards
+- C#
+
+---
+
+## Implement Cosmos Repository
+
+Load:
+
+- Engineering Standards
+- C#
+- Architecture
+- Cosmos DB
+
+---
+
+## Build REST Endpoint
+
+Load:
+
+- Engineering Standards
+- C#
+- ASP.NET Core
+
+---
+
+## Modify Kafka Consumer
+
+Load:
+
+- Engineering Standards
+- Integration Resiliency
+
+---
+
+## Kubernetes Deployment
+
+Load:
+
+- Engineering Standards
+- Kubernetes
+
+---
+
+## Architecture Review
+
+Load:
+
+- Engineering Standards
+- Architecture
+- Design Patterns
+
+---
+
+## Documentation Update
+
+No instruction files are required unless repository standards are directly affected.
+
+---
+
+# Missing Instruction Files
+
+If a required instruction file:
+
+- cannot be found,
+- cannot be opened,
+- or cannot be read,
+
+then:
+
+- Stop.
+- Report the missing file.
+- Do not assume its contents.
+- Do not silently continue.
+
+---
+
+# Rule Precedence
+
+When multiple instruction documents apply:
+
+## 1. Specific beats General
+
+Technology-specific guidance overrides generic guidance.
+
+Example:
+
+Cosmos DB guidance overrides generic repository guidance.
+
+---
+
+## 2. Engineering Standards
+
+`engineering-standards.instructions.md`
+
+is authoritative for:
+
+- Framework versions
+- Package versions
+- Security
+- Logging
+- Coverage thresholds
+- Cross-cutting standards
+
+---
+
+## 3. Architecture
+
+`dotnet-architecture-good-practices.instructions.md`
+
+owns:
+
+- Clean Architecture
+- SOLID
+- DDD
+- Test naming conventions
+
+---
+
+## 4. Unresolved Conflicts
+
+If guidance conflicts:
+
+Interactive session:
+
+- Ask for clarification.
+
+Non-interactive execution:
+
+- Implement only the non-conflicting portions.
+- Add:
+
+```text
+TODO(ai): unresolved instruction conflict
+```
+
+Document the conflict in the final summary.
+
+---
+
+# Development Principles
+
+Always:
+
+- Follow existing architecture.
+- Keep changes as small as possible.
+- Preserve backward compatibility.
+- Respect existing repository conventions.
+- Prefer readability.
+- Prefer maintainability.
+- Prefer composition over inheritance.
+- Use dependency injection.
+- Use asynchronous APIs where appropriate.
+
+Avoid:
+
+- Unnecessary abstraction
+- Premature optimization
+- Large unrelated refactoring
+- Hidden behavioral changes
+
+---
+
+# Approved Dependencies
+
+Do not introduce new NuGet packages without approval.
+
+Use only packages already approved by the repository.
+
+If a new dependency would improve the solution:
+
+- Explain why.
+- Describe trade-offs.
+- Wait for approval.
+
+---
+
+# Security
+
+Never:
+
+- Commit secrets
+- Commit API keys
+- Commit certificates
+- Commit passwords
+- Commit connection strings
+
+Always use the project's approved secret management strategy.
+
+---
+
+# Testing
+
+For implementation changes:
+
+- Build affected projects.
+- Execute relevant tests whenever possible.
+
+If tests cannot be executed:
+
+Clearly explain:
+
+- Why
+- Which tests were skipped
+
+Never report tests as passing unless they were actually executed.
+
+---
+
+# Microsoft Guidance
+
+Validate against Microsoft guidance only when changing:
+
+- ASP.NET Core
+- Azure SDKs
+- Cosmos DB
+- Azure Services
+- Authentication
+- Performance-sensitive code
+- Security-sensitive code
+- Framework usage
+
+Skip unnecessary validation for:
+
+- Comments
+- Documentation
+- Markdown
+- Formatting
+- Variable renames
+- Minor refactoring
+
+---
+
+# Performance
+
+Prefer:
+
+- Async APIs
+- CancellationToken
+- ConfigureAwait only where repository standards require it
+- Efficient LINQ
+- Batch operations
+- Streaming over buffering
+- Minimal allocations
+
+Avoid:
+
+- Sync-over-async
+- Blocking calls
+- Duplicate database queries
+- Multiple enumerations
+- Unnecessary object creation
+
+---
+
+# AI Workflow
+
+For every task:
+
+1. Understand the request.
+2. Determine affected technologies.
+3. Load only required instruction documents.
+4. Follow repository standards.
+5. Implement the smallest correct solution.
+6. Explain significant architectural decisions.
+7. Avoid inventing repository conventions.
+
+---
+
+# Claude Skills
+
+For recurring workflows prefer Claude Skills instead of embedding detailed instructions in prompts.
+
+Examples:
+
+- Cosmos Investigation
+- Incident Investigation
+- Kafka Troubleshooting
+- Azure Service Bus Review
+- REST API Review
+- Architecture Review
+- Pull Request Review
+- Test Generation
+- Root Cause Analysis
+
+Refer to:
+
+- [docs/ai/skills-generation.instructions.md](docs/ai/skills-generation.instructions.md)
+
+---
+
+# Response Guidelines
+
+Responses should:
+
+- Be concise.
+- Avoid repeating repository instructions.
+- Explain trade-offs only when relevant.
+- Clearly state assumptions.
+- Report limitations honestly.
+- Distinguish facts from assumptions.
+
+---
+
+# Optimization Goal
+
+This repository is optimized for Claude Code.
+
+Minimize context usage by:
+
+- Loading only required instruction files.
+- Avoiding unnecessary reasoning.
+- Avoiding duplicate instruction loading.
+- Reusing Claude Skills for repetitive workflows.
+- Keeping responses focused on the requested task.
+
+Quality should never be sacrificed for brevity.
